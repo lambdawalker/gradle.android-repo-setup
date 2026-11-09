@@ -1,1 +1,1 @@
-rootProject.name = "gradle.python.android-repo-setup"
+rootProject.name = "gradle.android-repo-setup"

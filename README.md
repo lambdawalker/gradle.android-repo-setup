@@ -2,13 +2,29 @@
 
 These convention plugins complement [android-repo-setup](https://github.com/lambdawalker/python.android-repo-setup). Gradle builds and publishes the Android artifacts. The Python CLI continues to manage release reservations, verification against remote repositories, and documentation generation.
 
-## Try it in an Android library
+## Use a published release
+
+After version 0.1.0 is available on the Gradle Plugin Portal, add the following
+to the root `build.gradle.kts` plugins block:
+
+```kotlin
+plugins {
+    id("com.apexfission.android-repo-setup.root") version "0.1.0"
+    id("com.apexfission.android-repo-setup") version "0.1.0" apply false
+}
+```
+
+Apply the library plugin in each publishable Android module as shown below.
+Keep `gradlePluginPortal()`, `mavenCentral()`, and `google()` available in
+the consumer's plugin repositories.
+
+## Try it from a source checkout
 
 Check out this repository alongside the Android project and add the included build to the project's `settings.gradle.kts`:
 
 ```kotlin
 pluginManagement {
-    includeBuild("../gradle.python.android-repo-setup")
+    includeBuild("../gradle.android-repo-setup")
     repositories {
         google()
         mavenCentral()
@@ -34,7 +50,7 @@ The library plugin configures the release AAR, sources and documentation jars, r
 
 ## JitPack
 
-Make the plugin checkout available to the tagged build, for example as a pinned Git submodule referenced by `includeBuild`. Configure the JitPack install command for the selected module, for example:
+Use a published plugin version or make the pinned source checkout available to the tagged build through `includeBuild`. Configure the JitPack install command for the selected module, for example:
 
 ```yaml
 install:
@@ -46,3 +62,26 @@ When JitPack sets `JITPACK=true`, the plugin reads `VERSION` and validates the c
 ## Development
 
 Use JDK 21 and run `./gradlew check` (`gradlew.bat check` on Windows). The wrapper uses Gradle 9.6.0. Demo Common is the reference for publication behavior. Validate an Android project's release tasks in that project after applying the plugins.
+
+
+## Publish to the Gradle Plugin Portal
+
+1. Sign in to the [Gradle Plugin Portal](https://plugins.gradle.org/) and
+   generate a publishing API key. Make sure your Portal account can publish
+   both plugin IDs. Gradle may request a DNS TXT record to verify ownership
+   of `apexfission.com` during the first submission.
+2. In this repository, create a GitHub environment named
+   `gradle-plugin-portal`. Add environment secrets `GRADLE_PUBLISH_KEY` and
+   `GRADLE_PUBLISH_SECRET`. Restrict deployments to `main`.
+3. Merge the release changes, confirm **Check Gradle plugins** passes, and run
+   **Publish Gradle plugins** from `main`. The workflow publishes the version
+   declared in `build.gradle.kts`. Confirm both plugin IDs are available on
+   the Portal before migrating consumers.
+4. For later releases, bump the version in `build.gradle.kts` before dispatch.
+   If a submission is pending or its result is unclear, check the Portal
+   before retrying the same version.
+
+To check and build the publication locally with JDK 21, run
+`./gradlew check publishToMavenLocal`. To run the Portal validation without
+uploading, set the Portal credentials and run `./gradlew publishPlugins --validate-only`.
+The Portal may review the first submission before it becomes available.
