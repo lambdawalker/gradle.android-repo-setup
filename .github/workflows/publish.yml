@@ -1,0 +1,40 @@
+name: Publish Gradle plugins
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gradle-plugin-portal-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'lambdawalker/gradle.android-repo-setup' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: gradle-plugin-portal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+      - name: Check plugins
+        run: ./gradlew check --no-daemon
+      - name: Submit to the Gradle Plugin Portal
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+        run: |
+          : "${GRADLE_PUBLISH_KEY:?Configure the Gradle Plugin Portal API key}"
+          : "${GRADLE_PUBLISH_SECRET:?Configure the Gradle Plugin Portal API secret}"
+          ./gradlew publishPlugins --validate-only --no-daemon
+          ./gradlew publishPlugins --no-daemon
