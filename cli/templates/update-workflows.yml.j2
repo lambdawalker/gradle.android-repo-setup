@@ -1,0 +1,50 @@
+name: Update GitHub workflows
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Validated tooling tag (vX.Y.Z)
+        required: true
+        default: '<<@ tooling_ref @>>'
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install validated tooling
+        env:
+          TOOLING_VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$TOOLING_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then exit 1; fi
+          python -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@$TOOLING_VERSION"
+          python -c 'import os,yaml,pathlib; p=pathlib.Path(".project/setup/config.yaml"); c=yaml.safe_load(p.read_text()); c["tooling_ref"]=os.environ["TOOLING_VERSION"]; p.write_text(yaml.safe_dump(c,sort_keys=False))'
+      - run: android-repo-setup workflows --overwrite
+      - name: Create review patch
+        run: |
+          git add .project/setup/config.yaml .github/workflows .project/setup/workflow-generation.json
+          git diff --cached --binary > workflow-update.patch
+      - uses: actions/upload-artifact@v6
+        with:
+          name: workflow-update
+          path: workflow-update.patch
+      - name: Open update pull request when credential is configured
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_UPDATE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          UPDATE_BRANCH: tooling/workflows-${{ github.run_id }}
+        run: |
+          if [ -z "$GH_TOKEN" ] || git diff --cached --quiet; then exit 0; fi
+          gh auth setup-git
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git checkout -b "$UPDATE_BRANCH"
+          git commit -m 'Update generated GitHub workflows'
+          git push origin "$UPDATE_BRANCH"
+          gh pr create --base main --head "$UPDATE_BRANCH" --title 'Update generated GitHub workflows' --body 'Generated with the selected validated tooling release. Review the workflow diff before merging.'

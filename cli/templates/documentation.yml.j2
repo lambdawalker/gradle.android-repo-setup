@@ -1,0 +1,71 @@
+name: Documentation
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['SUB - Finalize <<@ workflows.title @>> release', 'Publish']
+    types: [completed]
+permissions:
+  contents: read
+concurrency:
+  group: documentation-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+          fetch-depth: 0
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - run: android-repo-setup publishing_config check
+      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - run: android-repo-setup module_release verify
+      - run: android-repo-setup build_docs
+      - run: cd docs/screenshots && sha256sum -c images.sha256
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: sites/dist
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - id: current
+        env:
+          BUILT_SHA: ${{ needs.build.outputs.source }}
+        run: |
+          latest=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$latest" = "$BUILT_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Main advanced; skip stale build. A newer run or manual dispatch will deploy.'
+          fi
+      - uses: actions/deploy-pages@v5
+        id: deployment
+        if: steps.current.outputs.deploy == 'true'

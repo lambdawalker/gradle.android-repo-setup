@@ -1,0 +1,198 @@
+name: SUB - Shared library publication
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        type: string
+        required: false
+        default: maven-central
+      module:
+        description: 'Gradle library module selected by the dedicated caller'
+        type: string
+        required: true
+      version:
+        description: 'Optional X.Y.Z. Blank: reuse unchanged module version, otherwise next patch.'
+        required: false
+        default: ''
+        type: string
+
+      allow_pending_jitpack:
+        description: 'Bypass older pending JitPack attempts (requires an explicit newer version)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  configuration:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      environment: ${{ steps.repository.outputs.environment }}
+      publisher: ${{ steps.repository.outputs.publisher }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - run: android-repo-setup publishing_config check
+      - id: repository
+        env:
+          RELEASE_REPOSITORY: ${{ inputs.repository }}
+        run: android-repo-setup publishing_config resolve
+
+  jitpack:
+    needs: configuration
+    if: needs.configuration.outputs.publisher == 'jitpack'
+    uses: ./.github/workflows/publish-jitpack.yml
+    with:
+      environment: ${{ needs.configuration.outputs.environment }}
+      module: ${{ inputs.module }}
+      version: ${{ inputs.version }}
+      allow_pending_jitpack: ${{ inputs.allow_pending_jitpack }}
+
+  publish:
+    needs: configuration
+    if: github.ref == 'refs/heads/main' && needs.configuration.outputs.publisher != 'jitpack'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    environment: ${{ needs.configuration.outputs.environment }}
+    env:
+      RELEASE_REPOSITORY: ${{ inputs.repository }}
+      RELEASE_PUBLISHER: ${{ needs.configuration.outputs.publisher }}
+    # Shared with automatic/manual finalization; the delay never holds this lock.
+    concurrency:
+      group: <<@ workflows.module @>>-release
+      cancel-in-progress: false
+    outputs:
+      skip: ${{ steps.release.outputs.skip }}
+      version: ${{ steps.release.outputs.version }}
+      source: ${{ steps.release.outputs.source }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - name: Configure release identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Check required settings before reserving a version
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+        run: android-repo-setup publishing_config preflight
+      - name: Choose release version
+        id: release
+        env:
+          RELEASE_MODULE: ${{ inputs.module }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: android-repo-setup module_release prepare --module "$RELEASE_MODULE" --version "$REQUESTED_VERSION"
+      - name: Check out immutable artifact source
+        if: steps.release.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: git checkout --detach "$SOURCE_SHA"
+      - uses: actions/setup-java@v5
+        if: steps.release.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@v5
+        if: steps.release.outputs.skip != 'true'
+        with:
+          cache-disabled: true
+      - name: Test and validate complete unsigned publication locally
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_MODULE: ${{ inputs.module }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: |
+          env -u RELEASE_REPOSITORY -u MAVEN_REPOSITORY_URL -u MAVEN_REPOSITORY_USERNAME -u MAVEN_REPOSITORY_PASSWORD android-repo-setup publishing_config check
+          ./gradlew verifyImportDocs ":$RELEASE_MODULE:lintRelease" ":$RELEASE_MODULE:assembleRelease" ":$RELEASE_MODULE:publishAllPublicationsToVerificationRepository" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
+          android-repo-setup module_release check-local --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
+      - name: Reserve immutable version, source, and artifact hashes
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_MODULE: ${{ inputs.module }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: android-repo-setup module_release reserve --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
+      - name: Publish and release signed artifacts
+        if: steps.release.outputs.skip != 'true'
+        timeout-minutes: 35
+        env:
+          RELEASE_MODULE: ${{ inputs.module }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Gradle guard creates a durable upload-started marker before any upload task.
+          # Preserve plugin deployment output for Central Portal investigation; no debug logging.
+          case "$RELEASE_PUBLISHER" in
+            central) task=publishAndReleaseToMavenCentral ;;
+            *) echo 'Unknown repository'; exit 1 ;;
+          esac
+          ./gradlew ":$RELEASE_MODULE:$task" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon --console=plain 2>&1 | tee "$RUNNER_TEMP/repository-publish.log"
+      - name: Retain deployment log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: repository-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/repository-publish.log
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Recovery guidance
+        if: failure()
+        run: |
+          echo 'Keep pending/uploading tags until the selected repository outcome is known.'
+          echo 'Run SUB - Finalize <<@ workflows.title @>> release manually with the same repository and reserved version; it never re-uploads.'
+          echo 'See docs/releases.md for rejected, unknown, partial, or protected-branch outcomes.'
+
+  propagation-delay:
+    name: Wait for Maven Central propagation (15 minutes)
+    needs: [publish, configuration]
+    if: needs.configuration.outputs.publisher == 'central' && needs.publish.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    # Configure the 15-minute wait timer in repository Settings > Environments.
+    # No runner is held during the environment wait, and no release lock is held.
+    environment: delayed-docs
+    steps:
+      - run: echo 'Environment delay complete; ready to verify Maven Central.'
+
+  finalize:
+    name: Verify public artifacts and finalize release
+    needs: [publish, propagation-delay]
+    if: >-
+      ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.skip != 'true' &&
+          (needs.propagation-delay.result == 'success' ||
+           needs.propagation-delay.result == 'skipped') }}
+    uses: ./.github/workflows/finalize-release.yml
+    secrets: inherit
+    with:
+      repository: ${{ inputs.repository }}
+      module: ${{ inputs.module }}
+      version: ${{ needs.publish.outputs.version }}
+      source: ${{ needs.publish.outputs.source }}

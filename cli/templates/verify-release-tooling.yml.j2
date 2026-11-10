@@ -1,0 +1,41 @@
+name: Verify release tooling
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        destination: [maven-central, jitpack]
+    env:
+      RELEASE_REPOSITORY: ${{ matrix.destination }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - run: android-repo-setup publishing_config check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Verify the local release artifact
+        shell: bash
+        run: |
+          flags=()
+          if [[ "$RELEASE_REPOSITORY" == jitpack ]]; then
+            flags+=(-PjitpackBuild=true -PjitpackScopedTag=true)
+          fi
+          ./gradlew verifyImportDocs :<<@ workflows.module @>>:lintRelease :<<@ workflows.module @>>:publishAllPublicationsToVerificationRepository \
+            -PreleaseModule=<<@ workflows.module @>> -PreleaseVersion=9.8.7 "${flags[@]}" --no-daemon
+          android-repo-setup module_release check-local --module <<@ workflows.module @>> --version 9.8.7 --source "$(git rev-parse HEAD)"

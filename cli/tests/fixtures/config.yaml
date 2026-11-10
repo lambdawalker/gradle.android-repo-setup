@@ -1,0 +1,9 @@
+repository: lambdawalker/android.apexfission.demo-common
+title: Demo Common
+modules:
+  demo-common: Demo Common
+key_alias: demo-common
+tooling_ref: v0.1.4
+workflows:
+  module: demo-common
+  title: Demo Common

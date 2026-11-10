@@ -1,0 +1,52 @@
+name: Verify demo common
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Build and lint the library
+        run: ./gradlew :<<@ workflows.module @>>:assembleRelease :<<@ workflows.module @>>:lintDebug :sample:assembleDebug :sample:lintDebug --no-daemon
+      - name: Render candidates or validate approved screenshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference=<<@ workflows.module @>>/src/screenshotTestDebug/reference
+          task=:<<@ workflows.module @>>:validateDebugScreenshotTest
+          if ! git ls-files -- "$reference" | awk '/\.png$/ { found = 1 } END { exit !found }'; then
+            task=:<<@ workflows.module @>>:updateDebugScreenshotTest
+          fi
+          ./gradlew "$task" --no-daemon
+          mkdir -p screenshot-manifest
+          git rev-parse HEAD > screenshot-manifest/source.txt
+          if [[ -d "$reference" ]]; then
+            find "$reference" -name '*.png' -type f -print0 | sort -z |
+              xargs -0 -r sha256sum > screenshot-manifest/images.sha256
+          fi
+          test "$(wc -l < screenshot-manifest/images.sha256)" -eq 5
+      - name: Upload screenshots and test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: <<@ workflows.module @>>-screenshot-results
+          path: |
+            screenshot-manifest/
+            <<@ workflows.module @>>/src/screenshotTestDebug/reference/
+            <<@ workflows.module @>>/build/reports/screenshotTest/
+            <<@ workflows.module @>>/build/outputs/screenshotTest-results/

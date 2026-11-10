@@ -91,3 +91,33 @@ The Portal may review the first submission before it becomes available.
 After merging the JitPack build configuration, create a new `vX.Y.Z` release tag on `main`. Run **Publish Gradle plugins to JitPack** with that tag. The workflow triggers JitPack through a Maven artifact request and verifies the build source and both plugin descriptors. The original `v0.1.0` tag predates the single-artifact JitPack configuration.
 
 Consumers using JitPack can add `https://jitpack.io` to `pluginManagement.repositories` and map both plugin IDs to `com.github.lambdawalker:gradle.android-repo-setup:vX.Y.Z` with `resolutionStrategy.eachPlugin` and `useModule`.
+
+## Standalone setup CLI
+
+The Rust CLI owns workflow generation. Build it from the repository root:
+
+```sh
+cargo build --locked --release --manifest-path cli/Cargo.toml
+```
+
+Run the resulting `android-repo-setup` executable from an Android checkout, or
+pass `--project <path>` before the command. On Windows the binary has an
+`.exe` extension. It reads the existing `.project/setup/config.yaml`.
+
+```sh
+android-repo-setup workflows --check
+android-repo-setup workflows
+android-repo-setup workflows --only-missing
+android-repo-setup workflows --overwrite
+```
+
+Check mode shows a diff and exits nonzero on drift without writing files.
+The default command refuses to overwrite existing differences.
+Use `--overwrite` after reviewing the diff. Use only one workflow generator
+at a time while migrating from Python.
+
+This first Rust command preserves the output of the Python renderer at
+[`b6351aa`](https://github.com/lambdawalker/python.android-repo-setup/commit/b6351aa717d7ffcbc4ecf1dac9179669e072c361).
+The generated workflows and the existing Gradle release guards still call
+Python. Release coordination, GitHub environment setup, and the wizard and
+vault are pending migration.
