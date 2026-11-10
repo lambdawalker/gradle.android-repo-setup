@@ -4,16 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       source_tag:
-        description: Existing project tag (vX.Y.Z) for both publications
+        description: Existing project tag to retry (blank bumps both versions and creates a tag)
         type: string
         default: ''
 
 permissions:
   contents: read
 
+concurrency:
+  group: combined-cli-jitpack-release
+  cancel-in-progress: false
+
 jobs:
   source:
-    name: Resolve the shared project tag
+    name: Prepare the shared project tag
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -22,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: ${{ github.ref == 'refs/heads/main' && inputs.source_tag == '' }}
       - id: source
         shell: bash
         env:
@@ -41,13 +47,70 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Enter an existing vX.Y.Z project tag in source_tag." >&2
-            exit 1
+          if [[ -z "$tag" ]]; then
+            git fetch origin main --tags
+            if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+              echo "main changed since dispatch. Run again from the current main, or enter an existing release tag to retry." >&2
+              exit 1
+            fi
+            git cat-file -e HEAD:jitpack.yml
+            version="$(python3 - <<'PY'
+          import re
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          gradle = Path("build.gradle.kts")
+          manifest = Path("cli/Cargo.toml")
+          lockfile = Path("cli/Cargo.lock")
+          gradle_text = gradle.read_text(encoding="utf-8")
+          gradle_pattern = r'(?m)^(version = ")[^"\n]+(")$'
+          gradle_versions = re.findall(r'(?m)^version = "([^"\n]+)"$', gradle_text)
+          if len(gradle_versions) != 1:
+              raise SystemExit("Expected one Gradle project version.")
+          package = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]
+          locked = tomllib.loads(lockfile.read_text(encoding="utf-8"))["package"]
+          if [entry["version"] for entry in locked if entry["name"] == package["name"]] != [package["version"]]:
+              raise SystemExit("The CLI manifest and lockfile must have the same package version.")
+          stable = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+          versions = []
+          for value in (gradle_versions[0], package["version"]):
+              match = re.fullmatch(stable, value)
+              if not match:
+                  raise SystemExit(f"Expected a stable project version, got {value!r}.")
+              versions.append(tuple(map(int, match.groups())))
+          for name in subprocess.check_output(["git", "tag", "--list"], text=True).splitlines():
+              match = re.fullmatch(r"(?:cli-)?v" + stable, name)
+              if match:
+                  versions.append(tuple(map(int, match.groups())))
+          major, minor, patch = max(versions)
+          version = f"{major}.{minor}.{patch + 1}"
+          cargo_pattern = r'(?m)^(name = "android-repo-setup"\nversion = ")[^"\n]+(")$'
+          for path, pattern in ((gradle, gradle_pattern), (manifest, cargo_pattern), (lockfile, cargo_pattern)):
+              updated, count = re.subn(pattern, lambda match: match[1] + version + match[2], path.read_text(encoding="utf-8"))
+              if count != 1:
+                  raise SystemExit(f"Could not identify the version in {path}.")
+              path.write_text(updated, encoding="utf-8")
+          print(version)
+          PY
+            )"
+            tag="v$version"
+            git add build.gradle.kts cli/Cargo.toml cli/Cargo.lock
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              -c commit.gpgsign=false commit -m "Release $tag"
+            git -c tag.gpgsign=false tag "$tag"
+            git push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
+          else
+            if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Enter an existing vX.Y.Z project tag in source_tag." >&2
+              exit 1
+            fi
+            sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+            git merge-base --is-ancestor "$sha" origin/main
+            git cat-file -e "$sha:jitpack.yml"
           fi
-          sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
-          git merge-base --is-ancestor "$sha" origin/main
-          git cat-file -e "$sha:jitpack.yml"
+          printf 'Publishing both components from `%s`. To retry, run again with that tag in `source_tag`.\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
   cli:

@@ -98,8 +98,16 @@ run from `main` and enter the tag in **source_tag**. For tags that already
 contain the current workflow, selecting the tag in **Use workflow from**
 also works.
 
-Use **Actions → Publish CLI and JitPack** to publish
-both in parallel from one project tag. It uses the same tag selection rules.
+Use **Actions → Publish CLI and JitPack** to publish both in parallel. Run
+it from `main` with **source_tag** blank to bump both components to the next
+patch version above the current versions and release tags. The workflow
+pushes the version commit and one shared `vX.Y.Z` tag together, then publishes
+the CLI to GitHub Releases and the Gradle plugins to JitPack. The workflow
+token needs permission to push to `main` and create tags.
+
+To publish an existing tag or retry after a publishing failure, enter the
+tag in **source_tag**. The workflow reuses the tagged source without another
+version bump.
 The original `v0.1.0` tag predates the single-artifact JitPack configuration.
 
 Consumers using JitPack can add `https://jitpack.io` to `pluginManagement.repositories` and map both plugin IDs to `com.github.lambdawalker:gradle.android-repo-setup:vX.Y.Z` with `resolutionStrategy.eachPlugin` and `useModule`.
