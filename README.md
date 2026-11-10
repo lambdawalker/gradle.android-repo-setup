@@ -116,8 +116,25 @@ The default command refuses to overwrite existing differences.
 Use `--overwrite` after reviewing the diff. Use only one workflow generator
 at a time while migrating from Python.
 
-This first Rust command preserves the output of the Python renderer at
+The workflow command preserves the output of the Python renderer at
 [`b6351aa`](https://github.com/lambdawalker/python.android-repo-setup/commit/b6351aa717d7ffcbc4ecf1dac9179669e072c361).
 The generated workflows and the existing Gradle release guards still call
 Python. Release coordination, GitHub environment setup, and the wizard and
 vault are pending migration.
+
+
+### Verify an unsigned local publication
+
+After Gradle builds the verification publication, run the Rust verifier from
+the same clean checkout:
+
+```sh
+android-repo-setup module_release check-local --module demo-common --version 9.8.7 --source "$(git rev-parse HEAD)"
+```
+
+The destination defaults to Maven Central. Set `RELEASE_REPOSITORY=jitpack`
+for an unsigned JitPack candidate. The command checks the tracked checkout,
+coordinates, POM, AAR, sources, documentation and Gradle metadata and prints
+the candidate record with SHA-256 hashes. It does not write release tags or
+upload artifacts. The current artifact contract follows Demo Common, including
+its exported Compose dependencies and Java 17 bytecode.

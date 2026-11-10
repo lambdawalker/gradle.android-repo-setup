@@ -1,3 +1,4 @@
+mod release;
 mod workflows;
 
 use anyhow::{bail, Result};
@@ -16,6 +17,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate release artifacts against their expected source and destination.
+    #[command(name = "module_release", alias = "module-release")]
+    ModuleRelease {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
     /// Preview or generate the managed GitHub workflows.
     Workflows {
         #[arg(long, conflicts_with_all = ["overwrite", "only_missing"])]
@@ -27,8 +34,43 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ReleaseCommand {
+    /// Verify locally assembled publication artifacts and print a candidate release record.
+    CheckLocal {
+        #[arg(long)]
+        module: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        source: String,
+    },
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::ModuleRelease {
+            command:
+                ReleaseCommand::CheckLocal {
+                    module,
+                    version,
+                    source,
+                },
+        } => {
+            let destination =
+                std::env::var("RELEASE_REPOSITORY").unwrap_or_else(|_| "maven-central".into());
+            let run_id = std::env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local".into());
+            let record = release::check_local(
+                &cli.project,
+                &module,
+                &version,
+                &source,
+                &destination,
+                &run_id,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Workflows {
             check,
             overwrite,
