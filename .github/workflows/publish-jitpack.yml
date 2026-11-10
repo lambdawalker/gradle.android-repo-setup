@@ -41,12 +41,60 @@ jobs:
           repo=gradle.android-repo-setup
           url="https://jitpack.io/com/github/lambdawalker/$repo/$RELEASE_TAG"
           artifact="$repo-$RELEASE_TAG"
-          curl -fsSL --retry 4 --retry-all-errors --retry-max-time 480 --max-time 90 \
-            "$url/$artifact.pom" -o "$RUNNER_TEMP/plugin.pom"
-          curl -fsSL --retry 4 --retry-all-errors --retry-max-time 120 --max-time 30 \
-            "$url/$artifact.jar" -o "$RUNNER_TEMP/plugin.jar"
-          curl -fsSL --max-time 30 "https://jitpack.io/api/builds/com.github.lambdawalker/$repo/$RELEASE_TAG" |
-            jq -e --arg commit "$SOURCE_SHA" '.status == "ok" and .commit == $commit'
+          deadline=$((SECONDS + 600))
+          last_request="Not started"
+          on_exit() {
+            code=$?
+            if (( code != 0 )); then
+              printf 'JitPack verification failed for `%s` from `%s`.\n\nLast request: %s\n\n[Build log](%s/build.log)\n\nJitPack may still be building. Retry this workflow with `source_tag=%s` after the build completes.\n' \
+                "$RELEASE_TAG" "$SOURCE_SHA" "$last_request" "$url" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          trap on_exit EXIT
+          fetch_until_ready() {
+            local request_url=$1 destination=$2 remaining request_timeout http_code
+            while (( SECONDS < deadline )); do
+              remaining=$((deadline - SECONDS))
+              request_timeout=$((remaining < 60 ? remaining : 60))
+              http_code=$(curl -sSL --connect-timeout 10 --max-time "$request_timeout" \
+                --write-out '%{http_code}' "$request_url" -o "$destination") || http_code="transport-error"
+              last_request="$request_url returned $http_code"
+              if [[ "$http_code" == 200 ]]; then
+                return 0
+              fi
+              echo "Waiting for JitPack: $last_request"
+              remaining=$((deadline - SECONDS))
+              if (( remaining > 0 )); then
+                sleep "$((remaining < 10 ? remaining : 10))"
+              fi
+            done
+            echo "JitPack artifacts were unavailable after the 10-minute verification window." >&2
+            return 1
+          }
+          fetch_until_ready "$url/$artifact.pom" "$RUNNER_TEMP/plugin.pom"
+          fetch_until_ready "$url/$artifact.jar" "$RUNNER_TEMP/plugin.jar"
+          status_url="https://jitpack.io/api/builds/com.github.lambdawalker/$repo/$RELEASE_TAG"
+          while true; do
+            fetch_until_ready "$status_url" "$RUNNER_TEMP/jitpack-status.json"
+            if jq -e --arg commit "$SOURCE_SHA" '.status == "ok" and .commit == $commit' \
+                "$RUNNER_TEMP/jitpack-status.json"; then
+              break
+            fi
+            status=$(jq -r '.status // "unknown"' "$RUNNER_TEMP/jitpack-status.json")
+            commit=$(jq -r '.commit // "unknown"' "$RUNNER_TEMP/jitpack-status.json")
+            last_request="JitPack status=$status commit=$commit expected=$SOURCE_SHA"
+            if [[ "$status" == ok || "$status" == error ]]; then
+              echo "$last_request" >&2
+              exit 1
+            fi
+            remaining=$((deadline - SECONDS))
+            if (( remaining <= 0 )); then
+              echo "Timed out waiting for JitPack to confirm the tagged source." >&2
+              exit 1
+            fi
+            echo "Waiting for JitPack: $last_request"
+            sleep "$((remaining < 10 ? remaining : 10))"
+          done
           unzip -Z1 "$RUNNER_TEMP/plugin.jar" > "$RUNNER_TEMP/plugin-entries"
           for id in com.apexfission.android-repo-setup com.apexfission.android-repo-setup.root; do
             grep -Fx "META-INF/gradle-plugins/$id.properties" "$RUNNER_TEMP/plugin-entries"
