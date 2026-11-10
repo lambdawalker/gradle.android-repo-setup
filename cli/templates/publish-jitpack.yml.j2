@@ -1,0 +1,129 @@
+name: SUB - Build selected library on JitPack
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      module:
+        required: true
+        type: string
+      version:
+        required: false
+        default: ''
+        type: string
+
+      bypass_version_verification:
+        description: 'Bypass older pending JitPack attempts (requires an explicit newer version)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: <<@ workflows.module @>>-release
+      cancel-in-progress: false
+    env:
+      RELEASE_REPOSITORY: jitpack
+      RELEASE_MODULE: ${{ inputs.module }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Install pinned Rust tooling
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
+      - name: Configure release identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Resolve version and reconcile failed JitPack attempt
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          BYPASS_VERSION_VERIFICATION: ${{ inputs.bypass_version_verification }}
+        shell: bash
+        run: |
+          args=()
+          if [[ "$BYPASS_VERSION_VERIFICATION" == true ]]; then
+            args+=(--allow-pending-jitpack)
+          fi
+          android-repo-setup module_release prepare --module "$RELEASE_MODULE" --version "$REQUESTED_VERSION" "${args[@]}"
+      - name: Check out original release source
+        if: steps.release.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: git checkout --detach "$SOURCE_SHA"
+      - uses: actions/setup-java@v5
+        if: steps.release.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@v5
+        if: steps.release.outputs.skip != 'true'
+        with:
+          cache-disabled: true
+      - name: Verify unsigned candidate
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: |
+          ./gradlew ":$RELEASE_MODULE:testDebugUnitTest" ":$RELEASE_MODULE:publishAllPublicationsToVerificationRepository" -PjitpackBuild=true -PjitpackScopedTag=true "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
+          android-repo-setup module_release check-local --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
+      - name: Reserve destination and canonical source tag atomically
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+          BYPASS_VERSION_VERIFICATION: ${{ inputs.bypass_version_verification }}
+        shell: bash
+        run: |
+          args=()
+          if [[ "$BYPASS_VERSION_VERIFICATION" == true ]]; then
+            args+=(--allow-pending-jitpack)
+          fi
+          android-repo-setup module_release reserve --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA" "${args[@]}"
+      - name: Trigger build and verify public artifacts and source
+        id: verify_public
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: android-repo-setup module_release confirm --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --timeout 1800
+      - name: Generate latest available installation instructions
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: android-repo-setup module_release finalize --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
+      - name: Recovery guidance
+        if: failure()
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify_public.outcome }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo '### JitPack release recovery'
+            printf 'Destination: `%s` · Module: `%s` · Version: `%s`\n\n' "$RELEASE_REPOSITORY" "$RELEASE_MODULE" "${RELEASE_VERSION:-unresolved}"
+            case "$VERIFY_OUTCOME" in
+              success) echo 'Public artifact verification passed. Use **SUB - Finalize <<@ workflows.title @>> release** with the destination and version above.' ;;
+              failure|cancelled) echo 'The build or public verification did not complete. Inspect JitPack. For a pending or successful build, use **SUB - Finalize <<@ workflows.title @>> release** with the destination and version above.' ;;
+              *) echo 'The JitPack build trigger did not run. Fix the failed step and check for a reservation before retrying.' ;;
+            esac
+            echo 'Keep the canonical tag. For a proven terminal failure with no artifacts, merge corrected source and publish a newer version. See docs/releases.md.'
+          } >> "$GITHUB_STEP_SUMMARY"

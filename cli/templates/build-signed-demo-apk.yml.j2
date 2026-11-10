@@ -1,0 +1,94 @@
+name: Build signed APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to build. Leave blank to build the latest main commit.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: demo-apk-release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select source commit
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            tag_ref="refs/tags/$REQUESTED_TAG"
+            git check-ref-format "$tag_ref"
+            commit=$(git rev-parse --verify --end-of-options "$tag_ref^{commit}")
+            if ! git merge-base --is-ancestor "$commit" HEAD; then
+              echo "::error::The requested tag must point to a commit on main."
+              exit 1
+            fi
+            git checkout --detach "$commit"
+          fi
+          echo "Building commit $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Build unsigned demo APK
+        run: ./gradlew :sample:assembleRelease --no-daemon
+
+      - name: Align, sign, and verify APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?Missing signing keystore}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Missing keystore password}"
+          : "${ANDROID_KEY_ALIAS:?Missing signing key alias}"
+          : "${ANDROID_KEY_PASSWORD:?Missing signing key password}"
+
+          shopt -s nullglob
+          apks=(sample/build/outputs/apk/release/*-unsigned.apk)
+          if [[ -z "${apks[0]-}" || -n "${apks[1]-}" ]]; then
+            echo "::error::Expected exactly one unsigned release APK."
+            exit 1
+          fi
+          build_tools=$(find "${ANDROID_HOME:?Android SDK is required}/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)
+          : "${build_tools:?Android SDK build-tools are required}"
+
+          umask 077
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/apk-signing.XXXXXX")
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/keystore"
+          unset ANDROID_KEYSTORE_BASE64
+
+          "${build_tools%/*}/zipalign" -P 16 -f 4 "${apks[0]}" "$signing_dir/aligned.apk"
+          mkdir -p "$RUNNER_TEMP/signed-demo"
+          output="$RUNNER_TEMP/signed-demo/demo-sample-$(git rev-parse --short=12 HEAD).apk"
+          "$build_tools" sign --ks "$signing_dir/keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$output" "$signing_dir/aligned.apk"
+          "$build_tools" verify --verbose --print-certs "$output"
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/signed-demo/*.apk
+          archive: false
+          if-no-files-found: error

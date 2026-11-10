@@ -1,0 +1,130 @@
+name: SUB - Finalize <<@ workflows.title @>> release
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Destination repository (uses its matching GitHub environment)'
+        type: choice
+        required: true
+        default: maven-central
+        # BEGIN GENERATED REPOSITORIES
+        options: ["maven-central", "jitpack"]
+        # END GENERATED REPOSITORIES
+      module:
+        description: 'Module whose existing publication should be finalized'
+        type: choice
+        required: true
+        options: [<<@ workflows.module @>>]
+      version:
+        description: 'Existing release X.Y.Z to verify and finalize. Never uploads artifacts.'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      repository:
+        type: string
+        required: false
+        default: maven-central
+      module:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      source:
+        description: 'Expected immutable source from the publishing job.'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  configuration:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      environment: ${{ steps.repository.outputs.environment }}
+      publisher: ${{ steps.repository.outputs.publisher }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Install pinned Rust tooling
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
+      - run: android-repo-setup publishing_config check
+      - id: repository
+        env:
+          RELEASE_REPOSITORY: ${{ inputs.repository }}
+        run: android-repo-setup publishing_config resolve
+
+  finalize:
+    needs: configuration
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    environment: ${{ needs.configuration.outputs.environment }}
+    env:
+      RELEASE_REPOSITORY: ${{ inputs.repository }}
+      RELEASE_MODULE: ${{ inputs.module }}
+    # Same repository-wide lock as publishing. Never cancel an active upload/push.
+    # The automatic environment delay is a separate job outside this lock.
+    concurrency:
+      group: <<@ workflows.module @>>-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: false
+      - name: Install pinned Rust tooling
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
+      - name: Recheck remote release state after acquiring the lock
+        id: release
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          EXPECTED_SOURCE: ${{ inputs.source }}
+        run: android-repo-setup module_release prepare-finalization --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$EXPECTED_SOURCE"
+      - name: Confirm complete public artifact set (up to 40 minutes)
+        id: verify_public
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: android-repo-setup module_release confirm --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA" --timeout 2400
+      - name: Atomically finalize docs, source tag, and attempt markers
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: android-repo-setup module_release finalize --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
+      - name: Recovery guidance
+        if: failure()
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify_public.outcome }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo '### Release finalization recovery'
+            printf 'Destination: `%s` · Module: `%s` · Version: `%s`\n\n' "$RELEASE_REPOSITORY" "$RELEASE_MODULE" "$RELEASE_VERSION"
+            case "$VERIFY_OUTCOME" in
+              success) echo 'Public artifact verification passed. Check the documentation and release-marker update failure.' ;;
+              failure|cancelled) echo 'Public artifact verification did not complete. Check the publication status for this destination.' ;;
+              *) echo 'Public artifact verification did not start. Check the reservation and the first failed step.' ;;
+            esac
+            echo 'Run **SUB - Finalize <<@ workflows.title @>> release** again with the same destination and version. Finalization does not upload artifacts.'
+            echo 'Keep release markers until the outcome is known. See docs/releases.md.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,38 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Destination repository (uses its matching GitHub environment)'
+        type: choice
+        required: true
+        default: maven-central
+        # BEGIN GENERATED REPOSITORIES
+        options: ["maven-central", "jitpack"]
+        # END GENERATED REPOSITORIES
+      version:
+        description: 'Optional X.Y.Z. Blank: reuse unchanged module version, otherwise next patch.'
+        required: false
+        default: ''
+        type: string
+
+      bypass_version_verification:
+        description: 'Allow recovery override with an explicit newer version. Central skips the remote version listing. JitPack bypasses older pending attempts.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/publish-library.yml
+    secrets: inherit
+    with:
+      repository: ${{ inputs.repository }}
+      module: <<@ workflows.module @>>
+      version: ${{ inputs.version }}
+      bypass_version_verification: ${{ inputs.bypass_version_verification }}
