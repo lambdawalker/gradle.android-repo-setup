@@ -19,6 +19,7 @@ pub(crate) struct VerifiedKey {
     pub passphrase: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct SigningKey {
     pub fingerprint: String,
     pub identity: String,
@@ -473,14 +474,7 @@ fn passphrase_input(passphrase: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn generate_key(
-    identity: &str,
-    passphrase: &str,
-    bits: u16,
-    expires: &str,
-    allow_duplicate: bool,
-    home: &Path,
-) -> Result<String> {
+fn validate_key_inputs(identity: &str, passphrase: &str, bits: u16, expires: &str) -> Result<()> {
     ensure!(
         Regex::new(r"\A[^<>\r\n\x00]+ <[^<>\s@\x00]+@[^<>\s@\x00]+>\z")?.is_match(identity),
         "Enter an OpenPGP identity in the form Name <email@example.com>."
@@ -494,6 +488,22 @@ fn generate_key(
         passphrase.chars().count() >= 12,
         "Use at least 12 characters for a new key's passphrase."
     );
+    ensure!(
+        !passphrase.chars().any(char::is_control),
+        "Use a single-line passphrase without control characters."
+    );
+    Ok(())
+}
+
+fn generate_key(
+    identity: &str,
+    passphrase: &str,
+    bits: u16,
+    expires: &str,
+    allow_duplicate: bool,
+    home: &Path,
+) -> Result<String> {
+    validate_key_inputs(identity, passphrase, bits, expires)?;
     let mut arguments = vec!["--status-fd", "1"];
     arguments.extend(LOOPBACK);
     if allow_duplicate {
@@ -605,6 +615,9 @@ pub(crate) fn publish_public_key(fingerprint: &str) -> Result<()> {
 type Prompt<'a> = dyn FnMut(&str, bool) -> Result<Option<String>> + 'a;
 
 fn confirm(prompt: &mut Prompt<'_>, message: &str) -> Result<bool> {
+    if crate::ui::active() {
+        return crate::ui::confirm(message.trim_end_matches(" [y/N]"));
+    }
     Ok(prompt(message, false)?
         .is_some_and(|answer| matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")))
 }
@@ -626,6 +639,7 @@ fn ask_with_default(prompt: &mut Prompt<'_>, label: &str, default: &str) -> Resu
 }
 
 fn verify_choice(fingerprint: &str, passphrase: String, home: &Path) -> Result<VerifiedKey> {
+    setup_message!("Verifying the OpenPGP signing key and passphrase…");
     let armor = export_verified_key(fingerprint, &passphrase, home)?;
     Ok(VerifiedKey {
         fingerprint: fingerprint.to_owned(),
@@ -640,47 +654,88 @@ fn create_signing_key(
     prompt: &mut Prompt<'_>,
 ) -> Result<Option<VerifiedKey>> {
     let defaults = load_key_defaults(home, project)?;
-    eprintln!("The OpenPGP identity is public if the key is published.");
-    let Some(identity) = ask_with_default(
-        prompt,
-        "OpenPGP identity (Name <email@example.com>)",
-        &defaults.identity,
-    )?
-    else {
-        return Ok(None);
+    setup_message!("The OpenPGP identity is public if the key is published.");
+    let (identity, bits, expires, passphrase) = if crate::ui::active() {
+        use crate::ui::Field;
+        let fields = vec![
+            Field { label: "OpenPGP identity".into(), hint: "Name (project) <email@example.com>. This identity becomes public when uploaded.".into(), value: defaults.identity.clone(), secret: false },
+            Field { label: "RSA key size".into(), hint: "Choose 2048, 3072 or 4096 bits.".into(), value: defaults.bits.to_string(), secret: false },
+            Field { label: "Expiration".into(), hint: "A duration such as 2y, YYYY-MM-DD, or 0 for no expiry.".into(), value: defaults.expires.clone(), secret: false },
+            Field { label: "New passphrase".into(), hint: "At least 12 characters. Ctrl+V pastes from your clipboard.".into(), value: String::new(), secret: true },
+            Field { label: "Confirm passphrase".into(), hint: "Enter the same passphrase again.".into(), value: String::new(), secret: true },
+        ];
+        let Some(values) =
+            crate::ui::form("Create a Maven Central signing key", fields, |values| {
+                ensure!(values[3] == values[4], "The passphrases do not match.");
+                let bits = values[1]
+                    .trim()
+                    .parse()
+                    .context("Choose 2048, 3072 or 4096 bits.")?;
+                validate_key_inputs(values[0].trim(), &values[3], bits, values[2].trim())
+            })?
+        else {
+            return Ok(None);
+        };
+        ensure!(values[3] == values[4], "The passphrases do not match.");
+        let bits = values[1]
+            .trim()
+            .parse()
+            .context("Choose 2048, 3072 or 4096 bits.")?;
+        (
+            values[0].trim().to_owned(),
+            bits,
+            values[2].trim().to_owned(),
+            values[3].clone(),
+        )
+    } else {
+        let Some(identity) = ask_with_default(
+            prompt,
+            "OpenPGP identity (Name <email@example.com>)",
+            &defaults.identity,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(bits) = ask_with_default(
+            prompt,
+            "RSA key size (2048, 3072, or 4096)",
+            &defaults.bits.to_string(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let bits = bits
+            .parse()
+            .context("Choose an RSA key size of 2048, 3072, or 4096 bits.")?;
+        let Some(expires) = ask_with_default(
+            prompt,
+            "Expiration (duration, YYYY-MM-DD, or 0)",
+            &defaults.expires,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(passphrase) = prompt("New OpenPGP passphrase (at least 12 characters)", true)?
+        else {
+            return Ok(None);
+        };
+        let Some(confirmation) = prompt("Confirm OpenPGP passphrase", true)? else {
+            return Ok(None);
+        };
+        ensure!(passphrase == confirmation, "The passphrases do not match.");
+        (identity, bits, expires, passphrase)
     };
-    let Some(bits) = ask_with_default(
-        prompt,
-        "RSA key size (2048, 3072, or 4096)",
-        &defaults.bits.to_string(),
-    )?
-    else {
-        return Ok(None);
-    };
-    let bits = bits
-        .parse()
-        .context("Choose an RSA key size of 2048, 3072, or 4096 bits.")?;
-    let Some(expires) = ask_with_default(
-        prompt,
-        "Expiration (duration, YYYY-MM-DD, or 0)",
-        &defaults.expires,
-    )?
-    else {
-        return Ok(None);
-    };
-    let Some(passphrase) = prompt("New OpenPGP passphrase (at least 12 characters)", true)? else {
-        return Ok(None);
-    };
-    let Some(confirmation) = prompt("Confirm OpenPGP passphrase", true)? else {
-        return Ok(None);
-    };
-    ensure!(passphrase == confirmation, "The passphrases do not match.");
+    setup_message!(
+        "{}\nRSA {bits} · Expiration {expires}",
+        display_identity(&identity)
+    );
     if !confirm(prompt, "Create this key in the local GnuPG keyring? [y/N]")? {
         return Ok(None);
     }
+    setup_message!("Creating the local OpenPGP signing key…");
     let fingerprint = match generate_key(&identity, &passphrase, bits, &expires, false, home) {
         Err(error) if error.is::<DuplicateKeyIdentity>() => {
-            eprintln!("{error}");
+            setup_message!("{error}");
             if !confirm(
                 prompt,
                 "Create another key with this identity and keep the existing key? [y/N]",
@@ -695,7 +750,7 @@ fn create_signing_key(
     loop {
         match verify_choice(&fingerprint, passphrase, home) {
             Ok(key) => return Ok(Some(key)),
-            Err(error) => eprintln!("{error} The generated key remains in the local keyring."),
+            Err(error) => setup_message!("{error} The generated key remains in the local keyring."),
         }
         if !confirm(prompt, "Retry verification of the generated key? [y/N]")? {
             return Ok(None);
@@ -723,17 +778,44 @@ pub(crate) fn pick_signing_key(
     home: &Path,
     prompt: &mut impl FnMut(&str, bool) -> Result<Option<String>>,
 ) -> Result<Option<VerifiedKey>> {
+    if crate::ui::active() {
+        loop {
+            let Some(choice) = crate::ui::key_choice()? else {
+                return Ok(None);
+            };
+            let result = match choice {
+                crate::ui::KeyChoice::Create => create_signing_key(project, home, prompt),
+                crate::ui::KeyChoice::Existing(key) => {
+                    let Some(passphrase) =
+                        prompt("OpenPGP passphrase (blank for an unprotected key)", true)?
+                    else {
+                        return Ok(None);
+                    };
+                    verify_choice(&key.fingerprint, passphrase, home).map(Some)
+                }
+            };
+            match result {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    setup_message!("{error}");
+                    if !crate::ui::confirm("Choose or create another signing key?")? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
     loop {
-        eprintln!("Maven signing key\n  C. Create a local OpenPGP key");
+        setup_message!("Maven signing key\n  C. Create a local OpenPGP key");
         let keys = match list_signing_keys(Some(home)) {
             Ok(keys) => keys,
             Err(error) => {
-                eprintln!("{error}");
+                setup_message!("{error}");
                 Vec::new()
             }
         };
         for (index, key) in keys.iter().enumerate() {
-            eprintln!(
+            setup_message!(
                 "  {}. {}\n     Created {}   Expires {}\n     {}",
                 index + 1,
                 key.identity,
@@ -764,12 +846,12 @@ pub(crate) fn pick_signing_key(
             };
             verify_choice(&key.fingerprint, passphrase, home).map(Some)
         } else {
-            eprintln!("Choose C, a listed key number, or Enter.");
+            setup_message!("Choose C, a listed key number, or Enter.");
             continue;
         };
         match result {
             Ok(result) => return Ok(result),
-            Err(error) => eprintln!("{error}"),
+            Err(error) => setup_message!("{error}"),
         }
     }
 }

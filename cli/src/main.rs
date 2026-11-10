@@ -1,15 +1,16 @@
+macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($arg)*)) }; }
+
 mod confirmation;
 mod docs;
 mod github;
 mod gpg;
 mod jitpack;
-#[cfg(feature = "cursive-preview")]
-mod maven_preview;
 mod journal;
 mod publishing;
 mod release;
 mod setup;
 mod signing;
+mod ui;
 mod vault;
 mod workflows;
 
@@ -32,13 +33,6 @@ struct Cli {
 enum Command {
     /// Select setup operations interactively.
     Setup,
-    /// Try the experimental Maven signing-key interface with a test passphrase.
-    #[cfg(feature = "cursive-preview")]
-    MavenKeyPreview {
-        /// Use sample keys instead of reading the local GnuPG keyring.
-        #[arg(long)]
-        sample_keys: bool,
-    },
     /// Create or verify the APK key and configure its GitHub environment.
     Signing(setup::SigningOptions),
     /// Preview or generate the managed GitHub workflows.
@@ -258,10 +252,8 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
 fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
     match cli.command.unwrap_or(Command::Setup) {
-        Command::Setup => setup::run(&root)?,
-        #[cfg(feature = "cursive-preview")]
-        Command::MavenKeyPreview { sample_keys } => maven_preview::run(sample_keys)?,
-        Command::Signing(options) => setup::sign(&root, options)?,
+        Command::Setup => ui::run(|| setup::run(&root))?,
+        Command::Signing(options) => ui::run(|| setup::sign(&root, options))?,
         Command::ModuleRelease { command } => run_release(&root, command)?,
         Command::Workflows {
             check,
@@ -294,7 +286,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         },
         Command::SetupGithubEnvironments { repo, config } => {
-            publishing::setup(&root, repo.as_deref(), config.as_deref())?
+            ui::run(|| publishing::setup(&root, repo.as_deref(), config.as_deref()))?
         }
         Command::JitpackBuild => jitpack::build(&root)?,
         Command::ImportDocs { check } => docs::documentation(&root, check)?,

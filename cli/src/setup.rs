@@ -1,7 +1,6 @@
 use crate::{publishing, signing, vault, workflows};
 use anyhow::Result;
 use clap::Args;
-use dialoguer::{MultiSelect, Select};
 use serde::Deserialize;
 use std::{
     fs,
@@ -84,52 +83,24 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
         options.vault_path,
         key_alias,
     )?;
-    let _lock = vault::lock(&config, true)?;
-    let mut vault = vault::unlock_interactive(&config, false)?;
     loop {
-        let pending = &vault.state.pending;
-        let complete = &vault.state.complete;
-        if !pending.is_empty() {
-            println!("Incomplete steps: {}", pending.join(", "));
-        }
-        let needs = |step: &str| {
-            if pending.is_empty() {
-                !complete.iter().any(|entry| entry == step)
-            } else {
-                pending.iter().any(|entry| entry == step)
+        match crate::ui::menu(&OPERATIONS[..2], !config.state_path().exists())? {
+            crate::ui::Menu::Setup(selected) => {
+                let operations = selected
+                    .iter()
+                    .map(|&index| OPERATIONS[index].0)
+                    .collect::<Vec<_>>();
+                sign_with_config(root, &config, &operations)?;
+                return Ok(());
             }
-        };
-        let default = match (needs("key"), needs("github")) {
-            (true, true) => "3",
-            (true, false) => "1",
-            (false, true) => "2",
-            _ => "q",
-        };
-        println!("[1] Create or verify the signing keystore");
-        println!("[2] Set up GitHub using an existing keystore");
-        println!("[3] Both operations");
-        let can_reset = !pending.is_empty() || !complete.is_empty();
-        if can_reset {
-            println!("[r] Reset local setup progress and saved answers");
-        }
-        println!("[q] Exit");
-        let answer = vault::prompt("Choose signing setup operations", Some(default))?;
-        let operations: &[&str] = match answer.as_str() {
-            "1" => &["key"],
-            "2" => &["github"],
-            "3" => &["key", "github"],
-            "q" => return Ok(()),
-            "r" if can_reset => {
-                if vault::confirm("Clear local setup progress and answers? The APK keystore file and GitHub environment secrets will remain.")? {
-                    vault.state = vault::VaultState::default();
-                    vault.save()?;
-                }
-                continue;
+            crate::ui::Menu::ViewVault => {
+                vault::view(&config)?;
             }
-            _ => continue,
-        };
-        signing::run(root, &config, &mut vault, operations)?;
-        return Ok(());
+            crate::ui::Menu::RemakeVault => {
+                vault::remake(&config)?;
+            }
+            crate::ui::Menu::Exit => return Ok(()),
+        }
     }
 }
 
@@ -156,34 +127,23 @@ fn update_workflows(root: &Path) -> Result<()> {
 pub(crate) fn run(root: &Path) -> Result<()> {
     vault::interactive()?;
     let config = signing_config(root)?;
-    let first_run = !config.state_path().exists()
-        && !root
-            .join(".project/setup/workflow-generation.json")
-            .exists();
     loop {
-        match Select::new()
-            .with_prompt("Android Repository Setup")
-            .items(["Configure deployment", "View vault", "Remake vault", "Exit"])
-            .default(0)
-            .interact_opt()?
-        {
-            Some(0) => {}
-            Some(1) => return vault::view(&config).map(|_| ()),
-            Some(2) => return vault::remake(&config).map(|_| ()),
-            _ => return Ok(()),
-        }
-        let labels = OPERATIONS.map(|(_, label, description)| format!("{label} — {description}"));
-        let Some(selected) = MultiSelect::new()
-            .with_prompt("Choose setup operations")
-            .items(&labels)
-            .defaults(&[first_run; OPERATIONS.len()])
-            .interact_opt()?
-        else {
-            continue;
+        let first_run = !config.state_path().exists()
+            && !root
+                .join(".project/setup/workflow-generation.json")
+                .exists();
+        let selected = match crate::ui::menu(&OPERATIONS, first_run)? {
+            crate::ui::Menu::Setup(selected) => selected,
+            crate::ui::Menu::ViewVault => {
+                vault::view(&config)?;
+                continue;
+            }
+            crate::ui::Menu::RemakeVault => {
+                vault::remake(&config)?;
+                continue;
+            }
+            crate::ui::Menu::Exit => return Ok(()),
         };
-        if selected.is_empty() {
-            continue;
-        }
         let operations = selected
             .iter()
             .map(|&i| OPERATIONS[i].0)

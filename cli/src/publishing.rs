@@ -427,7 +427,7 @@ fn apply(
     for fingerprint in keys {
         gpg::publish_public_key(fingerprint)
             .context("Could not publish the selected public key")?;
-        println!("Completed: published public key {fingerprint}");
+        setup_message!("Completed: published public key {fingerprint}");
     }
     for (environment, snapshot) in environments {
         if snapshot.exists {
@@ -439,7 +439,7 @@ fn apply(
         );
         if environment.eq_ignore_ascii_case(DELAYED_DOCS) && status_is(&result, 422) {
             result = api.ensure_environment(environment, None);
-            println!("Wait timer unavailable. Review delayed-docs in GitHub Settings.");
+            setup_message!("Wait timer unavailable. Review delayed-docs in GitHub Settings.");
         }
         let already_exists =
             result.with_context(|| format!("Failed or uncertain: {environment} / environment"))?;
@@ -452,7 +452,7 @@ fn apply(
                 "Environment {environment} changed concurrently. Rerun to inspect current state."
             );
         }
-        println!(
+        setup_message!(
             "Completed: {environment} / environment ({})",
             if already_exists {
                 "already exists"
@@ -477,10 +477,10 @@ fn apply(
             bail!("{label} was modified concurrently (HTTP 409 Conflict). Rerun to inspect current state.");
         }
         result.with_context(|| format!("Failed or uncertain: {label}"))?;
-        println!("Completed: {label}");
+        setup_message!("Completed: {label}");
     }
     configure_pages(api, page_settings).context("Failed or uncertain: GitHub Pages")?;
-    println!("GitHub Pages uses GitHub Actions.");
+    setup_message!("GitHub Pages uses GitHub Actions.");
     Ok(())
 }
 
@@ -513,7 +513,7 @@ fn select_vault(config: &vault::SetupConfig) -> Result<Option<vault::SetupVault>
         match vault::unlock_interactive(config, false) {
             Ok(vault) => return Ok(Some(vault)),
             Err(error) => {
-                eprintln!("{error}");
+                setup_message!("{error}");
                 if !vault::confirm("Retry the vault?")? {
                     return Ok(None);
                 }
@@ -531,7 +531,7 @@ fn should_reuse(label: &str, source: &str) -> Result<bool> {
 }
 
 fn connect(repository: &str, vault: Option<&vault::SetupVault>) -> Result<(GitHubApi, String)> {
-    println!("Connecting to {repository}. A fine-grained token needs repository Administration, Environments and Pages read/write permissions. A classic token needs repo scope and any required organization SSO authorization.");
+    setup_message!("Connecting to {repository}. A fine-grained token needs repository Administration, Environments and Pages read/write permissions. A classic token needs repo scope and any required organization SSO authorization.");
     let from_vault = vault.and_then(|vault| vault.state.github_token.clone());
     let from_environment = ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find_map(|name| {
         std::env::var(name)
@@ -610,7 +610,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
         let setting = &settings[index];
         let snapshot = &environments[setting.environment];
         let existing = setting.existing(snapshot);
-        println!(
+        setup_message!(
             "\n{} / {} ({})",
             setting.environment,
             setting.name,
@@ -618,11 +618,13 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
         );
         if existing {
             match setting.kind {
-                Kind::Secret => println!("Secret exists. Leave blank to keep it."),
-                Kind::Variable => println!("Current value: {:?}", snapshot.variables[setting.name]),
+                Kind::Secret => setup_message!("Secret exists. Leave blank to keep it."),
+                Kind::Variable => {
+                    setup_message!("Current value: {:?}", snapshot.variables[setting.name])
+                }
             }
         } else {
-            println!(
+            setup_message!(
                 "{}",
                 if setting.required {
                     "Required."
@@ -684,13 +686,13 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
                     break;
                 }
                 Ok(None) => break,
-                Err(error) => eprintln!("{error}"),
+                Err(error) => setup_message!("{error}"),
             }
         }
         index += 1;
     }
 
-    println!("\nReview changes for {repository}");
+    setup_message!("\nReview changes for {repository}");
     for (environment, snapshot) in &environments {
         let action = if snapshot.exists {
             "KEEP environment and protection rules"
@@ -699,7 +701,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
         } else {
             "CREATE environment"
         };
-        println!("{action}  {environment}");
+        setup_message!("{action}  {environment}");
     }
     for (index, setting) in settings.iter().enumerate() {
         let existing = setting.existing(&environments[setting.environment]);
@@ -709,7 +711,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
             (false, true) => "KEEP",
             (false, false) => "LEAVE UNSET",
         };
-        println!(
+        setup_message!(
             "{action}  {} / {} ({})",
             setting.environment,
             setting.name,
@@ -717,22 +719,22 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
         );
         if setting.kind == Kind::Variable {
             if let Some(value) = changes.get(&index) {
-                println!("    New value: {value:?}");
+                setup_message!("    New value: {value:?}");
             }
         }
     }
     for fingerprint in &keys {
-        println!("PUBLISH public key {fingerprint} to keyserver.ubuntu.com (including its public identity).");
+        setup_message!("PUBLISH public key {fingerprint} to keyserver.ubuntu.com (including its public identity).");
     }
     if uses_actions(&page_settings) {
-        println!("KEEP GitHub Actions as the GitHub Pages source");
+        setup_message!("KEEP GitHub Actions as the GitHub Pages source");
     } else {
-        println!("SET GitHub Actions as the GitHub Pages source");
+        setup_message!("SET GitHub Actions as the GitHub Pages source");
     }
     if vault.is_some() {
-        println!("Accepted answers have been saved in the encrypted vault.");
+        setup_message!("Accepted answers have been saved in the encrypted vault.");
     }
-    println!("GitHub writes are applied in sequence. Rerun after an interruption to inspect current settings.");
+    setup_message!("GitHub writes are applied in sequence. Rerun after an interruption to inspect current settings.");
     if !vault::confirm("Apply these reviewed changes?")? {
         return Ok(());
     }
@@ -746,7 +748,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
         &page_settings,
     )
     .context("Setup incomplete. Rerun to inspect current settings and resume.")?;
-    println!("Setup complete.");
+    setup_message!("Setup complete.");
     Ok(())
 }
 
