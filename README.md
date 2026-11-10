@@ -85,3 +85,9 @@ To check and build the publication locally with JDK 21, run
 `./gradlew check publishToMavenLocal`. To run the Portal validation without
 uploading, set the Portal credentials and run `./gradlew publishPlugins --validate-only`.
 The Portal may review the first submission before it becomes available.
+
+## Publish to JitPack
+
+After merging the JitPack build configuration, create a new `vX.Y.Z` release tag on `main`. Run **Publish Gradle plugins to JitPack** with that tag. The workflow triggers JitPack through a Maven artifact request and verifies the build source and both plugin descriptors. The original `v0.1.0` tag predates the single-artifact JitPack configuration.
+
+Consumers using JitPack can add `https://jitpack.io` to `pluginManagement.repositories` and map both plugin IDs to `com.github.lambdawalker:gradle.android-repo-setup:vX.Y.Z` with `resolutionStrategy.eachPlugin` and `useModule`.
