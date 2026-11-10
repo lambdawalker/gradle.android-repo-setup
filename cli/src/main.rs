@@ -3,6 +3,8 @@ mod docs;
 mod github;
 mod gpg;
 mod jitpack;
+#[cfg(feature = "cursive-preview")]
+mod maven_preview;
 mod journal;
 mod publishing;
 mod release;
@@ -30,6 +32,13 @@ struct Cli {
 enum Command {
     /// Select setup operations interactively.
     Setup,
+    /// Try the experimental Maven signing-key interface with a test passphrase.
+    #[cfg(feature = "cursive-preview")]
+    MavenKeyPreview {
+        /// Use sample keys instead of reading the local GnuPG keyring.
+        #[arg(long)]
+        sample_keys: bool,
+    },
     /// Create or verify the APK key and configure its GitHub environment.
     Signing(setup::SigningOptions),
     /// Preview or generate the managed GitHub workflows.
@@ -250,6 +259,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
     match cli.command.unwrap_or(Command::Setup) {
         Command::Setup => setup::run(&root)?,
+        #[cfg(feature = "cursive-preview")]
+        Command::MavenKeyPreview { sample_keys } => maven_preview::run(sample_keys)?,
         Command::Signing(options) => setup::sign(&root, options)?,
         Command::ModuleRelease { command } => run_release(&root, command)?,
         Command::Workflows {

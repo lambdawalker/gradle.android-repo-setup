@@ -4,12 +4,17 @@ version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+cursive-preview = ["dep:arboard", "dep:cursive"]
+
 [dependencies]
 anyhow = "1"
+arboard = { version = "3", default-features = false, optional = true }
 argon2 = "0.5"
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+cursive = { version = "0.21.1", optional = true }
 crypto_box = { version = "0.9.1", features = ["seal"] }
 crypto_secretbox = "0.1"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
