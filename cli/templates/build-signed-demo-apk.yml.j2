@@ -48,7 +48,7 @@ jobs:
             21
       - uses: gradle/actions/setup-gradle@v5
       - name: Build unsigned demo APK
-        run: ./gradlew :sample:assembleRelease --no-daemon
+        run: ./gradlew :<<@ workflows.app_module @>>:assembleRelease --no-daemon
 
       - name: Align, sign, and verify APK
         env:
@@ -64,7 +64,7 @@ jobs:
           : "${ANDROID_KEY_PASSWORD:?Missing signing key password}"
 
           shopt -s nullglob
-          apks=(sample/build/outputs/apk/release/*-unsigned.apk)
+          apks=(<<@ workflows.app_module @>>/build/outputs/apk/release/*-unsigned.apk)
           if [[ -z "${apks[0]-}" || -n "${apks[1]-}" ]]; then
             echo "::error::Expected exactly one unsigned release APK."
             exit 1
@@ -80,7 +80,7 @@ jobs:
 
           "${build_tools%/*}/zipalign" -P 16 -f 4 "${apks[0]}" "$signing_dir/aligned.apk"
           mkdir -p "$RUNNER_TEMP/signed-demo"
-          output="$RUNNER_TEMP/signed-demo/demo-sample-$(git rev-parse --short=12 HEAD).apk"
+          output="$RUNNER_TEMP/signed-demo/demo-<<@ workflows.app_module @>>-$(git rev-parse --short=12 HEAD).apk"
           "$build_tools" sign --ks "$signing_dir/keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" \
             --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
             --out "$output" "$signing_dir/aligned.apk"
