@@ -707,6 +707,17 @@ fn create_signing_key(
     }
 }
 
+pub(crate) fn list_signing_keys(log_home: Option<&Path>) -> Result<Vec<SigningKey>> {
+    let output = run_gpg(
+        "list keys",
+        &["--with-colons", "--list-secret-keys"],
+        b"",
+        None,
+        log_home,
+    )?;
+    Ok(parse_signing_keys(&String::from_utf8_lossy(&output)))
+}
+
 pub(crate) fn pick_signing_key(
     project: &str,
     home: &Path,
@@ -714,14 +725,8 @@ pub(crate) fn pick_signing_key(
 ) -> Result<Option<VerifiedKey>> {
     loop {
         eprintln!("Maven signing key\n  C. Create a local OpenPGP key");
-        let keys = match run_gpg(
-            "list keys",
-            &["--with-colons", "--list-secret-keys"],
-            b"",
-            None,
-            Some(home),
-        ) {
-            Ok(output) => parse_signing_keys(&String::from_utf8_lossy(&output)),
+        let keys = match list_signing_keys(Some(home)) {
+            Ok(keys) => keys,
             Err(error) => {
                 eprintln!("{error}");
                 Vec::new()
