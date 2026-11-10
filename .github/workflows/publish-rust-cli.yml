@@ -1,0 +1,142 @@
+name: Publish Rust CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing tag to publish (leave blank to publish the CLI version on main)
+        type: string
+        default: ''
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-cli-release
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Resolve release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: source
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          tag="$SOURCE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ -n "$tag" && "$tag" != "$GITHUB_REF_NAME" ]]; then
+              echo "The source tag must match the selected tag." >&2
+              exit 1
+            fi
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Run Publish Rust CLI from main or select a release tag." >&2
+            exit 1
+          fi
+
+          if [[ -n "$tag" ]]; then
+            if [[ ! "$tag" =~ ^(cli-)?v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Use a tag named vX.Y.Z or cli-vX.Y.Z." >&2
+              exit 1
+            fi
+            sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+            version="${tag#cli-}"
+            version="${version#v}"
+          else
+            sha="$(git rev-parse HEAD)"
+            version="$(cargo metadata --manifest-path cli/Cargo.toml --locked --no-deps --format-version 1 |
+              jq -er '.packages[] | select(.name == "android-repo-setup") | .version')"
+            tag="cli-v$version"
+          fi
+          git merge-base --is-ancestor "$sha" origin/main
+          printf 'tag=%s\nsha=%s\nversion=%s\n' "$tag" "$sha" "$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: source
+    uses: ./.github/workflows/build-rust-cli.yml
+    with:
+      source_sha: ${{ needs.source.outputs.sha }}
+      release_version: ${{ needs.source.outputs.version }}
+
+  publish:
+    name: Publish CLI assets
+    needs: [source, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: android-repo-setup-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and publish
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CLI_TAG: ${{ needs.source.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          assets=()
+          for archive in \
+            android-repo-setup-x86_64-pc-windows-msvc.zip \
+            android-repo-setup-x86_64-unknown-linux-gnu.tar.gz \
+            android-repo-setup-aarch64-apple-darwin.tar.gz
+          do
+            sha256sum --check "$archive.sha256"
+            assets+=("$archive" "$archive.sha256")
+          done
+          source="$(git rev-parse HEAD)"
+          if tagged_source="$(git rev-parse --verify --quiet "refs/tags/$CLI_TAG^{commit}")"; then
+            if [[ "$tagged_source" != "$source" ]]; then
+              echo "$CLI_TAG already points to another commit." >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF" == refs/heads/main && -z "$SOURCE_TAG" ]]; then
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f ref="refs/tags/$CLI_TAG" -f sha="$source" --silent
+          else
+            echo "The selected release tag could not be resolved." >&2
+            exit 1
+          fi
+
+          if existing="$(gh release view "$CLI_TAG" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            missing=()
+            for asset in "${assets[@]}"; do
+              if ! grep -Fxq -- "$asset" <<< "$existing"; then missing+=("$asset"); fi
+            done
+            if (( ${#missing[@]} )); then
+              gh release upload "$CLI_TAG" "${missing[@]}"
+            else
+              echo "All CLI assets already exist on $CLI_TAG."
+            fi
+          else
+            gh release create "$CLI_TAG" --verify-tag --generate-notes --latest=false \
+              --title "Android Repo Setup CLI $RELEASE_VERSION" "${assets[@]}"
+          fi

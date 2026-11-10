@@ -106,12 +106,15 @@ each with its own SHA-256 checksum. Extract the archive and put the executable
 on `PATH`. The APK and Maven signing commands use `keytool` and GnuPG,
 respectively.
 
-In **Actions → Build Rust CLI → Run workflow**, leave **Create a CLI GitHub
-Release from main** unchecked for a test build. To publish, select `main`
-and check that option. The workflow uses the version in `cli/Cargo.toml`
-to create the matching tag, such as `cli-v0.1.0`, and publishes after all
-three builds pass. Pushing a matching CLI tag also triggers publication.
-Gradle plugin publication uses its own workflow.
+Use **Actions → Build Rust CLI** to create downloadable test builds. Use
+**Actions → Publish Rust CLI** to build and publish release assets. Run it
+from `main` and leave **source_tag** blank to create the CLI tag for the
+version in `cli/Cargo.toml`. Enter an existing tag such as `v0.1.1` in
+**source_tag** to build that commit and publish its CLI binaries under that
+tag. The build uses the selected tag's version for the executable. If a
+GitHub Release already exists for the tag, the workflow attaches the CLI
+archives and checksums to it. Pushing a `cli-vX.Y.Z` tag also triggers
+publication.
 
 Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
