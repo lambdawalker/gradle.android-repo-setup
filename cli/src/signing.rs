@@ -218,7 +218,12 @@ fn prepare_keystore(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
     }
-    fs::File::open(&temporary)?.sync_all()?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .context("Could not reopen the generated keystore for flushing.")?
+        .sync_all()
+        .context("Could not flush the generated keystore.")?;
     TempPath::try_from_path(temporary)?
         .persist_noclobber(path)
         .map_err(|error| error.error)

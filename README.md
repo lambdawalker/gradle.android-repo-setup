@@ -136,7 +136,8 @@ image where the binary is installed.
 Run `android-repo-setup` with no subcommand to open the setup menu. It offers
 APK key generation, GitHub environment configuration, workflow updates, and
 vault inspection and reset. APK key generation requires the JDK's `keytool`.
-Maven signing key selection and generation use `gpg`. Run
+Maven signing key selection and generation use `gpg`. On Windows, install
+Gpg4win for a native GnuPG keyring. Run
 `android-repo-setup signing --help` for direct signing and vault options, or
 `android-repo-setup --help` for the headless commands.
 

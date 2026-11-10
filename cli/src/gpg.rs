@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -209,6 +209,26 @@ fn gpg_error(operation: &str, output: io::Result<Output>, home: Option<&Path>) -
     }
 }
 
+fn gpg_tool(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        // Git for Windows ships an MSYS GPG that interprets Windows keyring
+        // paths differently. Use both programs from the native installation.
+        for root in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .filter(|root| root.is_absolute())
+        {
+            let bin = root.join("GnuPG").join("bin");
+            if bin.join("gpg.exe").is_file() && bin.join("gpgconf.exe").is_file() {
+                return bin.join(format!("{name}.exe"));
+            }
+        }
+    }
+    PathBuf::from(name)
+}
+
 fn run_gpg(
     operation: &str,
     args: &[&str],
@@ -216,7 +236,7 @@ fn run_gpg(
     keyring: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Vec<u8>> {
-    let mut command = Command::new("gpg");
+    let mut command = Command::new(gpg_tool("gpg"));
     if let Some(keyring) = keyring {
         // The verification agent must use the fresh keyring's configuration.
         command
@@ -553,7 +573,7 @@ fn export_verified_key(fingerprint: &str, passphrase: &str, home: &Path) -> Resu
         Ok(())
     })();
     let _ = run_command(
-        Command::new("gpgconf")
+        Command::new(gpg_tool("gpgconf"))
             .arg("--homedir")
             .arg(keyring.path())
             .args(["--kill", "all"]),

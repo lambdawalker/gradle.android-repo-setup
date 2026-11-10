@@ -179,15 +179,17 @@ pub fn regular_file_exists(path: &Path) -> Result<bool> {
 }
 
 fn file_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
         options
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    OpenOptions::new()
 }
 
 pub fn read_regular_file(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {

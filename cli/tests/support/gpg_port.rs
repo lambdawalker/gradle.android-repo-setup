@@ -26,6 +26,29 @@ fn creates_and_verifies_a_key_without_reusing_an_agents_cached_unlock() {
     // Isolate GNUPGHOME in a subprocess so parallel unit tests retain their environments.
     if let Some(home) = std::env::var_os("ANDROID_SETUP_GPG_TEST_HOME") {
         let home = Path::new(&home);
+        let keyring = home.join("gnupg");
+        let reported = Command::new(gpg_tool("gpgconf"))
+            .args(["--list-dirs", "homedir"])
+            .output()
+            .unwrap();
+        assert!(
+            reported.status.success(),
+            "GnuPG could not resolve the disposable keyring (exit {:?}).",
+            reported.status.code()
+        );
+        let reported = String::from_utf8(reported.stdout).unwrap();
+        assert!(
+            fs::canonicalize(reported.trim()).ok() == Some(fs::canonicalize(keyring).unwrap()),
+            "GnuPG did not resolve GNUPGHOME to the disposable keyring."
+        );
+        run_gpg(
+            "list keys",
+            &["--with-colons", "--list-secret-keys"],
+            b"",
+            None,
+            Some(home),
+        )
+        .unwrap();
         let defaults = home.join(".projects").join(".default");
         fs::create_dir_all(&defaults).unwrap();
         fs::write(
@@ -92,11 +115,24 @@ fn creates_and_verifies_a_key_without_reusing_an_agents_cached_unlock() {
         return;
     }
 
-    if Command::new("gpg").arg("--version").output().is_err() {
-        eprintln!("Skipping disposable keyring check because GnuPG is unavailable.");
-        return;
-    }
-    let fixture = tempfile::tempdir().unwrap();
+    let version = match Command::new(gpg_tool("gpg")).arg("--version").output() {
+        Ok(version) if version.status.success() => version.stdout,
+        Ok(version) => panic!(
+            "GnuPG version check failed (exit {:?}).",
+            version.status.code()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            eprintln!("Skipping disposable keyring check because GnuPG is unavailable.");
+            return;
+        }
+        Err(error) => panic!(
+            "Could not start GnuPG (OS error {:?}).",
+            error.raw_os_error()
+        ),
+    };
+    let version = String::from_utf8_lossy(&version);
+    let version = version.lines().next().unwrap_or("GnuPG");
+    let fixture = tempfile::Builder::new().prefix("gpg-").tempdir().unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixListener;
@@ -129,16 +165,18 @@ fn creates_and_verifies_a_key_without_reusing_an_agents_cached_unlock() {
         .env("GNUPGHOME", &keyring)
         .output()
         .unwrap();
-    let _ = Command::new("gpgconf")
+    let _ = Command::new(gpg_tool("gpgconf"))
         .arg("--homedir")
         .arg(&keyring)
         .args(["--kill", "all"])
         .output();
     assert!(
         result.status.success(),
-        "{}\n{}",
+        "{version}\n{}\n{}\n{}",
         String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+        String::from_utf8_lossy(&result.stderr),
+        fs::read_to_string(fixture.path().join(".projects/.default/gpg-errors.log"))
+            .unwrap_or_default()
     );
     assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
 }

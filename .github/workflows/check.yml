@@ -24,4 +24,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Select native GnuPG on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\GnuPG\bin",
+            "${env:ProgramFiles(x86)}\GnuPG\bin"
+          )
+          $gpgBin = $candidates | Where-Object { Test-Path (Join-Path $_ 'gpg.exe') } | Select-Object -First 1
+          if (-not $gpgBin) {
+            choco install gpg4win --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "Gpg4win installation failed" }
+            $gpgBin = $candidates | Where-Object { Test-Path (Join-Path $_ 'gpg.exe') } | Select-Object -First 1
+          }
+          if (-not $gpgBin) { throw "Native GnuPG was not found" }
+          $gpgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $gpgBin 'gpg.exe') --version
       - run: cargo test --locked --manifest-path cli/Cargo.toml
