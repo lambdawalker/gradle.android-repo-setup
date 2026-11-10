@@ -205,3 +205,68 @@ fn rejects_wrong_source_dirty_checkout_and_invalid_artifacts() {
     .unwrap();
     fail(&candidate.source, "Tracked files differ from source");
 }
+
+#[test]
+fn confirmation_checks_the_annotated_remote_reservation_before_network_requests() {
+    let candidate = Candidate::create(false);
+    let root = candidate.directory.path();
+    let record = candidate.record("maven-central");
+    let remote = tempfile::tempdir().unwrap();
+    let remote_path = remote.path().to_str().unwrap();
+    git(remote.path(), &["init", "--bare"]);
+    git(root, &["remote", "add", "origin", remote_path]);
+    let tag = "release-pending/demo/9.8.7";
+    let reference = format!("refs/tags/{tag}");
+    let run = |source: &str| {
+        Command::new(env!("CARGO_BIN_EXE_android-repo-setup"))
+            .arg("--project")
+            .arg(root)
+            .args([
+                "module_release",
+                "confirm",
+                "--module",
+                "demo",
+                "--version",
+                "9.8.7",
+                "--source",
+                source,
+                "--timeout",
+                "0",
+            ])
+            .env("RELEASE_REPOSITORY", "maven-central")
+            .output()
+            .unwrap()
+    };
+    let assert_error = |output: Output, expected: &str| {
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(expected), "{error}");
+        assert!(!root.join("build/confirmed-demo.json").exists());
+    };
+
+    git(root, &["tag", tag]);
+    assert_error(run(&candidate.source), "Journal must be annotated");
+    git(root, &["tag", "-d", tag]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "tag.gpgsign=false",
+            "tag",
+            "-a",
+            tag,
+            "-m",
+            &record.to_string(),
+        ],
+    );
+    assert_error(run(&candidate.source), "Remote reservation differs");
+    git(root, &["push", "origin", &reference]);
+    assert_error(
+        run(SHA_PLACEHOLDER),
+        "Confirmation source differs from reservation",
+    );
+}

@@ -138,3 +138,20 @@ coordinates, POM, AAR, sources, documentation and Gradle metadata and prints
 the candidate record with SHA-256 hashes. It does not write release tags or
 upload artifacts. The current artifact contract follows Demo Common, including
 its exported Compose dependencies and Java 17 bytecode.
+
+To confirm an existing annotated reservation against the public registry, run:
+
+```sh
+android-repo-setup module_release confirm --module demo-common --version 0.1.2
+```
+
+Use the same `RELEASE_REPOSITORY` as the reservation. The command uses the
+current commit as the expected source by default. Pass `--source` with the full
+commit SHA when running from another checkout of the same repository. Maven
+Central confirmation compares artifact hashes and checks for detached signature
+files. JitPack confirmation verifies the build's commit and records hashes of
+the public artifacts. The command writes `build/confirmed-demo-common.json` for
+Central or `build/jitpack/confirmed-demo-common.json` for JitPack.
+
+If propagation times out, preserve the reservation and rerun confirmation.
+`--timeout` controls the polling window in seconds and defaults to 2400.

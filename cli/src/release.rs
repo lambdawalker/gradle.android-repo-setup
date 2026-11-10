@@ -9,9 +9,9 @@ use std::path::Path;
 use std::process::Command;
 use zip::ZipArchive;
 
-const SUFFIXES: [&str; 5] = [".pom", ".aar", "-sources.jar", "-javadoc.jar", ".module"];
-const CENTRAL: &str = "https://repo.maven.apache.org/maven2";
-const JITPACK: &str = "https://jitpack.io";
+pub(super) const SUFFIXES: [&str; 5] = [".pom", ".aar", "-sources.jar", "-javadoc.jar", ".module"];
+pub(super) const CENTRAL: &str = "https://repo.maven.apache.org/maven2";
+pub(super) const JITPACK: &str = "https://jitpack.io";
 
 #[derive(Deserialize)]
 struct ProjectConfig {
@@ -58,10 +58,6 @@ pub(crate) fn check_local<'a>(
     workflow_run: &'a str,
 ) -> Result<Record<'a>> {
     ensure!(
-        Regex::new(r"\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z")?.is_match(version),
-        "Expected stable X.Y.Z"
-    );
-    ensure!(
         Regex::new(r"\A[0-9a-f]{40}\z")?.is_match(source),
         "Invalid source SHA"
     );
@@ -79,6 +75,61 @@ pub(crate) fn check_local<'a>(
         "Tracked files differ from source or Git could not verify the checkout"
     );
 
+    let coordinates = coordinates(root, module, version, destination, true)?;
+    let Coordinates {
+        group,
+        artifact,
+        repository_url,
+        consumer_version,
+    } = coordinates;
+    let consumer = consumer_version.as_deref().unwrap_or(version);
+    let directory = root
+        .join("build/verification-repository")
+        .join(group.replace('.', "/"))
+        .join(&artifact)
+        .join(consumer);
+    let mut sha256 = BTreeMap::new();
+    for suffix in SUFFIXES {
+        let path = directory.join(format!("{artifact}-{consumer}{suffix}"));
+        let data = fs::read(&path).with_context(|| format!("Could not read {}", path.display()))?;
+        verify(&data, suffix, &group, &artifact, consumer, true)
+            .with_context(|| format!("Invalid artifact {}", path.display()))?;
+        sha256.insert(suffix, format!("{:x}", Sha256::digest(&data)));
+    }
+    Ok(Record {
+        module,
+        version,
+        source,
+        group,
+        artifact,
+        sha256,
+        phase: "reserved-before-upload",
+        workflow_run,
+        repository: destination,
+        repository_url,
+        source_tag: format!("{module}/v{version}-{destination}"),
+        consumer_version,
+    })
+}
+
+pub(super) struct Coordinates {
+    pub group: String,
+    pub artifact: String,
+    pub repository_url: &'static str,
+    pub consumer_version: Option<String>,
+}
+
+pub(super) fn coordinates(
+    root: &Path,
+    module: &str,
+    version: &str,
+    destination: &str,
+    scoped: bool,
+) -> Result<Coordinates> {
+    ensure!(
+        Regex::new(r"\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z")?.is_match(version),
+        "Expected stable X.Y.Z"
+    );
     let config: ProjectConfig = serde_yaml_ng::from_str(&fs::read_to_string(
         root.join(".project/setup/config.yaml"),
     )?)?;
@@ -152,42 +203,23 @@ pub(crate) fn check_local<'a>(
             format!("com.github.{owner}"),
             repo.to_owned(),
             JITPACK,
-            Some(format!("{module}~v{version}-jitpack")),
+            Some(format!(
+                "{module}~v{version}{}",
+                if scoped { "-jitpack" } else { "" }
+            )),
         )
     } else {
         (group.to_owned(), artifact.to_owned(), CENTRAL, None)
     };
-    let consumer = consumer_version.as_deref().unwrap_or(version);
-    let directory = root
-        .join("build/verification-repository")
-        .join(group.replace('.', "/"))
-        .join(&artifact)
-        .join(consumer);
-    let mut sha256 = BTreeMap::new();
-    for suffix in SUFFIXES {
-        let path = directory.join(format!("{artifact}-{consumer}{suffix}"));
-        let data = fs::read(&path).with_context(|| format!("Could not read {}", path.display()))?;
-        verify(&data, suffix, &group, &artifact, consumer)
-            .with_context(|| format!("Invalid artifact {}", path.display()))?;
-        sha256.insert(suffix, format!("{:x}", Sha256::digest(&data)));
-    }
-    Ok(Record {
-        module,
-        version,
-        source,
+    Ok(Coordinates {
         group,
         artifact,
-        sha256,
-        phase: "reserved-before-upload",
-        workflow_run,
-        repository: destination,
         repository_url,
-        source_tag: format!("{module}/v{version}-{destination}"),
         consumer_version,
     })
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
+pub(super) fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")
         .args(args)
         .current_dir(root)
@@ -195,7 +227,14 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
         .context("Could not run Git")
 }
 
-fn verify(data: &[u8], suffix: &str, group: &str, artifact: &str, version: &str) -> Result<()> {
+pub(super) fn verify(
+    data: &[u8],
+    suffix: &str,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    local: bool,
+) -> Result<()> {
     if suffix == ".pom" {
         return verify_pom(data, group, artifact, version);
     }
@@ -222,7 +261,7 @@ fn verify(data: &[u8], suffix: &str, group: &str, artifact: &str, version: &str)
         } else {
             io::copy(&mut entry, &mut io::sink())?;
         }
-        if suffix == "-javadoc.jar" && !entry.is_dir() {
+        if local && suffix == "-javadoc.jar" && !entry.is_dir() {
             ensure!(
                 name.ends_with(".md")
                     || matches!(name.as_str(), "LICENSE" | "META-INF/MANIFEST.MF"),
@@ -266,7 +305,9 @@ fn verify(data: &[u8], suffix: &str, group: &str, artifact: &str, version: &str)
             "Sources JAR has no Kotlin source"
         ),
         "-javadoc.jar" => ensure!(
-            names.iter().any(|name| name.ends_with(".md")),
+            names
+                .iter()
+                .any(|name| name.ends_with(".md") || (!local && name.ends_with(".html"))),
             "Documentation JAR has no documentation"
         ),
         _ => unreachable!(),

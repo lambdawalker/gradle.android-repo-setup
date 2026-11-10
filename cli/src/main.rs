@@ -1,3 +1,4 @@
+mod confirmation;
 mod release;
 mod workflows;
 
@@ -36,6 +37,17 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ReleaseCommand {
+    /// Verify public artifacts against an existing release reservation.
+    Confirm {
+        #[arg(long)]
+        module: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, default_value_t = 2400)]
+        timeout: u64,
+    },
     /// Verify locally assembled publication artifacts and print a candidate release record.
     CheckLocal {
         #[arg(long)]
@@ -49,6 +61,27 @@ enum ReleaseCommand {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::ModuleRelease {
+            command:
+                ReleaseCommand::Confirm {
+                    module,
+                    version,
+                    source,
+                    timeout,
+                },
+        } => {
+            let destination =
+                std::env::var("RELEASE_REPOSITORY").unwrap_or_else(|_| "maven-central".into());
+            confirmation::confirm(
+                &cli.project,
+                &module,
+                &version,
+                &destination,
+                source.as_deref(),
+                std::time::Duration::from_secs(timeout),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::ModuleRelease {
             command:
                 ReleaseCommand::CheckLocal {

@@ -16,4 +16,5 @@ serde_yaml_ng = "0.10"
 sha2 = "0.10"
 similar = "2"
 tempfile = "3"
+ureq = { version = "3", default-features = false, features = ["platform-verifier", "rustls"] }
 zip = { version = "6", default-features = false, features = ["deflate"] }
