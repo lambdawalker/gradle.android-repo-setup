@@ -67,7 +67,11 @@ fn cli_updates_the_tooling_pin_without_reformatting_other_yaml() {
     let root = fixture();
     let pin = "1234567890abcdef1234567890abcdef12345678";
     let config = root.path().join(".project/setup/config.yaml");
-    let original = fs::read_to_string(&config).unwrap();
+    let original = fs::read_to_string(&config)
+        .unwrap()
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
+    fs::write(&config, &original).unwrap();
     assert!(
         !run(root.path(), &["--overwrite", "--set-tooling-ref", "main"])
             .status

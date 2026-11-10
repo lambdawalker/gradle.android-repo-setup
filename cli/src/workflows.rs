@@ -121,8 +121,8 @@ fn set_tooling_ref(root: &Path, reference: &str) -> Result<()> {
     for entry in [&project, &setup, &path] {
         reject_symlink(entry)?;
     }
-    let content = read(&path)?;
-    let key = Regex::new(r"(?m)^tooling_ref:[^\n]*$")?;
+    let content = fs::read_to_string(&path)?;
+    let key = Regex::new(r"(?m)^tooling_ref:[^\r\n]*")?;
     ensure!(
         key.find_iter(&content).count() == 1,
         "Expected one top-level tooling_ref"
