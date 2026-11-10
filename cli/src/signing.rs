@@ -70,11 +70,11 @@ fn read_password(label: &str, allow_generate: bool, saved: Option<&str>) -> Resu
             return Ok((generate_password()?, true));
         }
         if value.chars().count() < 6 || value.chars().any(|ch| ch <= '\u{1f}' || ch == '\u{7f}') {
-            println!("Enter at least six characters without control characters.");
+            setup_message!("Enter at least six characters without control characters.");
         } else if value == secret_prompt(&format!("Confirm {}", label.to_ascii_lowercase()))? {
             return Ok((value, false));
         } else {
-            println!("Passwords differ. Try again.");
+            setup_message!("Passwords differ. Try again.");
         }
     }
 }
@@ -329,7 +329,7 @@ fn confirm_backup(generated: &[(&str, &str)]) -> Result<bool> {
     }
     private_screen(|| {
         for (label, password) in generated {
-            println!("{label} {password}");
+            setup_message!("{label} {password}");
         }
         confirm("Have you saved these passwords in your password manager?")
     })
@@ -444,10 +444,10 @@ fn upload(
                 "A signing secret was added concurrently. Rerun to review the state."
             );
             api.write_secret(&config.environment, name, value)?;
-            println!("Uploaded {name}.");
+            setup_message!("Uploaded {name}.");
         }
     }
-    println!("APK signing environment prepared.");
+    setup_message!("APK signing environment prepared.");
     Ok(())
 }
 
@@ -467,7 +467,7 @@ pub fn run(
     let local = operations.contains(&"key");
     let mut remote = None;
     let mut missing = Vec::new();
-    println!("Accepted answers are saved in the encrypted local vault as you go.");
+    setup_message!("Accepted answers are saved in the encrypted local vault as you go.");
     if operations.contains(&"github") {
         let saved = vault
             .state
@@ -491,7 +491,9 @@ pub fn run(
         );
         if missing.is_empty() {
             ensure_branch_policy(&api, config, state.0.as_ref(), false)?;
-            println!("All APK signing secrets already exist. Existing values were preserved.");
+            setup_message!(
+                "All APK signing secrets already exist. Existing values were preserved."
+            );
             if !local {
                 vault.state.finish("github");
                 vault.save()?;
@@ -545,9 +547,9 @@ pub fn run(
     let (key, new_key) = read_password("Key password", !reuse, passwords.key.as_deref())?;
     passwords.key = Some(key);
     vault.save()?;
-    println!("Repository {}", config.repository);
-    println!("Keystore {}", path.display());
-    println!(
+    setup_message!("Repository {}", config.repository);
+    setup_message!("Keystore {}", path.display());
+    setup_message!(
         "{}",
         if reuse {
             "Reuse existing keystore."
@@ -556,11 +558,12 @@ pub fn run(
         }
     );
     if !missing.is_empty() {
-        println!(
+        setup_message!(
             "Environment {} ({} only)",
-            config.environment, config.branch
+            config.environment,
+            config.branch
         );
-        println!("Upload missing secrets {}", missing.join(", "));
+        setup_message!("Upload missing secrets {}", missing.join(", "));
     }
     if !confirm("Apply these changes?")? {
         return Ok(false);
@@ -582,7 +585,7 @@ pub fn run(
     let passwords = vault.state.signing_passwords.as_ref().unwrap();
     let key = passwords.key.as_deref().unwrap();
     prepare_keystore(&keytool, &path, &alias, &passwords.store, key, reuse)?;
-    println!(
+    setup_message!(
         "Keystore ready at {}. Keep an offline backup.",
         path.display()
     );

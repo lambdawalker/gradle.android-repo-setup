@@ -1,16 +1,6 @@
 use anyhow::{bail, ensure, Context, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use crossterm::{
-    cursor::{MoveTo, MoveToColumn},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
-    },
-    execute,
-    style::Print,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use crypto_secretbox::{
     aead::{AeadInPlace, KeyInit},
     Nonce, Tag, XSalsa20Poly1305,
@@ -23,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use unicode_casefold::UnicodeCaseFold;
 
@@ -513,207 +502,25 @@ pub fn interactive() -> Result<()> {
     Ok(())
 }
 
-struct RawTerminal {
-    editing: bool,
-}
-
-impl RawTerminal {
-    fn enable(editing: bool) -> Result<Self> {
-        terminal::enable_raw_mode()?;
-        let guard = Self { editing };
-        if editing {
-            execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
-        }
-        Ok(guard)
-    }
-}
-
-impl Drop for RawTerminal {
-    fn drop(&mut self) {
-        if self.editing {
-            let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
-        }
-        let _ = terminal::disable_raw_mode();
-    }
-}
-
-fn render_line(text: &str) -> Result<()> {
-    execute!(
-        io::stdout(),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine),
-        Print(text)
-    )?;
-    Ok(())
-}
-
-fn pressed_key(event: Event) -> Result<Option<KeyEvent>> {
-    if let Event::Key(key) = event {
-        if key.kind == KeyEventKind::Release {
-            return Ok(None);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c' | 'q'))
-        {
-            bail!("Setup cancelled.");
-        }
-        return Ok(Some(key));
-    }
-    Ok(None)
-}
-
-fn timed_prompt(label: &str, default: &str) -> Result<String> {
-    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
-    println!("{label} [{default}]");
-    let _terminal = RawTerminal::enable(true)?;
-    let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    let mut touched = false;
-    let mut input = Vec::new();
-    let mut cursor: usize = 0;
-    let mut displayed_seconds = 0;
-    let answer = loop {
-        let event = if touched {
-            let width = terminal::size()
-                .ok()
-                .map(|(cols, _)| cols as usize)
-                .filter(|cols| *cols > 4)
-                .unwrap_or(80)
-                - 3;
-            let start = (cursor + 1).saturating_sub(width);
-            let line: String = input.iter().skip(start).take(width).collect();
-            render_line(&format!("> {line}"))?;
-            execute!(io::stdout(), MoveToColumn((2 + cursor - start) as u16))?;
-            event::read()?
-        } else {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break default.to_owned();
-            }
-            let seconds = remaining.as_millis().div_ceil(1000);
-            if seconds != displayed_seconds {
-                render_line(&format!(
-                    "Default in {seconds}s. Enter to accept or type to pause."
-                ))?;
-                displayed_seconds = seconds;
-            }
-            if !event::poll(remaining.min(Duration::from_millis(200)))? {
-                continue;
-            }
-            event::read()?
-        };
-        if matches!(&event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_))) {
-            touched = true;
-            continue;
-        }
-        if let Event::Paste(pasted) = event {
-            let pasted: Vec<_> = pasted.chars().filter(|ch| !ch.is_control()).collect();
-            let len = pasted.len();
-            input.splice(cursor..cursor, pasted);
-            cursor += len;
-            touched = true;
-            continue;
-        }
-        let Some(key) = pressed_key(event)? else {
-            continue;
-        };
-        touched = true;
-        match key.code {
-            KeyCode::Enter => {
-                let input: String = input.into_iter().collect();
-                let input = input.trim();
-                break if input.is_empty() { default } else { input }.to_owned();
-            }
-            KeyCode::Esc => {
-                render_line("Cancelled.\r\n")?;
-                bail!("Setup cancelled.");
-            }
-            KeyCode::Char(ch)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                input.insert(cursor, ch);
-                cursor += 1;
-            }
-            KeyCode::Backspace if cursor > 0 => {
-                cursor -= 1;
-                input.remove(cursor);
-            }
-            KeyCode::Delete if cursor < input.len() => {
-                input.remove(cursor);
-            }
-            KeyCode::Left => cursor = cursor.saturating_sub(1),
-            KeyCode::Right => cursor = (cursor + 1).min(input.len()),
-            KeyCode::Home => cursor = 0,
-            KeyCode::End => cursor = input.len(),
-            _ => {}
-        }
-    };
-    render_line(&format!("> {answer}\r\n"))?;
-    Ok(answer)
-}
-
 pub fn prompt(label: &str, default: Option<&str>) -> Result<String> {
-    if let Some(default) = default {
-        return timed_prompt(label, default);
-    }
-    print!("{label} ");
-    io::stdout().flush()?;
-    let mut answer = String::new();
-    ensure!(io::stdin().read_line(&mut answer)? > 0, "Input closed.");
-    Ok(answer.trim().to_owned())
+    crate::ui::prompt(label, default, false)
 }
 
 pub fn secret_prompt(label: &str) -> Result<String> {
-    Ok(rpassword::prompt_password(format!("{label} "))?)
+    crate::ui::prompt(label, None, true)
 }
 
 pub fn confirm(label: &str) -> Result<bool> {
-    println!("{label}");
-    println!("Space toggles, Enter applies, Esc cancels.");
-    let _terminal = RawTerminal::enable(false)?;
-    let mut acknowledged = false;
-    let confirmed = loop {
-        let marker = if acknowledged { 'x' } else { ' ' };
-        render_line(&format!("[{marker}] I understand and want to continue."))?;
-        let Some(key) = pressed_key(event::read()?)? else {
-            continue;
-        };
-        match key.code {
-            KeyCode::Char(' ') if key.kind == KeyEventKind::Press => acknowledged = !acknowledged,
-            KeyCode::Enter if acknowledged => break true,
-            KeyCode::Esc => break false,
-            _ => {}
-        }
-    };
-    render_line(if confirmed {
-        "Confirmed.\r\n"
-    } else {
-        "Cancelled.\r\n"
-    })?;
-    Ok(confirmed)
+    crate::ui::confirm(label)
 }
 
 pub fn use_saved(label: &str) -> Result<bool> {
-    loop {
-        match prompt(
-            &format!("{label} has a saved value. [1] Use vault value [2] Set a new value"),
-            Some("1"),
-        )?
-        .as_str()
-        {
-            "1" => return Ok(true),
-            "2" => return Ok(false),
-            _ => println!("Enter 1 or 2."),
-        }
-    }
+    crate::ui::use_saved(label)
 }
 
 pub fn private_screen<T>(display: impl FnOnce() -> Result<T>) -> Result<T> {
-    execute!(io::stdout(), EnterAlternateScreen, MoveTo(0, 0))?;
-    let result = display();
-    execute!(io::stdout(), Clear(ClearType::All), LeaveAlternateScreen)?;
-    result
+    // Sensitive contents are discarded with the current UI question after dismissal.
+    display()
 }
 
 pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVault> {
@@ -722,7 +529,7 @@ pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVa
         return SetupVault::open(&path, &secret_prompt("Unlock local setup vault")?);
     }
 
-    println!("Choose a vault password to encrypt saved setup answers on this device.");
+    setup_message!("Choose a vault password to encrypt saved setup answers on this device.");
     loop {
         let password = secret_prompt("Create vault password (at least 12 characters)")?;
         if password.chars().count() >= 12 && password == secret_prompt("Confirm vault password")? {
@@ -730,7 +537,7 @@ pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVa
             vault.save()?;
             return Ok(vault);
         }
-        println!("Use at least 12 characters and enter the same password twice.");
+        setup_message!("Use at least 12 characters and enter the same password twice.");
     }
 }
 
@@ -748,19 +555,19 @@ pub fn view(config: &SetupConfig) -> Result<bool> {
         ) {
             Ok(vault) => break vault,
             Err(error) => {
-                println!("{error}");
+                setup_message!("{error}");
                 if !confirm("Try again?")? {
                     return Ok(false);
                 }
             }
         }
     };
-    println!("Saved setup vault · read-only");
-    println!("{}", vault.formatted(false)?);
-    println!("Revealing displays passwords, tokens, and saved keys.");
+    setup_message!("Saved setup vault · read-only");
+    setup_message!("{}", vault.formatted(false)?);
+    setup_message!("Revealing displays passwords, tokens, and saved keys.");
     if confirm("I am in a private terminal. Reveal vault secrets?")? {
         private_screen(|| {
-            println!("{}", vault.formatted(true)?);
+            setup_message!("{}", vault.formatted(true)?);
             prompt("Press Enter to hide secrets and close.", None)?;
             Ok(())
         })?;
@@ -771,13 +578,13 @@ pub fn view(config: &SetupConfig) -> Result<bool> {
 pub fn remake(config: &SetupConfig) -> Result<bool> {
     interactive()?;
     let _lock = lock(config, true)?;
-    println!("Remaking the local vault clears its saved credentials and setup progress.");
-    println!("If the vault holds your only copy of a password you still need, recover it with View vault first.");
+    setup_message!("Remaking the local vault clears its saved credentials and setup progress. The APK keystore file will not be deleted. GitHub environment secrets will remain.");
+    setup_message!("If the vault holds your only copy of a password you still need, recover it with View vault first.");
     if !confirm("Replace the local vault?")? {
         return Ok(false);
     }
     unlock_interactive(config, true)?;
-    println!("Created a new encrypted setup vault.");
+    setup_message!("Created a new encrypted setup vault.");
     Ok(true)
 }
 

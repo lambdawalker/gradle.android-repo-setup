@@ -140,6 +140,20 @@ Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
 `.exe` extension. It reads the existing `.project/setup/config.yaml`.
 
+Running `android-repo-setup` opens the Cursive deployment wizard. It includes
+APK signing, GitHub signing and publishing environments, workflow previews,
+and vault viewing and recreation. The standalone `signing` and
+`setup_github_environments` commands use the same interface.
+
+Use Tab and Shift+Tab to move between controls, Space to toggle a checkbox,
+and Enter to activate a button. Ctrl+V pastes a single line into the focused
+field. Password fields are masked. Saved answers default to reuse after
+20 seconds, and interacting with the screen pauses the countdown. Review
+screens require checking the confirmation box before Apply becomes available.
+The Maven key picker loads local GnuPG keys in the background and offers a
+form for creating and verifying a new project key. Use a terminal of at least
+80 columns by 24 rows.
+
 ```sh
 android-repo-setup workflows --check
 android-repo-setup workflows

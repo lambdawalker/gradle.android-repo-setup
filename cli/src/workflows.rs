@@ -189,8 +189,8 @@ fn compare_and_apply(root: &Path, output: &Path, manifest: &Path, mode: Mode) ->
             Some(text) if hashes.get(name) != Some(&hash(text)) => "local/untracked changes",
             _ => "template update",
         };
-        println!("{name}: {kind}");
-        print!(
+        setup_message!("{name}: {kind}");
+        setup_message!(
             "{}",
             TextDiff::from_lines(previous.as_deref().unwrap_or(""), &content)
                 .unified_diff()
