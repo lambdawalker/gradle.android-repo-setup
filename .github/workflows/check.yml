@@ -19,6 +19,7 @@ jobs:
   cli:
     name: Rust CLI (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -43,12 +44,9 @@ jobs:
               throw "GnuPG installer checksum mismatch"
             }
             $installDir = Join-Path $env:RUNNER_TEMP 'gnupg-native'
-            $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$installDir" -PassThru
-            if (-not $process.WaitForExit(60000)) {
-              $process.Kill()
-              throw "GnuPG installation timed out"
-            }
-            if ($process.ExitCode -ne 0) { throw "GnuPG installation failed" }
+            $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            & $sevenZip x -y $installer "-o$installDir"
+            if ($LASTEXITCODE -ne 0) { throw "GnuPG payload extraction failed" }
             $gpgBin = Join-Path $installDir 'bin'
           }
           if (-not $gpgBin -or -not (Test-Path (Join-Path $gpgBin 'gpg.exe'))) {
