@@ -100,6 +100,18 @@ Build the Rust CLI from the repository root:
 cargo build --locked --release --manifest-path cli/Cargo.toml
 ```
 
+To download prebuilt executables, use the CLI releases on GitHub. Each release
+includes a Windows x64 ZIP and Linux x64 and Apple Silicon macOS tarballs,
+each with its own SHA-256 checksum. Extract the archive and put the executable
+on `PATH`. The APK and Maven signing commands use `keytool` and GnuPG,
+respectively.
+
+For a test build, run **Build Rust CLI** from the Actions tab and download the
+artifact for your platform. To publish, push a tag on `main` that matches the
+version in `cli/Cargo.toml`, such as `cli-v0.1.0`. The workflow publishes the
+GitHub Release after all three builds pass. Gradle plugin publication uses its
+own workflow.
+
 Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
 `.exe` extension. It reads the existing `.project/setup/config.yaml`.

@@ -1,0 +1,124 @@
+name: Build Rust CLI
+
+on:
+  pull_request:
+    paths:
+      - 'cli/**'
+      - '.github/workflows/build-rust-cli.yml'
+      - 'LICENSE'
+  workflow_dispatch:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test the release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add "$TARGET"
+          cargo build --manifest-path cli/Cargo.toml --locked --release --target "$TARGET"
+          executable=android-repo-setup
+          if [[ "$RUNNER_OS" == Windows ]]; then executable+=.exe; fi
+          binary="cli/target/$TARGET/release/$executable"
+          version="$("$binary" --version)"
+          printf '%s\n' "$version"
+          "$binary" --help
+          if [[ "$GITHUB_REF" == refs/tags/cli-v* && "$version" != "android-repo-setup ${GITHUB_REF#refs/tags/cli-v}" ]]; then
+            echo "The CLI tag must match the Cargo package version." >&2
+            exit 1
+          fi
+          mkdir -p package dist
+          cp "$binary" package/
+          cp LICENSE package/
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path package/* -DestinationPath "dist/android-repo-setup-$env:TARGET.zip"
+      - name: Package Unix executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "dist/android-repo-setup-$TARGET.tar.gz" -C package android-repo-setup LICENSE
+      - name: Generate archive checksum
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          archive="android-repo-setup-$TARGET.tar.gz"
+          if [[ "$RUNNER_OS" == Windows ]]; then archive="android-repo-setup-$TARGET.zip"; fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+      - uses: actions/upload-artifact@v6
+        with:
+          name: android-repo-setup-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish CLI release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cli-v') && github.repository == 'lambdawalker/gradle.android-repo-setup'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: rust-cli-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release source is on main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: android-repo-setup-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and publish
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for archive in \
+            android-repo-setup-x86_64-pc-windows-msvc.zip \
+            android-repo-setup-x86_64-unknown-linux-gnu.tar.gz \
+            android-repo-setup-aarch64-apple-darwin.tar.gz
+          do
+            test -f "$archive"
+            sha256sum --check "$archive.sha256"
+          done
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --latest=false \
+            --title "Android Repo Setup CLI ${GITHUB_REF_NAME#cli-v}" \
+            ./*.zip ./*.tar.gz ./*.sha256
