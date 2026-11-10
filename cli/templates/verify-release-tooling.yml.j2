@@ -17,10 +17,12 @@ jobs:
       RELEASE_REPOSITORY: ${{ matrix.destination }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - name: Install pinned Rust tooling
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
       - run: android-repo-setup publishing_config check
       - uses: actions/setup-java@v5
         with:

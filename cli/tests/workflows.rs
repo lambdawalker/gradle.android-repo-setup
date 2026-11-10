@@ -27,7 +27,7 @@ fn run(root: &Path, flags: &[&str]) -> Output {
 }
 
 #[test]
-fn cli_matches_python_workflows() {
+fn cli_generates_native_workflows_and_tracks_their_content() {
     let root = fixture();
     let generated = run(root.path(), &[]);
     assert!(
@@ -36,16 +36,59 @@ fn cli_matches_python_workflows() {
         String::from_utf8_lossy(&generated.stderr)
     );
     let output = root.path().join(".github/workflows");
-    let hashes = include_str!("fixtures/python-workflow-hashes.txt");
-    assert_eq!(
-        fs::read_dir(&output).unwrap().count(),
-        hashes.lines().count()
-    );
-    for line in hashes.lines() {
-        let (expected, name) = line.split_once(' ').unwrap();
-        let bytes = fs::read(output.join(name)).unwrap();
-        assert_eq!(expected, format!("{:x}", Sha256::digest(&bytes)), "{name}");
+    let manifest = fs::read(root.path().join(".project/setup/workflow-generation.json")).unwrap();
+    let hashes: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&manifest).unwrap();
+    assert_eq!(hashes.len(), 10);
+    assert_eq!(fs::read_dir(&output).unwrap().count(), hashes.len());
+    for (name, expected) in hashes {
+        let contents = fs::read_to_string(output.join(&name)).unwrap();
+        assert_eq!(
+            expected,
+            format!("{:x}", Sha256::digest(contents.as_bytes())),
+            "{name}"
+        );
+        assert!(
+            !contents.contains("setup-python") && !contents.contains("pip install"),
+            "{name}"
+        );
+        if contents.contains("android-repo-setup ") {
+            assert!(contents.contains("cargo install --locked --git"), "{name}");
+            assert!(
+                contents.contains("https://github.com/lambdawalker/gradle.android-repo-setup.git"),
+                "{name}"
+            );
+        }
     }
+}
+
+#[test]
+fn cli_updates_the_tooling_pin_without_reformatting_other_yaml() {
+    let root = fixture();
+    let pin = "1234567890abcdef1234567890abcdef12345678";
+    let config = root.path().join(".project/setup/config.yaml");
+    let original = fs::read_to_string(&config).unwrap();
+    assert!(
+        !run(root.path(), &["--overwrite", "--set-tooling-ref", "main"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    let result = run(root.path(), &["--overwrite", "--set-tooling-ref", pin]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        original.replace("tooling_ref: v0.1.4", &format!("tooling_ref: '{pin}'"))
+    );
+    assert!(
+        fs::read_to_string(root.path().join(".github/workflows/documentation.yml"))
+            .unwrap()
+            .contains(pin)
+    );
 }
 
 #[test]

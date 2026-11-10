@@ -19,19 +19,6 @@ struct ProjectConfig {
     modules: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Registry {
-    repositories: BTreeMap<String, Destination>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Destination {
-    environment: String,
-    publisher: String,
-}
-
 #[derive(Serialize)]
 pub(crate) struct Record<'a> {
     module: &'a str,
@@ -126,6 +113,18 @@ pub(super) fn coordinates(
     destination: &str,
     scoped: bool,
 ) -> Result<Coordinates> {
+    coordinates_for_record(root, module, version, destination, scoped, true, None)
+}
+
+pub(super) fn coordinates_for_record(
+    root: &Path,
+    module: &str,
+    version: &str,
+    destination: &str,
+    scoped: bool,
+    require_configured: bool,
+    record_artifact: Option<&str>,
+) -> Result<Coordinates> {
     ensure!(
         Regex::new(r"\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z")?.is_match(version),
         "Expected stable X.Y.Z"
@@ -149,30 +148,40 @@ pub(super) fn coordinates(
             "Invalid repository identity"
         );
     }
-    let registry: Registry = serde_yaml_ng::from_str(&fs::read_to_string(
-        root.join(".project/setup/repositories.yml"),
-    )?)?;
-    let environment = Regex::new(r"\A[A-Za-z0-9_-]{1,100}\z")?;
-    let mut names = HashSet::new();
-    ensure!(
-        registry.repositories.contains_key("maven-central"),
-        "Missing Maven Central destination"
-    );
-    for (name, entry) in &registry.repositories {
+    if require_configured {
+        let registry =
+            crate::publishing::load_registry(&root.join(".project/setup/repositories.yml"))?;
         ensure!(
-            matches!(
-                (name.as_str(), entry.publisher.as_str()),
-                ("maven-central", "central") | ("jitpack", "jitpack")
-            ) && environment.is_match(&entry.environment)
-                && names.insert(entry.environment.to_ascii_lowercase()),
-            "Invalid release destination configuration: {name}"
+            registry.contains_key(destination),
+            "Unknown release repository"
         );
     }
-    ensure!(
-        registry.repositories.contains_key(destination),
-        "Unknown release repository"
-    );
 
+    if destination == "jitpack" {
+        ensure!(
+            record_artifact.is_none_or(|artifact| artifact == repo),
+            "Unexpected JitPack module/artifact identity"
+        );
+        return Ok(Coordinates {
+            group: format!("com.github.{owner}"),
+            artifact: repo.to_owned(),
+            repository_url: JITPACK,
+            consumer_version: Some(format!(
+                "{module}~v{version}{}",
+                if scoped { "-jitpack" } else { "" }
+            )),
+        });
+    }
+    let (group, artifact) = local_identity(root, module)?;
+    Ok(Coordinates {
+        group,
+        artifact,
+        repository_url: CENTRAL,
+        consumer_version: None,
+    })
+}
+
+pub(super) fn local_identity(root: &Path, module: &str) -> Result<(String, String)> {
     let properties = fs::read_to_string(root.join("gradle.properties"))?;
     let properties: BTreeMap<_, _> = properties
         .lines()
@@ -186,37 +195,17 @@ pub(super) fn coordinates(
         })
         .collect();
     let group = *properties.get("GROUP").context("Missing GROUP")?;
-    let artifact = *properties
-        .get("POM_ARTIFACT_ID")
-        .context("Missing POM_ARTIFACT_ID")?;
+    let artifact = properties
+        .get(format!("POM_ARTIFACT_ID.{module}").as_str())
+        .or_else(|| properties.get("POM_ARTIFACT_ID"))
+        .copied()
+        .unwrap_or(module);
     ensure!(
         Regex::new(r"\A[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\z")?.is_match(group)
             && Regex::new(r"\A[a-z][a-z0-9-]*\z")?.is_match(artifact),
         "Unexpected module coordinates"
     );
-    let (group, artifact, repository_url, consumer_version) = if destination == "jitpack" {
-        ensure!(
-            artifact == module || artifact == repo,
-            "Unexpected JitPack module/artifact identity"
-        );
-        (
-            format!("com.github.{owner}"),
-            repo.to_owned(),
-            JITPACK,
-            Some(format!(
-                "{module}~v{version}{}",
-                if scoped { "-jitpack" } else { "" }
-            )),
-        )
-    } else {
-        (group.to_owned(), artifact.to_owned(), CENTRAL, None)
-    };
-    Ok(Coordinates {
-        group,
-        artifact,
-        repository_url,
-        consumer_version,
-    })
+    Ok((group.to_owned(), artifact.to_owned()))
 }
 
 pub(super) fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
@@ -386,4 +375,25 @@ fn verify_pom(data: &[u8], group: &str, artifact: &str, version: &str) -> Result
         "Compose Foundation and UI must be exported"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_coordinates_follow_the_gradle_artifact_precedence() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        let properties = root.join("gradle.properties");
+        fs::write(
+            &properties,
+            "GROUP=com.example.android\nPOM_ARTIFACT_ID=shared\nPOM_ARTIFACT_ID.demo=custom-demo\n",
+        )
+        .unwrap();
+        assert_eq!(local_identity(root, "demo").unwrap().1, "custom-demo");
+        assert_eq!(local_identity(root, "other").unwrap().1, "shared");
+        fs::write(&properties, "GROUP=com.example.android\n").unwrap();
+        assert_eq!(local_identity(root, "demo").unwrap().1, "demo");
+    }
 }

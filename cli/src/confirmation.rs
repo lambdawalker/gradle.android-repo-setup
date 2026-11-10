@@ -1,4 +1,4 @@
-use crate::release::{coordinates, git, verify, SUFFIXES};
+use crate::release::{coordinates_for_record, git, verify, SUFFIXES};
 use anyhow::{bail, ensure, Context, Result};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -19,27 +19,26 @@ impl std::fmt::Display for Pending {
 
 impl std::error::Error for Pending {}
 
-fn git_text(root: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     let result = git(root, args)?;
     ensure!(
         result.status.success(),
-        "Git could not read the release reservation or source ({})",
-        args[0]
+        "Git {} failed: {}",
+        args[0],
+        String::from_utf8_lossy(&result.stderr).trim()
     );
     Ok(String::from_utf8(result.stdout)?.trim_end().to_owned())
 }
 
-fn read_reservation(
+pub(super) fn read_reservation(
     root: &Path,
     module: &str,
     version: &str,
     destination: &str,
     scope: &str,
-    source: Option<&str>,
-) -> Result<Value> {
-    let current = coordinates(root, module, version, destination, true)?;
+) -> Result<(Value, String)> {
     let reference = format!("refs/tags/release-pending/{scope}{module}/{version}");
-    let local = git_text(root, &["rev-parse", &reference])?;
+    let local = git_text(root, &["rev-parse", "--verify", &reference])?;
     ensure!(
         git_text(root, &["cat-file", "-t", &local])? == "tag",
         "Journal must be annotated"
@@ -53,10 +52,6 @@ fn read_reservation(
     let annotated = git_text(root, &["cat-file", "-p", &local])?;
     let (_, message) = annotated.split_once("\n\n").context("Missing journal")?;
     let record: Value = serde_json::from_str(message)?;
-    let expected_source = match source {
-        Some(source) => source.to_owned(),
-        None => git_text(root, &["rev-parse", "HEAD"])?,
-    };
     let journal_source = record["source"]
         .as_str()
         .context("Missing journal source")?;
@@ -66,11 +61,47 @@ fn read_reservation(
             && record["version"] == version,
         "Journal source/version mismatch"
     );
-    ensure!(
-        journal_source == expected_source,
-        "Confirmation source differs from reservation"
-    );
+    validate_record(root, module, version, destination, &record)?;
+    Ok((record, local))
+}
 
+pub(super) fn validate_record(
+    root: &Path,
+    module: &str,
+    version: &str,
+    destination: &str,
+    record: &Value,
+) -> Result<()> {
+    validate_record_at(root, module, version, destination, record, true)
+}
+
+pub(super) fn validate_record_at(
+    root: &Path,
+    module: &str,
+    version: &str,
+    destination: &str,
+    record: &Value,
+    check_destination: bool,
+) -> Result<()> {
+    let current = coordinates_for_record(
+        root,
+        module,
+        version,
+        destination,
+        record.get("source_tag").is_some(),
+        check_destination,
+        record["artifact"].as_str(),
+    )?;
+    ensure!(
+        record["version"] == version
+            && record["source"].as_str().is_some_and(|source| {
+                source.len() == 40
+                    && source
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }),
+        "Journal source/version mismatch"
+    );
     let fields = record.as_object().context("Expected journal object")?;
     ensure!(
         fields
@@ -79,13 +110,21 @@ fn read_reservation(
             || (!fields.contains_key("repository") && destination == "maven-central"),
         "Journal repository differs from selection"
     );
-    ensure!(
-        fields
-            .get("repository_url")
-            .is_some_and(|value| value == current.repository_url)
-            || (!fields.contains_key("repository_url") && destination == "maven-central"),
-        "Journal destination differs from configured URL"
-    );
+    if check_destination {
+        ensure!(
+            fields
+                .get("repository_url")
+                .is_some_and(|value| value == current.repository_url)
+                || (!fields.contains_key("repository_url") && destination == "maven-central"),
+            "Journal destination differs from configured URL"
+        );
+    } else {
+        crate::docs::validate_record(destination, module, record)?;
+        ensure!(
+            destination == "maven-central" || fields.contains_key("repository_url"),
+            "Missing journal repository URL"
+        );
+    }
     ensure!(
         record["module"] == module
             && record["group"] == current.group
@@ -144,7 +183,7 @@ fn read_reservation(
                     && value.as_str().is_some_and(|value| digest.is_match(value))),
         "Incomplete publication hashes"
     );
-    Ok(record)
+    Ok(())
 }
 
 fn verify_public(
@@ -245,20 +284,9 @@ fn registry_error(error: ureq::Error) -> anyhow::Error {
     }
 }
 
-pub(crate) fn confirm(
-    root: &Path,
-    module: &str,
-    version: &str,
-    destination: &str,
-    source: Option<&str>,
-    timeout: Duration,
-) -> Result<()> {
-    let (scope, repository_url) = match destination {
-        "maven-central" => ("", crate::release::CENTRAL),
-        "jitpack" => ("jitpack/", crate::release::JITPACK),
-        _ => bail!("Unknown release repository"),
-    };
-    let mut record = read_reservation(root, module, version, destination, scope, source)?;
+pub(super) fn registry_fetch(
+    repository_url: &'static str,
+) -> impl Fn(&str, bool) -> Result<Option<Vec<u8>>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .https_only(true)
@@ -270,7 +298,11 @@ pub(crate) fn confirm(
         .timeout_global(Some(Duration::from_secs(20)))
         .build()
         .into();
-    let fetch = |url: &str, optional: bool| -> Result<Option<Vec<u8>>> {
+    move |url: &str, optional: bool| -> Result<Option<Vec<u8>>> {
+        ensure!(
+            url.starts_with(&format!("{repository_url}/")),
+            "Unexpected repository request destination"
+        );
         let mut response = agent.get(url).call().map_err(registry_error)?;
         match response.status().as_u16() {
             200 => Ok(Some(
@@ -287,7 +319,32 @@ pub(crate) fn confirm(
             }
             code => bail!("Public registry returned HTTP {code}"),
         }
+    }
+}
+
+pub(crate) fn confirm(
+    root: &Path,
+    module: &str,
+    version: &str,
+    destination: &str,
+    source: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    let (scope, repository_url) = match destination {
+        "maven-central" => ("", crate::release::CENTRAL),
+        "jitpack" => ("jitpack/", crate::release::JITPACK),
+        _ => bail!("Unknown release repository"),
     };
+    let (mut record, _) = read_reservation(root, module, version, destination, scope)?;
+    let expected_source = match source.filter(|value| !value.is_empty()) {
+        Some(source) => source.to_owned(),
+        None => git_text(root, &["rev-parse", "HEAD"])?,
+    };
+    ensure!(
+        record["source"] == expected_source,
+        "Confirmation source differs from reservation"
+    );
+    let fetch = registry_fetch(repository_url);
     let started = Instant::now();
     loop {
         match verify_public(&record, destination, repository_url, &fetch) {
@@ -319,7 +376,7 @@ pub(crate) fn confirm(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Cursor;
     use zip::{write::SimpleFileOptions, ZipWriter};
@@ -333,7 +390,7 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
-    fn artifacts(group: &str, artifact: &str, version: &str) -> [Vec<u8>; 5] {
+    pub(crate) fn artifacts(group: &str, artifact: &str, version: &str) -> [Vec<u8>; 5] {
         let pom = format!("<project><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><packaging>aar</packaging><name>Demo</name><description>Fixture</description><url>https://example.invalid</url><licenses><license><name>Test</name><url>https://example.invalid</url></license></licenses><developers><developer><id>test</id><name>Test</name></developer></developers><scm><url>https://example.invalid</url><connection>scm:git:https://example.invalid</connection></scm><dependencies><dependency><artifactId>foundation</artifactId></dependency><dependency><artifactId>ui</artifactId></dependency></dependencies></project>");
         let classes = archive(&[(
             "com/apexfission/android/democommon/Demo.class",
@@ -346,7 +403,7 @@ mod tests {
                 ("classes.jar", &classes),
             ]),
             archive(&[("Demo.kt", b"class Demo")]),
-            archive(&[("index.html", b"<title>Demo</title>")]),
+            archive(&[("README.md", b"# Demo")]),
             serde_json::to_vec(
                 &json!({"component": {"group": group, "module": artifact, "version": version}}),
             )

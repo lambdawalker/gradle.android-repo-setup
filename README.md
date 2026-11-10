@@ -1,6 +1,6 @@
 # Android repository setup Gradle plugins
 
-These convention plugins complement [android-repo-setup](https://github.com/lambdawalker/python.android-repo-setup). Gradle builds and publishes the Android artifacts. The Python CLI continues to manage release reservations, verification against remote repositories, and documentation generation.
+Gradle builds and publishes Android artifacts. The companion Rust CLI configures the project, manages release reservations, verifies public artifacts, and generates documentation.
 
 ## Use a published release
 
@@ -46,7 +46,7 @@ plugins {
 
 Remove the module's existing Vanniktech plugin declaration and its release configuration when migrating. Keep the Android configuration, dependencies, and project-specific `mavenPublishing { pom { ... } }` metadata. Set the `GROUP` Gradle property for Central and `JITPACK_GROUP` for JitPack, such as `com.github.lambdawalker`. The Central artifact ID defaults to the module name. Override it with `POM_ARTIFACT_ID.<module>` or the shared `POM_ARTIFACT_ID` property.
 
-The library plugin configures the release AAR, sources and documentation jars, reproducible jar settings, and the local `verification` Maven repository. Existing workflows can continue to use `-PreleaseModule`, `-PreleaseVersion`, `-PjitpackBuild=true`, and `-PjitpackScopedTag=true`. Maven Central uploads require the configured credentials and a valid Python release reservation.
+The library plugin configures the release AAR, sources and documentation jars, reproducible jar settings, and the local `verification` Maven repository. Existing workflows can continue to use `-PreleaseModule`, `-PreleaseVersion`, `-PjitpackBuild=true`, and `-PjitpackScopedTag=true`. Maven Central uploads require the configured credentials and a valid release reservation.
 
 ## JitPack
 
@@ -94,7 +94,7 @@ Consumers using JitPack can add `https://jitpack.io` to `pluginManagement.reposi
 
 ## Standalone setup CLI
 
-The Rust CLI owns workflow generation. Build it from the repository root:
+Build the Rust CLI from the repository root:
 
 ```sh
 cargo build --locked --release --manifest-path cli/Cargo.toml
@@ -116,12 +116,29 @@ The default command refuses to overwrite existing differences.
 Use `--overwrite` after reviewing the diff. Use only one workflow generator
 at a time while migrating from Python.
 
-The workflow command preserves the output of the Python renderer at
-[`b6351aa`](https://github.com/lambdawalker/python.android-repo-setup/commit/b6351aa717d7ffcbc4ecf1dac9179669e072c361).
-The generated workflows and the existing Gradle release guards still call
-Python. Release coordination, GitHub environment setup, and the wizard and
-vault are pending migration.
+To migrate a project that used the Python package, install the CLI on `PATH`
+and pin the corresponding Git tag or full commit SHA in the project config.
+Existing Python release journal tags and encrypted setup vaults can be read
+by the Rust CLI. Review and regenerate your project files:
 
+```sh
+android-repo-setup workflows --check
+android-repo-setup workflows --overwrite --set-tooling-ref <rust-tag-or-commit>
+android-repo-setup publishing_config generate
+```
+
+Generated GitHub workflows install the pinned Rust CLI through Cargo. The
+Gradle plugin uses the same `android-repo-setup` command on `PATH`. If the
+consumer still has a Python JitPack bootstrap, switch it to the Gradle
+`publishJitPack` task above, or invoke `android-repo-setup jitpack_build` in an
+image where the binary is installed.
+
+Run `android-repo-setup` with no subcommand to open the setup menu. It offers
+APK key generation, GitHub environment configuration, workflow updates, and
+vault inspection and reset. APK key generation requires the JDK's `keytool`.
+Maven signing key selection and generation use `gpg`. Run
+`android-repo-setup signing --help` for direct signing and vault options, or
+`android-repo-setup --help` for the headless commands.
 
 ### Verify an unsigned local publication
 
@@ -155,3 +172,10 @@ Central or `build/jitpack/confirmed-demo-common.json` for JitPack.
 
 If propagation times out, preserve the reservation and rerun confirmation.
 `--timeout` controls the polling window in seconds and defaults to 2400.
+
+The generated GitHub workflows serialize releases for each module. When
+running release commands directly, keep one active release process per module
+and destination, including when the processes target different versions. The
+Maven Central upload guard renews its pending tag atomically when recording the
+upload marker. Repository rules must permit updates to `release-pending/*`
+for the release workflow identity.

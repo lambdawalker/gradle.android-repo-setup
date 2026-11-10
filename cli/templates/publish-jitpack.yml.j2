@@ -14,7 +14,7 @@ on:
         default: ''
         type: string
 
-      allow_pending_jitpack:
+      bypass_version_verification:
         description: 'Bypass older pending JitPack attempts (requires an explicit newer version)'
         required: false
         default: false
@@ -40,10 +40,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - run: python3 -m pip install "android-repo-setup @ git+https://github.com/lambdawalker/python.android-repo-setup.git@<<@ tooling_ref @>>"
+      - name: Install pinned Rust tooling
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
       - name: Configure release identity
         run: |
           git config user.name 'github-actions[bot]'
@@ -52,11 +54,11 @@ jobs:
         id: release
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
-          ALLOW_PENDING_JITPACK: ${{ inputs.allow_pending_jitpack }}
+          BYPASS_VERSION_VERIFICATION: ${{ inputs.bypass_version_verification }}
         shell: bash
         run: |
           args=()
-          if [[ "$ALLOW_PENDING_JITPACK" == true ]]; then
+          if [[ "$BYPASS_VERSION_VERIFICATION" == true ]]; then
             args+=(--allow-pending-jitpack)
           fi
           android-repo-setup module_release prepare --module "$RELEASE_MODULE" --version "$REQUESTED_VERSION" "${args[@]}"
@@ -89,15 +91,16 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           SOURCE_SHA: ${{ steps.release.outputs.source }}
-          ALLOW_PENDING_JITPACK: ${{ inputs.allow_pending_jitpack }}
+          BYPASS_VERSION_VERIFICATION: ${{ inputs.bypass_version_verification }}
         shell: bash
         run: |
           args=()
-          if [[ "$ALLOW_PENDING_JITPACK" == true ]]; then
+          if [[ "$BYPASS_VERSION_VERIFICATION" == true ]]; then
             args+=(--allow-pending-jitpack)
           fi
           android-repo-setup module_release reserve --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA" "${args[@]}"
       - name: Trigger build and verify public artifacts and source
+        id: verify_public
         if: steps.release.outputs.skip != 'true'
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
@@ -110,8 +113,17 @@ jobs:
         run: android-repo-setup module_release finalize --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
       - name: Recovery guidance
         if: failure()
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify_public.outcome }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          echo 'Keep the canonical tag. Inspect the JitPack build log and public artifact state.'
-          echo 'For a successful or pending build, SUB - Finalize <<@ workflows.title @>> release verifies the original version.'
-          echo 'For a terminal failed build with no artifacts, merge corrected source and rerun Publish with a newer version or blank.'
-          echo 'Preparation archives the proven failed journal atomically before allocating the corrected release. See docs/releases.md.'
+          {
+            echo '### JitPack release recovery'
+            printf 'Destination: `%s` · Module: `%s` · Version: `%s`\n\n' "$RELEASE_REPOSITORY" "$RELEASE_MODULE" "${RELEASE_VERSION:-unresolved}"
+            case "$VERIFY_OUTCOME" in
+              success) echo 'Public artifact verification passed. Use **SUB - Finalize <<@ workflows.title @>> release** with the destination and version above.' ;;
+              failure|cancelled) echo 'The build or public verification did not complete. Inspect JitPack. For a pending or successful build, use **SUB - Finalize <<@ workflows.title @>> release** with the destination and version above.' ;;
+              *) echo 'The JitPack build trigger did not run. Fix the failed step and check for a reservation before retrying.' ;;
+            esac
+            echo 'Keep the canonical tag. For a proven terminal failure with no artifacts, merge corrected source and publish a newer version. See docs/releases.md.'
+          } >> "$GITHUB_STEP_SUMMARY"

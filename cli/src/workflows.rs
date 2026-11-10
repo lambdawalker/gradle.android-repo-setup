@@ -67,10 +67,7 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
             && !matches!(config.repository.split('/').next_back(), Some("." | "..")),
         "Repository must have owner/name form"
     );
-    ensure!(
-        Regex::new(r"^(?:v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$")?.is_match(&config.tooling_ref),
-        "tooling_ref must be a release tag or full commit SHA"
-    );
+    validate_tooling_ref(&config.tooling_ref)?;
     ensure!(
         Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.module),
         "workflows.module must be a single Gradle module name"
@@ -100,6 +97,7 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
                 !rendered.contains("<<@"),
                 "Unresolved placeholder in {name}"
             );
+            let rendered = crate::publishing::render_workflow(root, name, &rendered)?;
             let _: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
                 .with_context(|| format!("Rendered workflow {name} is invalid YAML"))?;
             Ok((name, rendered))
@@ -107,7 +105,46 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
         .collect()
 }
 
+fn validate_tooling_ref(reference: &str) -> Result<()> {
+    ensure!(
+        Regex::new(r"\A(?:v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})\z")?.is_match(reference),
+        "tooling_ref must be a release tag or full commit SHA"
+    );
+    Ok(())
+}
+
+fn set_tooling_ref(root: &Path, reference: &str) -> Result<()> {
+    validate_tooling_ref(reference)?;
+    let project = root.join(".project");
+    let setup = project.join("setup");
+    let path = setup.join("config.yaml");
+    for entry in [&project, &setup, &path] {
+        reject_symlink(entry)?;
+    }
+    let content = read(&path)?;
+    let key = Regex::new(r"(?m)^tooling_ref:[^\n]*$")?;
+    ensure!(
+        key.find_iter(&content).count() == 1,
+        "Expected one top-level tooling_ref"
+    );
+    let updated = key.replace(&content, format!("tooling_ref: '{reference}'"));
+    let config: Config = serde_yaml_ng::from_str(&updated)?;
+    ensure!(
+        config.tooling_ref == reference,
+        "Could not update tooling_ref"
+    );
+    replace(&path, &updated)
+}
+
 pub(crate) fn update(root: &Path, mode: Mode) -> Result<bool> {
+    update_with_ref(root, mode, None)
+}
+
+pub(crate) fn update_with_ref(root: &Path, mode: Mode, reference: Option<&str>) -> Result<bool> {
+    ensure!(
+        reference.is_none() || mode == Mode::Overwrite,
+        "Updating the tooling pin requires overwrite mode"
+    );
     let project = root.join(".project");
     let setup = project.join("setup");
     let github = root.join(".github");
@@ -128,6 +165,9 @@ pub(crate) fn update(root: &Path, mode: Mode) -> Result<bool> {
         .open(&lock)
         .with_context(|| format!("Could not open {}", lock.display()))?;
     FileExt::lock_exclusive(&lock_file)?;
+    if let Some(reference) = reference {
+        set_tooling_ref(root, reference)?;
+    }
     compare_and_apply(root, &output, &manifest, mode)
 }
 
