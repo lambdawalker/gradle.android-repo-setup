@@ -26,6 +26,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Select native GnuPG on Windows
         if: runner.os == 'Windows'
+        timeout-minutes: 3
         shell: pwsh
         run: |
           $candidates = @(
@@ -34,11 +35,25 @@ jobs:
           )
           $gpgBin = $candidates | Where-Object { Test-Path (Join-Path $_ 'gpg.exe') } | Select-Object -First 1
           if (-not $gpgBin) {
-            choco install gpg4win --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "Gpg4win installation failed" }
-            $gpgBin = $candidates | Where-Object { Test-Path (Join-Path $_ 'gpg.exe') } | Select-Object -First 1
+            $installer = Join-Path $env:RUNNER_TEMP 'gnupg-2.5.24.exe'
+            $url = 'https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.5.24_20260923.exe'
+            Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 45
+            $sha256 = 'ea6f9dee2cccd83287432625b8b399173805add81d27067fcaf019c0c4da1ad8'
+            if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $sha256) {
+              throw "GnuPG installer checksum mismatch"
+            }
+            $installDir = Join-Path $env:RUNNER_TEMP 'gnupg-native'
+            $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$installDir" -PassThru
+            if (-not $process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "GnuPG installation timed out"
+            }
+            if ($process.ExitCode -ne 0) { throw "GnuPG installation failed" }
+            $gpgBin = Join-Path $installDir 'bin'
           }
-          if (-not $gpgBin) { throw "Native GnuPG was not found" }
+          if (-not $gpgBin -or -not (Test-Path (Join-Path $gpgBin 'gpg.exe'))) {
+            throw "Native GnuPG was not found"
+          }
           $gpgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & (Join-Path $gpgBin 'gpg.exe') --version
       - run: cargo test --locked --manifest-path cli/Cargo.toml
