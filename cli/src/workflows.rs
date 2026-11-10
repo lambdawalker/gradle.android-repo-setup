@@ -54,7 +54,13 @@ struct Config {
 #[derive(Deserialize)]
 struct WorkflowConfig {
     module: String,
+    #[serde(default = "default_app_module")]
+    app_module: String,
     title: String,
+}
+
+fn default_app_module() -> String {
+    "sample".into()
 }
 
 fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
@@ -71,6 +77,10 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
     ensure!(
         Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.module),
         "workflows.module must be a single Gradle module name"
+    );
+    ensure!(
+        Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.app_module),
+        "workflows.app_module must be a single Gradle module name"
     );
     let title = &config.workflows.title;
     ensure!(
@@ -89,6 +99,7 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
                 .replace_all(template, |captures: &Captures<'_>| match &captures[1] {
                     "tooling_ref" => config.tooling_ref.as_str(),
                     "workflows.module" => config.workflows.module.as_str(),
+                    "workflows.app_module" => config.workflows.app_module.as_str(),
                     "workflows.title" => title.as_str(),
                     _ => "<<@ unknown @>>",
                 })

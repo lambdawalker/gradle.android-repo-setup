@@ -230,3 +230,20 @@ and destination, including when the processes target different versions. The
 Maven Central upload guard renews its pending tag atomically when recording the
 upload marker. Repository rules must permit updates to `release-pending/*`
 for the release workflow identity.
+
+### Demo application module
+
+Set `workflows.app_module` in `.project/setup/config.yaml` to the Gradle module
+that builds the demo APK. For a conventional `app` module, use:
+
+```yaml
+workflows:
+  module: demo-common
+  app_module: app
+  title: Demo Common
+```
+
+Workflow generation uses this module for debug assembly and lint, signed APK
+assembly, and the APK output directory. Existing configurations default to
+`sample`. Run `android-repo-setup workflows --overwrite` after renaming a module
+and reviewing the generated workflow differences.
