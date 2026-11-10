@@ -69,7 +69,12 @@ jobs:
               jq -er '.packages[] | select(.name == "android-repo-setup") | .version')"
             tag="cli-v$version"
           fi
-          git merge-base --is-ancestor "$sha" origin/main
+          # A combined release can push main after this run's checkout was pinned.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "The selected source is not on main." >&2
+            exit 1
+          fi
           printf 'tag=%s\nsha=%s\nversion=%s\n' "$tag" "$sha" "$version" >> "$GITHUB_OUTPUT"
 
   build:
