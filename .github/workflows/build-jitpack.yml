@@ -1,0 +1,92 @@
+name: Build Gradle plugins for JitPack
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing project tag (leave blank to test main)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      source_tag:
+        type: string
+        default: ''
+      require_tag:
+        type: boolean
+        default: false
+    outputs:
+      tag:
+        value: ${{ jobs.build.outputs.tag }}
+      sha:
+        value: ${{ jobs.build.outputs.sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the build source
+        id: source
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          REQUIRE_TAG: ${{ inputs.require_tag || false }}
+        run: |
+          set -euo pipefail
+          tag="$SOURCE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ -n "$tag" && "$tag" != "$GITHUB_REF_NAME" ]]; then
+              echo "source_tag must match the selected tag." >&2
+              exit 1
+            fi
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Run from main or select an existing project tag." >&2
+            exit 1
+          fi
+
+          if [[ -n "$tag" ]]; then
+            if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Use a project tag named vX.Y.Z." >&2
+              exit 1
+            fi
+            sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          elif [[ "$REQUIRE_TAG" == true ]]; then
+            echo "Enter an existing project tag in source_tag to publish to JitPack." >&2
+            exit 1
+          else
+            sha="$(git rev-parse HEAD)"
+          fi
+
+          git merge-base --is-ancestor "$sha" origin/main
+          git cat-file -e "$sha:jitpack.yml"
+          git switch --detach "$sha"
+          printf 'tag=%s\nsha=%s\n' "$tag" "$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+      - name: Build and verify the Maven publication locally
+        shell: bash
+        run: |
+          ./gradlew --no-daemon "-Dmaven.repo.local=$RUNNER_TEMP/jitpack-maven-local" \
+            check publishPluginMavenPublicationToMavenLocal
+      - uses: actions/upload-artifact@v6
+        with:
+          name: jitpack-plugin-publication
+          path: ${{ runner.temp }}/jitpack-maven-local/
+          if-no-files-found: error

@@ -7,6 +7,11 @@ on:
         description: Existing tag to publish (leave blank to publish the CLI version on main)
         type: string
         default: ''
+  workflow_call:
+    inputs:
+      source_tag:
+        type: string
+        required: true
   push:
     tags:
       - 'cli-v*'

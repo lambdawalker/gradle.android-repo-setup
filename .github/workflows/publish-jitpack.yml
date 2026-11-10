@@ -3,41 +3,41 @@ name: Publish Gradle plugins to JitPack
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Existing release tag (vX.Y.Z) containing jitpack.yml'
-        required: true
+      source_tag:
+        description: Existing project tag (vX.Y.Z)
         type: string
+        default: ''
+  workflow_call:
+    inputs:
+      source_tag:
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
-concurrency:
-  group: jitpack-plugin-release
-  cancel-in-progress: false
-
 jobs:
+  build:
+    uses: ./.github/workflows/build-jitpack.yml
+    with:
+      source_tag: ${{ inputs.source_tag }}
+      require_tag: true
+
   publish:
-    if: github.repository == 'lambdawalker/gradle.android-repo-setup' && github.ref == 'refs/heads/main'
+    needs: build
+    concurrency:
+      group: jitpack-plugin-release
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
       - name: Trigger JitPack and verify the tagged plugin
         shell: bash
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_SHA: ${{ needs.build.outputs.sha }}
         run: |
           set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo 'Select a release tag in vX.Y.Z form.'
-            exit 1
-          fi
-          commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
-          git merge-base --is-ancestor "$commit" HEAD
-          git cat-file -e "$commit:jitpack.yml"
           repo=gradle.android-repo-setup
           url="https://jitpack.io/com/github/lambdawalker/$repo/$RELEASE_TAG"
           artifact="$repo-$RELEASE_TAG"
@@ -46,10 +46,10 @@ jobs:
           curl -fsSL --retry 4 --retry-all-errors --retry-max-time 120 --max-time 30 \
             "$url/$artifact.jar" -o "$RUNNER_TEMP/plugin.jar"
           curl -fsSL --max-time 30 "https://jitpack.io/api/builds/com.github.lambdawalker/$repo/$RELEASE_TAG" |
-            jq -e --arg commit "$commit" '.status == "ok" and .commit == $commit'
+            jq -e --arg commit "$SOURCE_SHA" '.status == "ok" and .commit == $commit'
           unzip -Z1 "$RUNNER_TEMP/plugin.jar" > "$RUNNER_TEMP/plugin-entries"
           for id in com.apexfission.android-repo-setup com.apexfission.android-repo-setup.root; do
             grep -Fx "META-INF/gradle-plugins/$id.properties" "$RUNNER_TEMP/plugin-entries"
           done
           printf 'Verified `com.github.lambdawalker:%s:%s` from `%s`.\n\n[Build log](%s/build.log)\n' \
-            "$repo" "$RELEASE_TAG" "$commit" "$url" >> "$GITHUB_STEP_SUMMARY"
+            "$repo" "$RELEASE_TAG" "$SOURCE_SHA" "$url" >> "$GITHUB_STEP_SUMMARY"
