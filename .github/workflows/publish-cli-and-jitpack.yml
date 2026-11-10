@@ -1,0 +1,67 @@
+name: Publish CLI and JitPack
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing project tag (vX.Y.Z) for both publications
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    name: Resolve the shared project tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: source
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          tag="$SOURCE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ -n "$tag" && "$tag" != "$GITHUB_REF_NAME" ]]; then
+              echo "source_tag must match the selected tag." >&2
+              exit 1
+            fi
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Run from main or select an existing project tag." >&2
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Enter an existing vX.Y.Z project tag in source_tag." >&2
+            exit 1
+          fi
+          sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          git merge-base --is-ancestor "$sha" origin/main
+          git cat-file -e "$sha:jitpack.yml"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+  cli:
+    name: Publish CLI
+    needs: source
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-rust-cli.yml
+    with:
+      source_tag: ${{ needs.source.outputs.tag }}
+
+  jitpack:
+    name: Publish Gradle plugins
+    needs: source
+    uses: ./.github/workflows/publish-jitpack.yml
+    with:
+      source_tag: ${{ needs.source.outputs.tag }}

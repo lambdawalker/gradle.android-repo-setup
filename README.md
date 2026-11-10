@@ -88,7 +88,19 @@ The Portal may review the first submission before it becomes available.
 
 ## Publish to JitPack
 
-After merging the JitPack build configuration, create a new `vX.Y.Z` release tag on `main`. Run **Publish Gradle plugins to JitPack** with that tag. The workflow triggers JitPack through a Maven artifact request and verifies the build source and both plugin descriptors. The original `v0.1.0` tag predates the single-artifact JitPack configuration.
+Use **Actions → Build Gradle plugins for JitPack** to test the Maven
+publication locally and download it as a workflow artifact. Leave **source_tag**
+blank to build `main`, or enter an existing project tag to build that commit.
+
+Use **Actions → Publish Gradle plugins to JitPack** to build, trigger JitPack,
+and verify the tagged commit and both plugin descriptors. For older tags,
+run from `main` and enter the tag in **source_tag**. For tags that already
+contain the current workflow, selecting the tag in **Use workflow from**
+also works.
+
+Use **Actions → Publish CLI and JitPack** to publish
+both in parallel from one project tag. It uses the same tag selection rules.
+The original `v0.1.0` tag predates the single-artifact JitPack configuration.
 
 Consumers using JitPack can add `https://jitpack.io` to `pluginManagement.repositories` and map both plugin IDs to `com.github.lambdawalker:gradle.android-repo-setup:vX.Y.Z` with `resolutionStrategy.eachPlugin` and `useModule`.
 
