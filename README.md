@@ -183,7 +183,7 @@ Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
 `.exe` extension. It reads the existing `.project/setup/config.yaml`.
 
-Running `android-repo-setup` opens the Cursive deployment wizard. It includes
+Running `android-repo-setup` opens the [iocraft](https://github.com/ccbrown/iocraft) deployment wizard. It includes
 APK signing, GitHub signing and publishing environments, workflow previews,
 and vault viewing and recreation. The standalone `signing` and
 `setup_github_environments` commands use the same interface.
@@ -195,7 +195,10 @@ field. Password fields are masked. Saved answers default to reuse after
 screens require checking the confirmation box before Apply becomes available.
 The Maven key picker loads local GnuPG keys in the background and offers a
 form for creating and verifying a new project key. Use a terminal of at least
-80 columns by 24 rows.
+80 columns by 24 rows. Page Up and Page Down scroll the current form or details;
+hold Shift to scroll the progress log. The focused field or key remains visible
+when navigating with the keyboard. Mouse clicks select controls, and the wheel
+scrolls the panel under the pointer.
 
 ```sh
 android-repo-setup workflows --check
@@ -433,4 +436,4 @@ Use `--base <absolute-preview-url>` when previewing on another host, or `--base 
 
 The wizard normalizes legacy X10 and SGR mouse reports that some Windows IDE terminals, including IntelliJ IDEA, deliver as character events. Pointer movement does not alter text or password fields; clicks, dragging and vertical scrolling remain mouse actions. Native console events pass through unchanged. The compatibility layer applies on Windows only, before input reaches the views, and preserves ordinary text and keyboard shortcuts.
 
-This fix requires a CLI release containing it; the already published v0.1.7 executable does not include it.
+The input compatibility fix is included in CLI v0.1.8. The iocraft interface described above requires a release containing this migration, or a build from this branch.
