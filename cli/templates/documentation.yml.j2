@@ -37,10 +37,7 @@ jobs:
           cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
       - run: android-repo-setup publishing_config check
       - run: android-repo-setup module_release verify
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          package-manager-cache: false
+<<@ workflows.documentation_runtime @>>
       - run: <<@ workflows.documentation_command @>>
       - run: <<@ workflows.screenshot_check_command @>>
       - uses: actions/upload-pages-artifact@v5

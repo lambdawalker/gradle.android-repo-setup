@@ -63,9 +63,10 @@ fn installation_and_archive_use_confirmed_destination_coordinates() {
     assert!(import.contains("Configured next publication: `com.example.android:next`"));
     success(root, &["import_docs", "--check"]);
 
-    assert!(!run(root, &["documentation_history", "verify"])
-        .status
-        .success());
+    let missing_archive = run(root, &["documentation_history", "verify"]);
+    assert!(!missing_archive.status.success());
+    assert!(String::from_utf8_lossy(&missing_archive.stderr)
+        .contains("android-repo-setup documentation_history seed"));
     success(root, &["documentation_history", "seed"]);
     let output = success(root, &["documentation_history", "export"]);
     let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();

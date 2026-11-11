@@ -54,4 +54,22 @@ jobs:
           }
           $gpgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & (Join-Path $gpgBin 'gpg.exe') --version
+      - name: Install Zola for integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/zola-tests"
+          mkdir -p "$directory"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            archive="$RUNNER_TEMP/zola.zip"
+            curl --fail --show-error --silent --location --retry 3 https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-pc-windows-msvc.zip --output "$archive"
+            echo "79179284f816febc281adbedb27189806cf22f83e8be4d0fca6835fbeeb09587  $archive" | sha256sum -c -
+            unzip -q "$archive" -d "$directory"
+          else
+            archive="$RUNNER_TEMP/zola.tar.gz"
+            curl --fail --show-error --silent --location --retry 3 https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-unknown-linux-gnu.tar.gz --output "$archive"
+            echo "8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$directory"
+          fi
+          echo "$directory" >> "$GITHUB_PATH"
       - run: cargo test --locked --manifest-path cli/Cargo.toml

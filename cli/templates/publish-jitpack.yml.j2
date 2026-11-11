@@ -78,11 +78,7 @@ jobs:
         if: steps.release.outputs.skip != 'true'
         with:
           cache-disabled: true
-      - uses: actions/setup-node@v7
-        if: steps.release.outputs.skip != 'true'
-        with:
-          node-version: '24'
-          package-manager-cache: false
+<<@ workflows.release_documentation_runtime @>>
       - name: Validate immutable release source
         if: steps.release.outputs.skip != 'true'
         env:

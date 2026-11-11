@@ -167,6 +167,8 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
         "workflows.title must be one line without single quotes or GitHub expressions"
     );
 
+    let docs_runtime = documentation_runtime(root, false);
+    let release_runtime = documentation_runtime(root, true);
     let placeholders = Regex::new(r"<<@\s*([a-z_.]+)\s*@>>")?;
     TEMPLATES
         .iter()
@@ -180,6 +182,8 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
                     "workflows.screenshot_count" => screenshot_count.as_str(),
                     "workflows.java_version" => java_version.as_str(),
                     "workflows.documentation_command" => documentation_command.as_str(),
+                    "workflows.documentation_runtime" => docs_runtime.as_str(),
+                    "workflows.release_documentation_runtime" => release_runtime.as_str(),
                     "workflows.screenshot_check_command" => screenshot_check_command.as_str(),
                     "workflows.release_validation_command" => release_validation_command.as_str(),
                     _ => "<<@ unknown @>>",
@@ -195,6 +199,24 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
             Ok((name, rendered))
         })
         .collect()
+}
+
+fn documentation_runtime(root: &Path, release: bool) -> String {
+    let condition = "        if: steps.release.outputs.skip != 'true'\n";
+    if root.join("sites/zola.toml").is_file() {
+        let step = include_str!("../workflow-steps/install-zola.yml").trim_end();
+        if release {
+            step.replacen(
+                "        shell: bash",
+                &format!("{condition}        shell: bash"),
+                1,
+            )
+        } else {
+            step.to_owned()
+        }
+    } else {
+        format!("      - uses: actions/setup-node@v7\n{}        with:\n          node-version: '24'\n          package-manager-cache: false", if release { condition } else { "" })
+    }
 }
 
 fn validate_tooling_ref(reference: &str) -> Result<()> {

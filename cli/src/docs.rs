@@ -1,8 +1,15 @@
 mod history;
 mod site;
+mod zola;
 
 pub(crate) use history::{archive_record, history, seed, validate_archive, HISTORY};
-pub(crate) use site::build;
+pub(crate) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> {
+    if root.join("sites/zola.toml").is_file() {
+        zola::build(root, base, check)
+    } else {
+        site::build(root, base)
+    }
+}
 
 use anyhow::{anyhow, ensure, Context, Result};
 use regex::Regex;
