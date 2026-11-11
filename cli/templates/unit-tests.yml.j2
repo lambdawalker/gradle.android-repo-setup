@@ -18,7 +18,7 @@ jobs:
           distribution: temurin
           java-version: |
             17
-            21
+            <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
       - name: Run local unit tests
         run: ./gradlew test --no-daemon

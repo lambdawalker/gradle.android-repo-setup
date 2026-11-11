@@ -262,3 +262,126 @@ fn reconciliation_install_uses_tag_or_revision_for_the_selected_tooling_pin() {
         let _ = flag;
     }
 }
+
+#[test]
+fn workflow_contract_defaults_and_overrides_preserve_command_scalars() {
+    for customized in [false, true] {
+        let root = fixture();
+        if customized {
+            let path = root.path().join(".project/setup/config.yaml");
+            let mut config: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            config["verification"] = serde_yaml_ng::from_str("class_prefix: com/apexfission/android/permissions/\nrequired_api_artifacts: [permissions]").unwrap();
+            config["workflows"]["java_version"] = "25".into();
+            config["workflows"]["screenshot_count"] = 14.into();
+            config["workflows"]["release_validation_command"] =
+                "bash scripts/validate-release-source.sh".into();
+            config["workflows"]["documentation_command"] =
+                "npm --prefix sites ci && npm --prefix sites run check".into();
+            config["workflows"]["screenshot_check_command"] =
+                "node sites/scripts/screenshots.mjs manifest".into();
+            fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+        }
+        let result = run(root.path(), &[]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = root.path().join(".github/workflows");
+        let screenshots = fs::read_to_string(output.join("screenshots.yml")).unwrap();
+        assert!(screenshots.starts_with("name: Verify Demo Common"));
+        assert!(screenshots.contains(if customized { "-eq 14" } else { "-eq 5" }));
+        for name in [
+            "screenshots.yml",
+            "unit-tests.yml",
+            "publish-library.yml",
+            "publish-jitpack.yml",
+            "build-signed-demo-apk.yml",
+            "verify-release-tooling.yml",
+        ] {
+            let contents = fs::read_to_string(output.join(name)).unwrap();
+            assert!(
+                contents.contains(if customized {
+                    "            25\n"
+                } else {
+                    "            21\n"
+                }),
+                "{name}"
+            );
+        }
+        for name in ["publish-library.yml", "publish-jitpack.yml"] {
+            let contents = fs::read_to_string(output.join(name)).unwrap();
+            let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&contents).unwrap();
+            let steps = workflow["jobs"]
+                .as_mapping()
+                .unwrap()
+                .values()
+                .filter_map(|job| job["steps"].as_sequence())
+                .flat_map(|steps| steps.iter())
+                .collect::<Vec<_>>();
+            let validation = steps
+                .iter()
+                .position(|step| step["name"] == "Validate immutable release source")
+                .unwrap();
+            assert_eq!(
+                steps[validation]["run"],
+                if customized {
+                    "bash scripts/validate-release-source.sh"
+                } else {
+                    "true"
+                }
+            );
+            assert_eq!(
+                steps[validation]["if"],
+                "steps.release.outputs.skip != 'true'"
+            );
+            assert_eq!(
+                steps[validation]["env"]["SOURCE_SHA"],
+                "${{ steps.release.outputs.source }}"
+            );
+            let checkout = steps
+                .iter()
+                .position(|step| {
+                    step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("git checkout --detach"))
+                })
+                .unwrap();
+            let check_local = steps
+                .iter()
+                .position(|step| {
+                    step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("module_release check-local"))
+                })
+                .unwrap();
+            assert!(checkout < validation && validation < check_local);
+            let node = steps
+                .iter()
+                .find(|step| step["uses"] == "actions/setup-node@v7")
+                .unwrap();
+            assert_eq!(node["with"]["node-version"], "24");
+            assert_eq!(node["with"]["package-manager-cache"], false);
+        }
+        let docs: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&fs::read_to_string(output.join("documentation.yml")).unwrap())
+                .unwrap();
+        let commands: Vec<_> = docs["jobs"]["build"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+        assert!(commands.contains(&if customized {
+            "npm --prefix sites ci && npm --prefix sites run check"
+        } else {
+            "android-repo-setup build_docs"
+        }));
+        assert!(commands.contains(&if customized {
+            "node sites/scripts/screenshots.mjs manifest"
+        } else {
+            "cd docs/screenshots && sha256sum -c images.sha256"
+        }));
+    }
+}

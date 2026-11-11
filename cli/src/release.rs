@@ -19,6 +19,63 @@ struct ProjectConfig {
     modules: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct VerificationConfig {
+    pub class_prefix: String,
+    pub required_api_artifacts: Vec<String>,
+    pub bytecode_major: u16,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            class_prefix: "com/apexfission/android/democommon/".into(),
+            required_api_artifacts: vec!["foundation".into(), "ui".into()],
+            bytecode_major: 61,
+        }
+    }
+}
+
+impl VerificationConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            Regex::new(r"\A(?:[A-Za-z_$][A-Za-z0-9_$]*/)+\z")?.is_match(&self.class_prefix),
+            "verification.class_prefix must be a slash-separated package prefix ending in /"
+        );
+        ensure!(
+            self.bytecode_major >= 45,
+            "Invalid verification.bytecode_major"
+        );
+        ensure!(
+            self.required_api_artifacts
+                .iter()
+                .all(|id| !id.trim().is_empty()),
+            "verification.required_api_artifacts must contain nonempty artifact IDs"
+        );
+        Ok(())
+    }
+}
+
+pub(super) fn verification_config(root: &Path, source: &str) -> Result<VerificationConfig> {
+    let output = git(
+        root,
+        &["show", &format!("{source}:.project/setup/config.yaml")],
+    )?;
+    ensure!(
+        output.status.success(),
+        "Could not read verification configuration at source"
+    );
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        verification: VerificationConfig,
+    }
+    let config: Config = serde_yaml_ng::from_slice(&output.stdout)?;
+    config.verification.validate()?;
+    Ok(config.verification)
+}
+
 #[derive(Serialize)]
 pub(crate) struct Record<'a> {
     module: &'a str,
@@ -62,6 +119,7 @@ pub(crate) fn check_local<'a>(
         "Tracked files differ from source or Git could not verify the checkout"
     );
 
+    let contract = verification_config(root, source)?;
     let coordinates = coordinates(root, module, version, destination, true)?;
     let Coordinates {
         group,
@@ -79,7 +137,7 @@ pub(crate) fn check_local<'a>(
     for suffix in SUFFIXES {
         let path = directory.join(format!("{artifact}-{consumer}{suffix}"));
         let data = fs::read(&path).with_context(|| format!("Could not read {}", path.display()))?;
-        verify(&data, suffix, &group, &artifact, consumer, true)
+        verify(&data, suffix, &group, &artifact, consumer, true, &contract)
             .with_context(|| format!("Invalid artifact {}", path.display()))?;
         sha256.insert(suffix, format!("{:x}", Sha256::digest(&data)));
     }
@@ -223,9 +281,10 @@ pub(super) fn verify(
     artifact: &str,
     version: &str,
     local: bool,
+    contract: &VerificationConfig,
 ) -> Result<()> {
     if suffix == ".pom" {
-        return verify_pom(data, group, artifact, version);
+        return verify_pom(data, group, artifact, version, contract);
     }
     if suffix == ".module" {
         let metadata: serde_json::Value = serde_json::from_slice(data)?;
@@ -269,9 +328,7 @@ pub(super) fn verify(
             for index in 0..jar.len() {
                 let mut entry = jar.by_index(index)?;
                 let name = entry.name();
-                if name.ends_with(".class")
-                    && name.starts_with("com/apexfission/android/democommon/")
-                {
+                if name.ends_with(".class") && name.starts_with(&contract.class_prefix) {
                     ensure!(
                         !name.contains("DemoPreviews"),
                         "Debug fixture must not be included"
@@ -280,7 +337,8 @@ pub(super) fn verify(
                     entry.read_exact(&mut header)?;
                     ensure!(
                         header[..4] == [0xca, 0xfe, 0xba, 0xbe]
-                            && u16::from_be_bytes([header[6], header[7]]) == 61,
+                            && u16::from_be_bytes([header[6], header[7]])
+                                == contract.bytecode_major,
                         "Unexpected JVM bytecode target"
                     );
                     io::copy(&mut entry, &mut io::sink())?;
@@ -304,7 +362,13 @@ pub(super) fn verify(
     Ok(())
 }
 
-fn verify_pom(data: &[u8], group: &str, artifact: &str, version: &str) -> Result<()> {
+fn verify_pom(
+    data: &[u8],
+    group: &str,
+    artifact: &str,
+    version: &str,
+    contract: &VerificationConfig,
+) -> Result<()> {
     let xml = std::str::from_utf8(data)?;
     let upper = xml.to_ascii_uppercase();
     ensure!(
@@ -370,16 +434,74 @@ fn verify_pom(data: &[u8], group: &str, artifact: &str, version: &str) -> Result
             }
         }
     }
-    ensure!(
-        exported.contains("foundation") && exported.contains("ui"),
-        "Compose Foundation and UI must be exported"
-    );
+    for id in &contract.required_api_artifacts {
+        ensure!(
+            exported.contains(id.as_str()),
+            "Required API artifact must be exported: {id}"
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_contract_is_read_from_the_immutable_source() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let root = project.path();
+        fs::create_dir_all(root.join(".project/setup"))?;
+        let path = root.join(".project/setup/config.yaml");
+        fs::write(&path, "verification:\n  class_prefix: com/example/permissions/\n  required_api_artifacts: [permissions]\n")?;
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            ensure!(
+                git(root, &args)?.status.success(),
+                "Fixture Git command failed"
+            );
+        }
+        fs::write(&path, "verification:\n  class_prefix: wrong/checkout/\n")?;
+        let contract = verification_config(root, "HEAD")?;
+        assert_eq!(contract.class_prefix, "com/example/permissions/");
+        assert_eq!(contract.required_api_artifacts, vec!["permissions"]);
+        assert_eq!(contract.bytecode_major, 61);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_contracts_cannot_disable_package_verification() {
+        for prefix in [
+            "",
+            "com.example",
+            "/",
+            "com/example",
+            "com//example/",
+            "../",
+        ] {
+            let contract = VerificationConfig {
+                class_prefix: prefix.into(),
+                ..Default::default()
+            };
+            assert!(contract.validate().is_err(), "{prefix}");
+        }
+        assert!(
+            serde_yaml_ng::from_str::<VerificationConfig>("class_prefx: com/example/").is_err()
+        );
+    }
 
     #[test]
     fn module_coordinates_follow_the_gradle_artifact_precedence() {

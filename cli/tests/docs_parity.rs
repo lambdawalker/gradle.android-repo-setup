@@ -37,7 +37,7 @@ fn installation_and_archive_use_confirmed_destination_coordinates() {
     write(
         root,
         ".project/setup/config.yaml",
-        include_str!("fixtures/config.yaml"),
+        &(include_str!("fixtures/config.yaml").to_owned() + "\nverification:\n  class_prefix: com/apexfission/android/permissions/\n  required_api_artifacts: [permissions]\n"),
     );
     write(
         root,

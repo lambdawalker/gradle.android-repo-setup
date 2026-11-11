@@ -204,8 +204,26 @@ The destination defaults to Maven Central. Set `RELEASE_REPOSITORY=jitpack`
 for an unsigned JitPack candidate. The command checks the tracked checkout,
 coordinates, POM, AAR, sources, documentation and Gradle metadata and prints
 the candidate record with SHA-256 hashes. It does not write release tags or
-upload artifacts. The current artifact contract follows Demo Common, including
-its exported Compose dependencies and Java 17 bytecode.
+upload artifacts. By default the artifact contract follows Demo Common, including
+its exported Compose dependencies and Java 17 bytecode. Other libraries can
+configure the contract in `.project/setup/config.yaml`:
+
+```yaml
+verification:
+  class_prefix: com/apexfission/android/permissions/
+  required_api_artifacts: [permissions]
+  bytecode_major: 61
+```
+
+`class_prefix` is a slash-separated package prefix ending in `/`. The AAR must
+contain classes under that prefix with the configured JVM class-file major
+version. Every `required_api_artifacts` entry must be exported by the POM at
+compile scope (an omitted scope also means compile). Each omitted field retains
+its Demo Common default: `com/apexfission/android/democommon/`, `[foundation, ui]`,
+and `61`. An explicit empty API artifact list is supported for libraries without
+exported dependencies. All other publication checks still apply. Local checks
+and public confirmation both load this contract from the reserved source commit,
+including when confirmation runs from another checkout.
 
 To confirm an existing annotated reservation against the public registry, run:
 
@@ -281,3 +299,34 @@ Workflow generation uses this module for debug assembly and lint, signed APK
 assembly, and the APK output directory. Existing configurations default to
 `sample`. Run `android-repo-setup workflows --overwrite` after renaming a module
 and reviewing the generated workflow differences.
+
+### Workflow customization
+
+The workflow generator accepts these optional settings under `workflows`:
+
+```yaml
+workflows:
+  module: permissions
+  app_module: app
+  title: Permissions
+  screenshot_count: 14
+  java_version: '25'
+  documentation_command: npm --prefix sites ci && npm --prefix sites run check
+  screenshot_check_command: node sites/scripts/screenshots.mjs manifest
+  release_validation_command: bash scripts/validate-release-source.sh
+```
+
+The defaults are five screenshots, Java 21, `android-repo-setup build_docs`,
+`cd docs/screenshots && sha256sum -c images.sha256`, and `true` for release
+validation. Java 17 is also installed for projects that need it. Documentation
+and publication jobs install Node 24. Commands preserve shell punctuation and
+may contain multiple lines. Release validation runs after checking out the
+immutable release source and before verifying the unsigned publication; it
+receives `SOURCE_SHA` and is skipped when the release is already complete.
+Validation scripts should leave tracked source files unchanged, for example by
+running documentation generation in a disposable worktree.
+
+Release fingerprints include `.project/setup/config.yaml` and
+`.project/setup/repositories.yml`, so changing the verification contract or
+repository configuration changes the release identity. Finalization also
+requires `.project/setup` to agree with the current main branch.
