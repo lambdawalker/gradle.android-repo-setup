@@ -41,6 +41,8 @@ pub(crate) enum Mode {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default, rename = "verification")]
+    _verification: Option<crate::release::VerificationConfig>,
     repository: String,
     tooling_ref: String,
     workflows: WorkflowConfig,
@@ -58,6 +60,50 @@ struct WorkflowConfig {
     #[serde(default = "default_app_module")]
     app_module: String,
     title: String,
+    #[serde(default = "default_screenshot_count")]
+    screenshot_count: u32,
+    #[serde(
+        default = "default_java_version",
+        deserialize_with = "deserialize_java_version"
+    )]
+    java_version: String,
+    #[serde(default = "default_documentation_command")]
+    documentation_command: String,
+    #[serde(default = "default_screenshot_check_command")]
+    screenshot_check_command: String,
+    #[serde(default = "default_release_validation_command")]
+    release_validation_command: String,
+}
+
+fn default_release_validation_command() -> String {
+    "true".into()
+}
+
+fn default_screenshot_count() -> u32 {
+    5
+}
+fn default_java_version() -> String {
+    "21".into()
+}
+fn deserialize_java_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Version {
+        Number(u16),
+        Text(String),
+    }
+    Ok(match Version::deserialize(deserializer)? {
+        Version::Number(value) => value.to_string(),
+        Version::Text(value) => value,
+    })
+}
+fn default_documentation_command() -> String {
+    "android-repo-setup build_docs".into()
+}
+fn default_screenshot_check_command() -> String {
+    "cd docs/screenshots && sha256sum -c images.sha256".into()
 }
 
 fn default_app_module() -> String {
@@ -83,6 +129,35 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
         Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.app_module),
         "workflows.app_module must be a single Gradle module name"
     );
+    if let Some(contract) = &config._verification {
+        contract.validate()?;
+    }
+    ensure!(
+        config
+            .workflows
+            .java_version
+            .parse::<u16>()
+            .is_ok_and(|version| version >= 8),
+        "Invalid workflows.java_version"
+    );
+    let screenshot_count = config.workflows.screenshot_count.to_string();
+    let java_version = config.workflows.java_version.to_string();
+    // JSON strings are valid YAML scalars, preserving shell punctuation and newlines.
+    let documentation_command = serde_json::to_string(&config.workflows.documentation_command)?;
+    let screenshot_check_command =
+        serde_json::to_string(&config.workflows.screenshot_check_command)?;
+    let release_validation_command =
+        serde_json::to_string(&config.workflows.release_validation_command)?;
+    ensure!(
+        !config.workflows.documentation_command.trim().is_empty()
+            && !config.workflows.screenshot_check_command.trim().is_empty()
+            && !config
+                .workflows
+                .release_validation_command
+                .trim()
+                .is_empty(),
+        "Workflow commands must not be empty"
+    );
     let title = &config.workflows.title;
     ensure!(
         !title.trim().is_empty()
@@ -102,6 +177,11 @@ fn render(root: &Path) -> Result<Vec<(&'static str, String)>> {
                     "workflows.module" => config.workflows.module.as_str(),
                     "workflows.app_module" => config.workflows.app_module.as_str(),
                     "workflows.title" => title.as_str(),
+                    "workflows.screenshot_count" => screenshot_count.as_str(),
+                    "workflows.java_version" => java_version.as_str(),
+                    "workflows.documentation_command" => documentation_command.as_str(),
+                    "workflows.screenshot_check_command" => screenshot_check_command.as_str(),
+                    "workflows.release_validation_command" => release_validation_command.as_str(),
                     _ => "<<@ unknown @>>",
                 })
                 .into_owned();

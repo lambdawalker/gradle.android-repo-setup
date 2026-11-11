@@ -45,7 +45,7 @@ jobs:
           distribution: temurin
           java-version: |
             17
-            21
+            <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
       - name: Build unsigned demo APK
         run: ./gradlew :<<@ workflows.app_module @>>:assembleRelease --no-daemon

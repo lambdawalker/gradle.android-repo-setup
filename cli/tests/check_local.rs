@@ -43,6 +43,22 @@ struct Candidate {
 
 impl Candidate {
     fn create(jitpack: bool) -> Self {
+        Self::with_contract(
+            jitpack,
+            "",
+            "com/apexfission/android/democommon/Demo.class",
+            &["foundation", "ui"],
+            61,
+        )
+    }
+
+    fn with_contract(
+        jitpack: bool,
+        contract: &str,
+        class: &str,
+        dependencies: &[&str],
+        bytecode: u16,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         fs::create_dir_all(root.join(".project/setup")).unwrap();
@@ -53,7 +69,8 @@ impl Candidate {
                     "lambdawalker/android.apexfission.demo-common",
                     "example/android-demo",
                 )
-                .replace("demo-common: Demo Common", "demo: Demo"),
+                .replace("demo-common: Demo Common", "demo: Demo")
+                + contract,
         )
         .unwrap();
         fs::write(root.join(".project/setup/repositories.yml"), "repositories:\n  maven-central: {environment: maven-central, publisher: central}\n  jitpack: {environment: jitpack, publisher: jitpack}\n").unwrap();
@@ -99,6 +116,19 @@ impl Candidate {
             .unwrap()
         };
         let pom = format!("<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{version}</version><packaging>aar</packaging><name>Demo</name><description>Fixture</description><url>https://example.invalid</url><licenses><license><name>Apache-2.0</name><url>https://example.invalid/license</url></license></licenses><developers><developer><id>test</id><name>Test</name></developer></developers><scm><url>https://example.invalid</url><connection>scm:git:https://example.invalid</connection></scm><dependencies><dependency><artifactId>foundation</artifactId></dependency><dependency><artifactId>ui</artifactId><scope>compile</scope></dependency></dependencies></project>");
+        let dependencies = dependencies
+            .iter()
+            .map(|id| {
+                format!(
+                    "<dependency><artifactId>{id}</artifactId><scope>compile</scope></dependency>"
+                )
+            })
+            .collect::<String>();
+        let start = pom.find("<dependencies>").unwrap();
+        let pom = format!(
+            "{}<dependencies>{dependencies}</dependencies></project>",
+            &pom[..start]
+        );
         write(".pom", pom.as_bytes());
         write(
             ".module",
@@ -107,8 +137,17 @@ impl Candidate {
                 .as_bytes(),
         );
         let classes = archive(&[(
-            "com/apexfission/android/democommon/Demo.class",
-            &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61],
+            class,
+            &[
+                0xca,
+                0xfe,
+                0xba,
+                0xbe,
+                0,
+                0,
+                (bytecode >> 8) as u8,
+                bytecode as u8,
+            ],
         )]);
         write(
             ".aar",
@@ -269,4 +308,77 @@ fn confirmation_checks_the_annotated_remote_reservation_before_network_requests(
         run(SHA_PLACEHOLDER),
         "Confirmation source differs from reservation",
     );
+}
+
+#[test]
+fn configured_permissions_contract_verifies_both_destinations() {
+    let contract = "\nverification:\n  class_prefix: com/apexfission/android/permissions/\n  required_api_artifacts: [permissions]\n  bytecode_major: 65\n";
+    for (jitpack, destination) in [(false, "maven-central"), (true, "jitpack")] {
+        let candidate = Candidate::with_contract(
+            jitpack,
+            contract,
+            "com/apexfission/android/permissions/Permissions.class",
+            &["permissions"],
+            65,
+        );
+        assert_eq!(
+            candidate.record(destination)["sha256"]
+                .as_object()
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+}
+
+#[test]
+fn defaults_still_require_demo_package_compose_exports_and_java17() {
+    for (class, dependencies, bytecode, expected) in [
+        (
+            "com/apexfission/android/permissions/Permissions.class",
+            vec!["foundation", "ui"],
+            61,
+            "Missing library classes",
+        ),
+        (
+            "com/apexfission/android/democommon/Demo.class",
+            vec!["permissions"],
+            61,
+            "Required API artifact",
+        ),
+        (
+            "com/apexfission/android/democommon/Demo.class",
+            vec!["foundation", "ui"],
+            65,
+            "Unexpected JVM bytecode target",
+        ),
+    ] {
+        let candidate = Candidate::with_contract(false, "", class, &dependencies, bytecode);
+        let result = candidate.run("maven-central", &candidate.source);
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn configured_api_dependency_must_be_exported_at_compile_scope() {
+    let candidate = Candidate::with_contract(false,
+        "\nverification:\n  class_prefix: com/apexfission/android/permissions/\n  required_api_artifacts: [permissions]\n",
+        "com/apexfission/android/permissions/Permissions.class", &["permissions"], 61);
+    let path = candidate.artifact_base.with_file_name("demo-9.8.7.pom");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)
+            .unwrap()
+            .replace("<scope>compile</scope>", "<scope>runtime</scope>"),
+    )
+    .unwrap();
+    let result = candidate.run("maven-central", &candidate.source);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("Required API artifact must be exported: permissions"));
 }

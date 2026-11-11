@@ -245,6 +245,8 @@ fn fingerprint(root: &Path, module: &str, source: &str) -> Result<String> {
         "publishing",
         "docs/agents",
         "docs/releases.md",
+        ".project/setup/config.yaml",
+        ".project/setup/repositories.yml",
         ".github/workflows/publish-library.yml",
         ".github/workflows/publish-jitpack.yml",
     ]);
@@ -1145,6 +1147,7 @@ pub(super) fn finalize(
             "scripts",
             ":(exclude)scripts/tests",
             "publishing",
+            ".project/setup",
             "docs/templates/MODULE_IMPORT.md.template",
         ],
     )?;
@@ -1299,6 +1302,46 @@ pub(super) fn abort_unconfirmed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_identity_tracks_verification_config_and_repository_registry() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let root = project.path();
+        git_text(root, &["init"])?;
+        configure_fixture_git(root)?;
+        fs::create_dir_all(root.join(".project/setup"))?;
+        fs::write(root.join("gradle.properties"), "GROUP=com.example\n")?;
+        fs::write(
+            root.join(".project/setup/config.yaml"),
+            "verification: {}\n",
+        )?;
+        fs::write(
+            root.join(".project/setup/repositories.yml"),
+            "repositories: {}\n",
+        )?;
+        git_text(root, &["add", "."])?;
+        git_text(root, &["commit", "-m", "fixture"])?;
+        let original = git_text(root, &["rev-parse", "HEAD"])?;
+        let mut previous = fingerprint(root, "demo", &original)?;
+        for (path, content) in [
+            (
+                "config.yaml",
+                "verification: {class_prefix: com/example/}\n",
+            ),
+            (
+                "repositories.yml",
+                "repositories: {jitpack: {publisher: jitpack}}\n",
+            ),
+        ] {
+            fs::write(root.join(".project/setup").join(path), content)?;
+            git_text(root, &["add", ".project/setup"])?;
+            git_text(root, &["commit", "-m", "contract change"])?;
+            let current = fingerprint(root, "demo", "HEAD")?;
+            assert_ne!(previous, current, "{path}");
+            previous = current;
+        }
+        Ok(())
+    }
 
     #[test]
     fn central_metadata_checks_identity_and_distinguishes_absence() -> Result<()> {

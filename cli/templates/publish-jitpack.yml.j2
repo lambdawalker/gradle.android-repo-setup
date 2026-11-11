@@ -73,11 +73,21 @@ jobs:
           distribution: temurin
           java-version: |
             17
-            21
+            <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
         if: steps.release.outputs.skip != 'true'
         with:
           cache-disabled: true
+      - uses: actions/setup-node@v7
+        if: steps.release.outputs.skip != 'true'
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate immutable release source
+        if: steps.release.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: <<@ workflows.release_validation_command @>>
       - name: Verify unsigned candidate
         if: steps.release.outputs.skip != 'true'
         env:

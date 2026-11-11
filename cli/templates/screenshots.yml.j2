@@ -1,4 +1,4 @@
-name: Verify demo common
+name: Verify <<@ workflows.title @>>
 
 on:
   pull_request:
@@ -19,7 +19,7 @@ jobs:
           distribution: temurin
           java-version: |
             17
-            21
+            <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
       - name: Build and lint the library
         run: ./gradlew :<<@ workflows.module @>>:assembleRelease :<<@ workflows.module @>>:lintDebug :<<@ workflows.app_module @>>:assembleDebug :<<@ workflows.app_module @>>:lintDebug --no-daemon
@@ -39,7 +39,7 @@ jobs:
             find "$reference" -name '*.png' -type f -print0 | sort -z |
               xargs -0 -r sha256sum > screenshot-manifest/images.sha256
           fi
-          test "$(wc -l < screenshot-manifest/images.sha256)" -eq 5
+          test "$(wc -l < screenshot-manifest/images.sha256)" -eq <<@ workflows.screenshot_count @>>
       - name: Upload screenshots and test reports
         if: always()
         uses: actions/upload-artifact@v7

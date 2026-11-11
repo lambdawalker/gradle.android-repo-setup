@@ -191,6 +191,7 @@ fn verify_public(
     destination: &str,
     repository_url: &str,
     fetch: &impl Fn(&str, bool) -> Result<Option<Vec<u8>>>,
+    contract: &crate::release::VerificationConfig,
 ) -> Result<Value> {
     let required = |url: &str| -> Result<Vec<u8>> {
         fetch(url, false)?.ok_or_else(|| Pending("Public artifact is missing".into()).into())
@@ -248,7 +249,7 @@ fn verify_public(
         } else {
             required(&url)?
         };
-        verify(&data, suffix, group, artifact, version, false)
+        verify(&data, suffix, group, artifact, version, false, contract)
             .with_context(|| format!("Invalid public artifact {suffix}"))?;
         let hash = format!("{:x}", Sha256::digest(&data));
         if !jitpack {
@@ -344,10 +345,11 @@ pub(crate) fn confirm(
         record["source"] == expected_source,
         "Confirmation source differs from reservation"
     );
+    let contract = crate::release::verification_config(root, &expected_source)?;
     let fetch = registry_fetch(repository_url);
     let started = Instant::now();
     loop {
-        match verify_public(&record, destination, repository_url, &fetch) {
+        match verify_public(&record, destination, repository_url, &fetch, &contract) {
             Ok(hashes) => {
                 record["sha256"] = hashes;
                 break;
@@ -439,7 +441,13 @@ pub(crate) mod tests {
             }))
         };
         let verify = |record: &Value, fetch: &_| {
-            verify_public(record, "maven-central", "https://example.invalid", fetch)
+            verify_public(
+                record,
+                "maven-central",
+                "https://example.invalid",
+                fetch,
+                &Default::default(),
+            )
         };
         assert_eq!(verify(&record, &fetch).unwrap(), record["sha256"]);
         let bad_signature = verify_public(
@@ -453,6 +461,7 @@ pub(crate) mod tests {
                     fetch(url, optional)
                 }
             },
+            &Default::default(),
         )
         .unwrap_err();
         assert!(bad_signature.to_string().contains("Missing signature"));
@@ -461,6 +470,66 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("hash mismatch"));
+    }
+
+    #[test]
+    fn public_permissions_artifacts_use_the_configured_contract() {
+        let mut artifacts = artifacts("com.example.android", "permissions", "1.2.3");
+        artifacts[0] = String::from_utf8(artifacts[0].clone())
+            .unwrap()
+            .replace("foundation", "permissions")
+            .replace("<dependency><artifactId>ui</artifactId></dependency>", "")
+            .into_bytes();
+        let classes = archive(&[(
+            "com/apexfission/android/permissions/Permissions.class",
+            &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61],
+        )]);
+        artifacts[1] = archive(&[
+            ("AndroidManifest.xml", b"<manifest/>"),
+            ("classes.jar", &classes),
+        ]);
+        let hashes: serde_json::Map<_, _> = SUFFIXES
+            .iter()
+            .zip(&artifacts)
+            .map(|(suffix, data)| {
+                (
+                    suffix.to_string(),
+                    json!(format!("{:x}", Sha256::digest(data))),
+                )
+            })
+            .collect();
+        let record = json!({"group":"com.example.android", "artifact":"permissions", "version":"1.2.3", "sha256":hashes});
+        let contract: crate::release::VerificationConfig = serde_yaml_ng::from_str("class_prefix: com/apexfission/android/permissions/\nrequired_api_artifacts: [permissions]").unwrap();
+        let fetch = |url: &str, _: bool| {
+            Ok(Some(if url.ends_with(".asc") {
+                b"BEGIN PGP SIGNATURE".to_vec()
+            } else {
+                artifacts[SUFFIXES
+                    .iter()
+                    .position(|suffix| url.ends_with(suffix))
+                    .unwrap()]
+                .clone()
+            }))
+        };
+        assert_eq!(
+            verify_public(
+                &record,
+                "maven-central",
+                "https://example.invalid",
+                &fetch,
+                &contract
+            )
+            .unwrap(),
+            record["sha256"]
+        );
+        assert!(verify_public(
+            &record,
+            "maven-central",
+            "https://example.invalid",
+            &fetch,
+            &Default::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -496,6 +565,7 @@ pub(crate) mod tests {
                         .unwrap();
                     Ok(Some(artifacts[index].clone()))
                 },
+                &Default::default(),
             )
         };
         assert!(verify("building", &"a".repeat(40))

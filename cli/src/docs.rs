@@ -20,6 +20,8 @@ const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default, rename = "verification")]
+    _verification: Option<crate::release::VerificationConfig>,
     repository: String,
     title: String,
     modules: serde_yaml_ng::Mapping,
