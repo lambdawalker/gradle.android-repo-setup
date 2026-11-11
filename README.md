@@ -4,19 +4,43 @@ Gradle builds and publishes Android artifacts. The companion Rust CLI configures
 
 ## Use a published release
 
-After version 0.1.0 is available on the Gradle Plugin Portal, add the following
-to the root `build.gradle.kts` plugins block:
+The current release is [v0.1.7](https://github.com/lambdawalker/gradle.android-repo-setup/releases/tag/v0.1.7). It includes the Rust CLI binaries and the Gradle plugins published through JitPack. The CLI and Gradle plugins are separate installations; a CLI download does not install a Gradle plugin.
+
+Map the plugin IDs to the JitPack module in `settings.gradle.kts`:
 
 ```kotlin
-plugins {
-    id("com.apexfission.android-repo-setup.root") version "0.1.0"
-    id("com.apexfission.android-repo-setup") version "0.1.0" apply false
+pluginManagement {
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id in setOf(
+                    "com.apexfission.android-repo-setup.root",
+                    "com.apexfission.android-repo-setup",
+                )) {
+                requested.version?.let { version ->
+                    useModule("com.github.lambdawalker:gradle.android-repo-setup:$version")
+                }
+            }
+        }
+    }
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+        maven("https://jitpack.io")
+    }
 }
 ```
 
-Apply the library plugin in each publishable Android module as shown below.
-Keep `gradlePluginPortal()`, `mavenCentral()`, and `google()` available in
-the consumer's plugin repositories.
+Then use the release tag in the root `build.gradle.kts`:
+
+```kotlin
+plugins {
+    id("com.apexfission.android-repo-setup.root") version "v0.1.7"
+    id("com.apexfission.android-repo-setup") version "v0.1.7" apply false
+}
+```
+
+Apply the library plugin in each publishable Android module as shown below. [Demo Common](https://github.com/lambdawalker/android.apexfission.demo-common) is the reference integration, including setup launchers and a bilingual Zola documentation site.
 
 ## Try it from a source checkout
 
@@ -120,11 +144,30 @@ Build the Rust CLI from the repository root:
 cargo build --locked --release --manifest-path cli/Cargo.toml
 ```
 
-To download prebuilt executables, use the CLI releases on GitHub. Each release
-includes a Windows x64 ZIP and Linux x64 and Apple Silicon macOS tarballs,
-each with its own SHA-256 checksum. Extract the archive and put the executable
-on `PATH`. The APK and Maven signing commands use `keytool` and GnuPG,
-respectively.
+Download prebuilt executables from [release v0.1.7](https://github.com/lambdawalker/gradle.android-repo-setup/releases/tag/v0.1.7). Each archive has a matching `.sha256` file; verify it before extracting and adding the executable to `PATH`.
+
+| Platform | Archive |
+| --- | --- |
+| Windows x64 | `android-repo-setup-x86_64-pc-windows-msvc.zip` |
+| Linux x64 | `android-repo-setup-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `android-repo-setup-aarch64-apple-darwin.tar.gz` |
+
+For Linux x64:
+
+```sh
+release=https://github.com/lambdawalker/gradle.android-repo-setup/releases/download/v0.1.7
+archive=android-repo-setup-x86_64-unknown-linux-gnu.tar.gz
+curl --fail --location --remote-name "$release/$archive"
+curl --fail --location --remote-name "$release/$archive.sha256"
+sha256sum -c "$archive.sha256"
+tar -xzf "$archive"
+./android-repo-setup --version
+# Expected: android-repo-setup 0.1.7
+```
+
+Prebuilt binaries do not require Cargo. Building from source does. APK and Maven signing commands separately require `keytool` and GnuPG. Zola websites require Zola 0.23.6 on `PATH` in addition to the CLI; Zola is not bundled in the CLI archive.
+
+Demo Common's `setup.bat` reads `tooling_ref`, downloads and verifies the matching Windows release, and caches it under `bin/<tag>/`. Its `setup.sh` validates the matching CLI on `PATH`. Full source SHA pins use a cached Cargo build instead.
 
 Use **Actions → Build Rust CLI** to create downloadable test builds. Use
 **Actions → Publish Rust CLI** to build and publish release assets. Run it
@@ -319,7 +362,7 @@ workflows:
 The defaults are five screenshots, Java 21, `android-repo-setup build_docs`,
 `cd docs/screenshots && sha256sum -c images.sha256`, and `true` for release
 validation. Java 17 is also installed for projects that need it. Documentation
-and publication jobs install Node 24. Commands preserve shell punctuation and
+and publication jobs install checksum-pinned Zola 0.23.6 for repositories with `sites/zola.toml`; other repositories retain Node 24 setup. Commands preserve shell punctuation and
 may contain multiple lines. Release validation runs after checking out the
 immutable release source and before verifying the unsigned publication; it
 receives `SOURCE_SHA` and is skipped when the release is already complete.
@@ -340,3 +383,47 @@ Install Zola 0.23.6 on PATH for local builds. Generated Documentation and releas
 Canonical English guides live recursively in `docs/agents/`. Reviewed Spanish counterparts live in `docs/es/`; `docs/es/translations.json` maps relative guide names to the SHA-256 of exact English source. Missing or stale translations visibly fall back to English at the selected documentation revision. Release archives and optional translation trees are read as data; historical scripts are never run.
 
 The bundled theme in `cli/site-theme/` provides light/dark modes, scoped search, responsive sidebar and on-page contents, version/language selection, source/documentation provenance, raw Markdown and screenshot galleries. Override templates in `sites/templates/` and assets in `sites/static/`. `versions.json` describes the generated scopes; old renderer links and root integration Markdown remain available. Demo Common is the reference integration.
+
+
+#### Start a Zola site
+
+Zola support is included in CLI v0.1.7. Pin the release in `.project/setup/config.yaml` and retain the rest of your project configuration:
+
+```yaml
+tooling_ref: 'v0.1.7'
+workflows:
+  # Keep your module, app_module and title settings here.
+  documentation_command: android-repo-setup build_docs --check
+```
+
+Add `sites/zola.toml` (replace the repository URL and title):
+
+```toml
+base_url = "https://lambdawalker.github.io/android.apexfission.demo-common"
+title = "Demo Common"
+description = "Material 3 Compose components for Android demo catalogs."
+default_language = "en"
+build_search_index = true
+
+[languages.es]
+build_search_index = true
+
+[search]
+index_format = "fuse_json"
+
+[markdown.highlighting]
+light_theme = "github-light"
+dark_theme = "github-dark"
+```
+
+With CLI v0.1.7 and Zola 0.23.6 on `PATH`, run from the Android repository root:
+
+```sh
+android-repo-setup workflows --overwrite --set-tooling-ref v0.1.7
+android-repo-setup workflows --check
+android-repo-setup build_docs --check
+```
+
+Review and commit generated workflow changes. Output is `sites/dist/`, ready for the generated GitHub Pages workflow. Canonical pages use `/<language>/<module>/<version>/` and matching `/raw/*.md` endpoints; `development` is visibly unreleased. Confirmed provider routes can share a semantic version while retaining different source commits and installation coordinates. Version/language changes preserve the guide when available, and explain an overview fallback otherwise.
+
+Use `--base <absolute-preview-url>` when previewing on another host, or `--base /path` to change the configured host's path prefix. Historical Git objects and optional translation trees must be available; fetch full history. `--check` validates generated local links, anchors and images. It does not check external website availability or render Android UI. See [Demo Common's website guide](https://github.com/lambdawalker/android.apexfission.demo-common/blob/main/sites/README.md) for the complete source/translation ownership rules and preview.
