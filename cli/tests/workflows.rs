@@ -216,3 +216,49 @@ fn reconciliation_workflow_defaults_to_preview_and_serializes_with_publication()
     assert!(command.contains("module_release reconcile-failed-jitpack"));
     assert!(!command.contains("${{ inputs."));
 }
+
+#[test]
+fn reconciliation_install_uses_tag_or_revision_for_the_selected_tooling_pin() {
+    for (pin, flag) in [
+        ("v0.1.6", "--tag"),
+        ("1234567890abcdef1234567890abcdef12345678", "--rev"),
+    ] {
+        let root = fixture();
+        let result = run(root.path(), &["--overwrite", "--set-tooling-ref", pin]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &fs::read_to_string(
+                root.path()
+                    .join(".github/workflows/reconcile-failed-jitpack.yml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let install = &workflow["jobs"]["reconcile"]["steps"][1];
+        assert_eq!(install["env"]["TOOLING_REF"], pin);
+        let script = install["run"].as_str().unwrap();
+        assert!(script.contains("ref=(--tag \"$TOOLING_REF\")"));
+        assert!(script.contains("ref=(--rev \"$TOOLING_REF\")"));
+        assert!(script.contains("\"${ref[@]}\" android-repo-setup"));
+        // The generated job uses Ubuntu. Execute its selection with a harmless
+        // Cargo stub on Unix, without downloading or installing anything.
+        #[cfg(unix)]
+        {
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(format!("cargo() {{ printf '%s\\n' \"$@\"; }}\n{script}"))
+                .env("TOOLING_REF", pin)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let arguments = String::from_utf8(output.stdout).unwrap();
+            assert!(arguments.contains(&format!("{flag}\n{pin}\nandroid-repo-setup\n")));
+        }
+        #[cfg(not(unix))]
+        let _ = flag;
+    }
+}

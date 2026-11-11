@@ -25,7 +25,11 @@ jobs:
           ref: main
           fetch-depth: 0
       - name: Install validated Rust tooling
-        run: cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git --tag '<<@ tooling_ref @>>' android-repo-setup
+        env:
+          TOOLING_REF: '<<@ tooling_ref @>>'
+        run: |
+          if [[ "$TOOLING_REF" == v* ]]; then ref=(--tag "$TOOLING_REF"); else ref=(--rev "$TOOLING_REF"); fi
+          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-setup
       - name: Review or archive failed attempts
         env:
           RELEASE_MODULE: '<<@ workflows.module @>>'
