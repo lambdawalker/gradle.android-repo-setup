@@ -427,3 +427,10 @@ android-repo-setup build_docs --check
 Review and commit generated workflow changes. Output is `sites/dist/`, ready for the generated GitHub Pages workflow. Canonical pages use `/<language>/<module>/<version>/` and matching `/raw/*.md` endpoints; `development` is visibly unreleased. Confirmed provider routes can share a semantic version while retaining different source commits and installation coordinates. Version/language changes preserve the guide when available, and explain an overview fallback otherwise.
 
 Use `--base <absolute-preview-url>` when previewing on another host, or `--base /path` to change the configured host's path prefix. Historical Git objects and optional translation trees must be available; fetch full history. `--check` validates generated local links, anchors and images. It does not check external website availability or render Android UI. See [Demo Common's website guide](https://github.com/lambdawalker/android.apexfission.demo-common/blob/main/sites/README.md) for the complete source/translation ownership rules and preview.
+
+
+### Windows IDE terminal mouse input
+
+The wizard normalizes legacy X10 and SGR mouse reports that some Windows IDE terminals, including IntelliJ IDEA, deliver as character events. Pointer movement does not alter text or password fields; clicks, dragging and vertical scrolling remain mouse actions. Native console events pass through unchanged. The compatibility layer applies on Windows only, before input reaches the views, and preserves ordinary text and keyboard shortcuts.
+
+This fix requires a CLI release containing it; the already published v0.1.7 executable does not include it.

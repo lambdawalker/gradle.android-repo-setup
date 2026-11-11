@@ -1,5 +1,7 @@
 //! The terminal owns rendering. Setup work runs on a worker and exchanges typed
 //! requests with it, so network, keytool and GnuPG never block input or resize.
+#[cfg(any(windows, test))]
+mod mouse_input;
 use crate::gpg::SigningKey;
 use anyhow::{anyhow, bail, Result};
 use cursive::{
@@ -240,6 +242,9 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
             }));
             result
         });
+        #[cfg(windows)]
+        let terminal = app.try_run_with(mouse_input::init);
+        #[cfg(not(windows))]
         let terminal = app.try_run_with(cursive::backends::crossterm::Backend::init);
         // Unblock the worker even if a backend ends with an outstanding question.
         app.user_data::<State>().unwrap().reply.take();
