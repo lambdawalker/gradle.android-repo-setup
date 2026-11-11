@@ -1,0 +1,14 @@
+      - name: Install pinned Zola
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/zola-0.23.6"
+          archive="$RUNNER_TEMP/zola-0.23.6.tar.gz"
+          curl --fail --show-error --silent --location --retry 3 \
+            https://github.com/getzola/zola/releases/download/v0.23.6/zola-v0.23.6-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$archive"
+          echo "8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4  $archive" | sha256sum -c -
+          mkdir -p "$directory"
+          tar -xzf "$archive" -C "$directory"
+          test "$("$directory/zola" --version)" = 'zola 0.23.6'
+          echo "$directory" >> "$GITHUB_PATH"

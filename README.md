@@ -330,3 +330,13 @@ Release fingerprints include `.project/setup/config.yaml` and
 `.project/setup/repositories.yml`, so changing the verification contract or
 repository configuration changes the release identity. Finalization also
 requires `.project/setup` to agree with the current main branch.
+
+### Zola documentation websites
+
+Repositories opt in to the shared Zola backend by checking in `sites/zola.toml`. `android-repo-setup build_docs --check` then prepares immutable release/development content and runs Zola 0.23.6; repositories without that file retain the existing renderer. Existing Astro documentation commands remain supported.
+
+Install Zola 0.23.6 on PATH for local builds. Generated Documentation and release-validation workflows install its verified binary for opted-in sites and omit Node setup. Native CLI integration tests use the real Zola binary; CI installs it on both Linux and Windows. Neither Python nor Node.js is needed by the Zola site build.
+
+Canonical English guides live recursively in `docs/agents/`. Reviewed Spanish counterparts live in `docs/es/`; `docs/es/translations.json` maps relative guide names to the SHA-256 of exact English source. Missing or stale translations visibly fall back to English at the selected documentation revision. Release archives and optional translation trees are read as data; historical scripts are never run.
+
+The bundled theme in `cli/site-theme/` provides light/dark modes, scoped search, responsive sidebar and on-page contents, version/language selection, source/documentation provenance, raw Markdown and screenshot galleries. Override templates in `sites/templates/` and assets in `sites/static/`. `versions.json` describes the generated scopes; old renderer links and root integration Markdown remain available. Demo Common is the reference integration.

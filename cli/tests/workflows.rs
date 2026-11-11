@@ -385,3 +385,50 @@ fn workflow_contract_defaults_and_overrides_preserve_command_scalars() {
         }));
     }
 }
+
+#[test]
+fn zola_sites_install_verified_rust_renderer_without_node() {
+    let root = fixture();
+    fs::create_dir_all(root.path().join("sites")).unwrap();
+    fs::write(
+        root.path().join("sites/zola.toml"),
+        "base_url = 'https://example.invalid/demo'\n",
+    )
+    .unwrap();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for name in [
+        "documentation.yml",
+        "publish-library.yml",
+        "publish-jitpack.yml",
+    ] {
+        let text = fs::read_to_string(root.path().join(".github/workflows").join(name)).unwrap();
+        assert!(
+            !text.contains("actions/setup-node"),
+            "{name} should not require Node"
+        );
+        let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
+        let steps: Vec<_> = workflow["jobs"]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .filter_map(|job| job["steps"].as_sequence())
+            .flatten()
+            .collect();
+        let install = steps
+            .iter()
+            .find(|s| s["name"] == "Install pinned Zola")
+            .expect("Zola installation step");
+        let script = install["run"].as_str().unwrap();
+        assert!(script.contains("v0.23.6"));
+        assert!(script.contains("8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4"));
+        assert!(script.find("sha256sum -c").unwrap() < script.find("tar -xzf").unwrap());
+        if name != "documentation.yml" {
+            assert_eq!(install["if"], "steps.release.outputs.skip != 'true'");
+        }
+    }
+}

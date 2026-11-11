@@ -1,0 +1,26 @@
+{% set scopes = load_data(path="scopes.json") %}
+{% set language = "en" %}
+{% if page is defined %}{% set scope = scopes[page.extra.scope_index] %}{% set language = scope.language %}{% elif section is defined %}{% set language = section.lang | default(value="en") %}{% endif %}
+{% set spanish = language == "es" %}
+<!doctype html>
+<html lang="{{ language }}" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ config.title }}{% endblock title %} · Apexfission</title>
+  <link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('docs-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
+  <link rel="stylesheet" href="{{ get_url(path='docs.css') }}">
+  <script src="{{ get_url(path='docs.js') }}" defer></script>
+</head>
+<body data-language="{{ language }}" data-base="{{ get_url(path='') }}" {% if page is defined %}data-scope="{{ page.extra.scope_index }}" data-guide="{{ page.extra.guide }}"{% endif %}>
+  <a class="skip-link" href="#main">{% if spanish %}Saltar al contenido{% else %}Skip to content{% endif %}</a>
+  <header class="site-header">
+    <a class="brand" href="{{ get_url(path='') }}" aria-label="Apexfission documentation"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 30 28H2L16 3Zm0 9-6 11h12l-6-11Z" fill="currentColor"/></svg><span>apex<span class="brand-light">fission</span><small>{{ config.title }}</small></span></a>
+    <button class="search-trigger" data-search-open aria-haspopup="dialog" aria-label="{% if spanish %}Buscar documentación{% else %}Search documentation{% endif %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 5 5"/></svg><span>{% if spanish %}Buscar documentación{% else %}Search documentation{% endif %}</span><kbd>Ctrl K</kbd></button>
+    <div class="header-actions"><a class="repository-link" href="https://github.com/{{ config.extra.repository }}">GitHub <span aria-hidden="true">↗</span></a><button class="icon-button" id="theme-toggle" aria-label="{% if spanish %}Cambiar tema{% else %}Toggle color theme{% endif %}" title="{% if spanish %}Cambiar tema{% else %}Toggle color theme{% endif %}"><span aria-hidden="true">◐</span></button><button class="icon-button mobile-menu" id="menu-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="{% if spanish %}Abrir navegación{% else %}Open navigation{% endif %}"><span aria-hidden="true">☰</span></button></div>
+  </header>
+  {% block content %}{% endblock content %}
+  <dialog id="search-dialog" aria-labelledby="search-title"><div class="search-heading"><h2 id="search-title">{% if spanish %}Buscar documentación{% else %}Search documentation{% endif %}</h2><button class="icon-button" data-search-close aria-label="{% if spanish %}Cerrar búsqueda{% else %}Close search{% endif %}">×</button></div><label for="search-input" class="sr-only">{% if spanish %}Consulta{% else %}Search query{% endif %}</label><input id="search-input" type="search" autocomplete="off" placeholder="{% if spanish %}¿Qué quieres encontrar?{% else %}What are you looking for?{% endif %}"><p class="search-hint">{% if spanish %}Busca en el idioma, módulo y versión seleccionados.{% else %}Search the selected language, module and version.{% endif %}</p><div id="search-results" aria-live="polite"></div><div class="search-footer"><kbd>Esc</kbd> {% if spanish %}para cerrar{% else %}to close{% endif %}</div></dialog>
+</body>
+</html>

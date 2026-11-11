@@ -314,7 +314,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             docs::history(&root, command)?;
         }
-        Command::BuildDocs { base, check: _ } => docs::build(&root, base.as_deref())?,
+        Command::BuildDocs { base, check } => docs::build(&root, base.as_deref(), check)?,
     }
     Ok(ExitCode::SUCCESS)
 }

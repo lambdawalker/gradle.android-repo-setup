@@ -202,7 +202,7 @@ pub(super) fn verify(root: &Path, config: &Config, catalog: &[Value]) -> Result<
         let entry = entries.get(&(string(&record, "module")?, archive_name(&record)?));
         ensure!(
             entry.and_then(|entry| entry["destinations"].get(target)) == Some(&record),
-            "Latest confirmation missing from archive; run documentation_history.py seed"
+            "Latest confirmation missing from archive; run android-repo-setup documentation_history seed"
         );
     }
     Ok(())
