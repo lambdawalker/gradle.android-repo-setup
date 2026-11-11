@@ -39,7 +39,7 @@ fn cli_generates_native_workflows_and_tracks_their_content() {
     let manifest = fs::read(root.path().join(".project/setup/workflow-generation.json")).unwrap();
     let hashes: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&manifest).unwrap();
-    assert_eq!(hashes.len(), 10);
+    assert_eq!(hashes.len(), 11);
     assert_eq!(fs::read_dir(&output).unwrap().count(), hashes.len());
     for (name, expected) in hashes {
         let contents = fs::read_to_string(output.join(&name)).unwrap();
@@ -175,4 +175,44 @@ fn cli_rejects_app_module_paths_and_shell_expressions_before_writing() {
             assert!(!root.path().join(".github/workflows").exists());
         }
     }
+}
+
+#[test]
+fn reconciliation_workflow_defaults_to_preview_and_serializes_with_publication() {
+    let root = fixture();
+    let generated = run(root.path(), &[]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = root.path().join(".github/workflows");
+    let cleanup: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(output.join("reconcile-failed-jitpack.yml")).unwrap(),
+    )
+    .unwrap();
+    let publish: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(output.join("publish-library.yml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cleanup["on"]["workflow_dispatch"]["inputs"]["apply"]["default"],
+        false
+    );
+    assert_eq!(cleanup["concurrency"]["cancel-in-progress"], false);
+    let groups: Vec<_> = publish["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .filter_map(|job| job["concurrency"]["group"].as_str())
+        .collect();
+    assert!(groups.contains(&cleanup["concurrency"]["group"].as_str().unwrap()));
+    assert_eq!(
+        cleanup["jobs"]["reconcile"]["if"],
+        "github.ref == 'refs/heads/main'"
+    );
+    let steps = cleanup["jobs"]["reconcile"]["steps"].as_sequence().unwrap();
+    let command = steps.last().unwrap()["run"].as_str().unwrap();
+    assert!(command.contains("if [[ \"$APPLY\" == true ]]"));
+    assert!(command.contains("module_release reconcile-failed-jitpack"));
+    assert!(!command.contains("${{ inputs."));
 }

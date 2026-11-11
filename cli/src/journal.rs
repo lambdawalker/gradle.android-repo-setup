@@ -497,6 +497,52 @@ fn archive_attempt(root: &Path, archive: &str, attempts: &[(&str, &str)]) -> Res
     Ok(())
 }
 
+fn verify_failed_jitpack(record: &Value, fetch: &Fetch<'_>) -> Result<()> {
+    let group = field(record, "group")?;
+    let artifact = field(record, "artifact")?;
+    let consumer = field(record, "consumer_version")?;
+    let check_failure = || -> Result<()> {
+        let bytes = fetch(
+            &format!("{JITPACK}/api/builds/{group}/{artifact}/{consumer}"),
+            false,
+        )?
+        .context("Missing JitPack build status")?;
+        let status: Value = serde_json::from_slice(&bytes)?;
+        ensure!(
+            matches!(
+                status["status"]
+                    .as_str()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("error" | "failed")
+            ),
+            "JitPack attempt is not a proven terminal failure; preserve pending journal"
+        );
+        ensure!(
+            status["commit"] == field(record, "source")?,
+            "JitPack failure source does not match the reserved source"
+        );
+        for (name, expected) in [
+            ("group", group),
+            ("artifact", artifact),
+            ("version", consumer),
+        ] {
+            ensure!(
+                status.get(name).is_none_or(|value| value == expected),
+                "JitPack failure identity differs from the reservation"
+            );
+        }
+        Ok(())
+    };
+    check_failure()?;
+    ensure!(
+        !artifacts_exist(&artifact_base(JITPACK, group, artifact, consumer), fetch)?,
+        "JitPack attempt has public artifacts; preserve pending journal"
+    );
+    check_failure()?;
+    Ok(())
+}
+
 fn recover_failed_jitpack(
     root: &Path,
     module: &str,
@@ -530,54 +576,146 @@ fn recover_failed_jitpack(
             "Confirmed JitPack history requires manual reconciliation"
         );
     }
-    let group = field(&record, "group")?;
-    let artifact = field(&record, "artifact")?;
-    let consumer = field(&record, "consumer_version")?;
-    let check_failure = || -> Result<()> {
-        let bytes = fetch(
-            &format!("{JITPACK}/api/builds/{group}/{artifact}/{consumer}"),
-            false,
-        )?
-        .context("Missing JitPack build status")?;
-        let status: Value = serde_json::from_slice(&bytes)?;
-        ensure!(
-            matches!(
-                status["status"]
-                    .as_str()
-                    .map(str::to_ascii_lowercase)
-                    .as_deref(),
-                Some("error" | "failed")
-            ),
-            "JitPack attempt is not a proven terminal failure; preserve pending journal"
-        );
-        ensure!(
-            status["commit"] == old_source,
-            "JitPack failure source does not match the reserved source"
-        );
-        for (name, expected) in [
-            ("group", group),
-            ("artifact", artifact),
-            ("version", consumer),
-        ] {
-            ensure!(
-                status.get(name).is_none_or(|value| value == expected),
-                "JitPack failure identity differs from the reservation"
-            );
-        }
-        Ok(())
-    };
-    check_failure()?;
-    ensure!(
-        !artifacts_exist(&artifact_base(JITPACK, group, artifact, consumer), fetch)?,
-        "JitPack attempt has public artifacts; preserve pending journal"
-    );
-    check_failure()?;
+    verify_failed_jitpack(&record, fetch)?;
     archive_attempt(
         root,
         &attempt("failed", module, old_version, "jitpack"),
         &[(name, &oid)],
     )?;
     println!("Archived failed JitPack {module} {old_version}; canonical tag retained; advancing to {version}");
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct ReconciledAttempt {
+    version: String,
+    action: &'static str,
+    detail: String,
+}
+
+fn ensure_unconfirmed_jitpack(root: &Path, module: &str, version: &str) -> Result<()> {
+    if let Some(record) = current(root, module, "jitpack")? {
+        version_key(field(&record, "version")?)?;
+        ensure!(
+            record["version"] != version,
+            "Version has a confirmed release record"
+        );
+    }
+    for filename in [format!("{version}-jitpack.json"), format!("{version}.json")] {
+        let path = format!("{}/{module}/{filename}", crate::docs::HISTORY);
+        if let Some(entry) = remote_file(root, &path)? {
+            ensure!(
+                entry["destinations"]
+                    .as_object()
+                    .context("Malformed release history")?
+                    .get("jitpack")
+                    .is_none(),
+                "Version has confirmed JitPack release history"
+            );
+        }
+    }
+    ensure!(
+        remote_oid(root, &attempt("uploading", module, version, "jitpack"))?.is_none(),
+        "Upload-started attempt requires manual review"
+    );
+    Ok(())
+}
+
+fn reconcile_failed_jitpack_with(
+    root: &Path,
+    module: &str,
+    versions: &[String],
+    apply: bool,
+    fetch: &Fetch<'_>,
+) -> Result<Vec<ReconciledAttempt>> {
+    coordinates(root, module, "0.1.0", "jitpack", true)?;
+    for version in versions {
+        version_key(version)?;
+    }
+    let tags = remote_tags(root)?;
+    let prefix = attempt("pending", module, "", "jitpack");
+    let mut report = Vec::new();
+    for (name, expected_oid) in tags.iter().filter(|(name, _)| name.starts_with(&prefix)) {
+        let version = &name[prefix.len()..];
+        if !versions.is_empty() && !versions.iter().any(|selected| selected == version) {
+            continue;
+        }
+        let result = (|| -> Result<String> {
+            version_key(version)?;
+            let (record, oid) = read_reservation(root, module, version, "jitpack", "jitpack/")?;
+            ensure!(
+                oid == *expected_oid,
+                "Pending journal changed during reconciliation"
+            );
+            ensure!(
+                record["phase"] == "reserved-before-upload",
+                "Journal is already confirmed"
+            );
+            ensure!(
+                record["source_tag"] == canonical(module, version, "jitpack"),
+                "A canonical destination source tag is required"
+            );
+            verify_stable(root, &record)?;
+            ensure_unconfirmed_jitpack(root, module, version)?;
+            verify_failed_jitpack(&record, fetch)?;
+            // Recheck Git state after network requests. Atomic pending deletion below
+            // races safely with finalization and upload guards through the same lease.
+            verify_stable(root, &record)?;
+            ensure_unconfirmed_jitpack(root, module, version)?;
+            let archive = attempt("failed", module, version, "jitpack");
+            ensure!(
+                remote_oid(root, &archive)?.is_none(),
+                "Failure archive already exists"
+            );
+            if apply {
+                archive_attempt(root, &archive, &[(name, &oid)])?;
+            }
+            Ok(format!(
+                "{} -> {archive} (object {oid}, source {})",
+                name,
+                field(&record, "source")?
+            ))
+        })();
+        report.push(match result {
+            Ok(detail) => ReconciledAttempt {
+                version: version.into(),
+                action: if apply { "archived" } else { "eligible" },
+                detail,
+            },
+            Err(error) => ReconciledAttempt {
+                version: version.into(),
+                action: "needs-review",
+                detail: error.to_string(),
+            },
+        });
+    }
+    Ok(report)
+}
+
+pub(super) fn reconcile_failed_jitpack(
+    root: &Path,
+    module: &str,
+    versions: &[String],
+    apply: bool,
+) -> Result<()> {
+    fetch_tags(root)?;
+    let report =
+        reconcile_failed_jitpack_with(root, module, versions, apply, &registry_fetch(JITPACK))?;
+    let json = serde_json::to_string_pretty(&report)?;
+    println!("{json}");
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty()) {
+        let mode = if apply { "Apply" } else { "Preview" };
+        let summary = format!("### {mode} failed JitPack attempts\n\n```json\n{json}\n```\n\nCanonical source tags and confirmed releases are retained. Entries marked needs-review require investigation.\n");
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?
+            .write_all(summary.as_bytes())?;
+    }
+    ensure!(
+        !apply || report.iter().all(|entry| entry.action != "needs-review"),
+        "Some attempts were preserved and need review; inspect the reconciliation report"
+    );
     Ok(())
 }
 
@@ -1374,6 +1512,312 @@ mod tests {
         let (journal, _) = read_reservation(winners[0], module, version, destination, "")?;
         assert_eq!(journal["workflow_run"], "same-run");
         verify_stable(winners[0], &journal)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_attempt_proof_checks_every_http_artifact_between_status_reads() -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let source = "a".repeat(40);
+        let status = json!({"status":"Error", "commit":source}).to_string();
+        let server = std::thread::spawn(move || -> Result<Vec<String>> {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut paths = Vec::new();
+            while paths.len() < SUFFIXES.len() + 2 && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut reader = BufReader::new(stream.try_clone()?);
+                let mut request = String::new();
+                reader.read_line(&mut request)?;
+                let path = request
+                    .split_whitespace()
+                    .nth(1)
+                    .context("Missing request path")?
+                    .to_owned();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line)?;
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let (code, body) = if path.contains("/api/builds/") {
+                    ("200 OK", status.as_str())
+                } else {
+                    ("404 Not Found", "")
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                paths.push(path);
+            }
+            Ok(paths)
+        });
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(None)
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build()
+            .into();
+        let fetch = |url: &str, optional: bool| -> Result<Option<Vec<u8>>> {
+            let mut response = agent.get(&url.replacen(JITPACK, &endpoint, 1)).call()?;
+            match response.status().as_u16() {
+                200 => Ok(Some(response.body_mut().read_to_vec()?)),
+                404 if optional => Ok(None),
+                code => anyhow::bail!("Unexpected HTTP {code}"),
+            }
+        };
+        let result = verify_failed_jitpack(
+            &json!({"group":"com.github.example", "artifact":"demo", "consumer_version":"demo~v0.1.0-jitpack", "source":source}),
+            &fetch,
+        );
+        let paths = server.join().expect("mock server panicked")?;
+        result?;
+        assert_eq!(paths.len(), SUFFIXES.len() + 2);
+        assert_eq!(paths.first(), paths.last());
+        assert!(paths[0].starts_with("/api/builds/"));
+        for (path, suffix) in paths[1..paths.len() - 1].iter().zip(SUFFIXES) {
+            assert!(path.ends_with(suffix), "{path}");
+        }
+        Ok(())
+    }
+
+    fn failed_attempt_fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, String)> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("checkout");
+        fs::create_dir(&root)?;
+        git_text(&root, &["init", "-b", "main"])?;
+        configure_fixture_git(&root)?;
+        let remote = temp.path().join("origin.git");
+        git_text(&root, &["init", "--bare", remote.to_str().unwrap()])?;
+        git_text(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )?;
+        fs::create_dir_all(root.join(".project/setup"))?;
+        // Windows checkouts may use CRLF; parsing must not depend on LF replacements.
+        fs::write(
+            root.join(".project/setup/config.yaml"),
+            "repository: example/demo\r\nmodules:\r\n  demo: Demo\r\n",
+        )?;
+        fs::write(
+            root.join(".project/setup/repositories.yml"),
+            "repositories:\r\n  maven-central:\r\n    environment: maven-central\r\n    publisher: central\r\n  jitpack:\r\n    environment: jitpack\r\n    publisher: jitpack\r\n",
+        )?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "fixture"])?;
+        git_text(&root, &["push", "origin", "main"])?;
+        let source = git_text(&root, &["rev-parse", "HEAD"])?;
+        Ok((temp, root, source))
+    }
+
+    fn add_failed_attempt(root: &Path, version: &str, source: &str) -> Result<String> {
+        let stable = canonical("demo", version, "jitpack");
+        git_text(root, &["tag", &stable, source])?;
+        let record = json!({
+            "module": "demo", "version": version, "source": source,
+            "group": "com.github.example", "artifact": "demo",
+            "repository": "jitpack", "repository_url": JITPACK,
+            "consumer_version": format!("demo~v{version}-jitpack"),
+            "source_tag": stable, "phase": "reserved-before-upload",
+            "sha256": SUFFIXES.into_iter().map(|suffix| (suffix, "a".repeat(64))).collect::<BTreeMap<_,_>>()
+        });
+        let pending = attempt("pending", "demo", version, "jitpack");
+        git_text(
+            root,
+            &["tag", "-a", &pending, source, "-m", &record.to_string()],
+        )?;
+        git_text(root, &["push", "origin", "--tags"])?;
+        git_text(root, &["rev-parse", &refname(&pending)])
+    }
+
+    fn failed_response(url: &str, source: &str) -> Result<Option<Vec<u8>>> {
+        if url.contains("/api/builds/") {
+            Ok(Some(serde_json::to_vec(
+                &json!({"status":"Error", "commit":source}),
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn reconciliation_previews_filters_archives_exact_objects_and_is_repeatable() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        let first = add_failed_attempt(&root, "0.1.0", &source)?;
+        let second = add_failed_attempt(&root, "0.1.1", &source)?;
+        // A newer successful release must not block cleaning older failed attempts.
+        fs::create_dir_all(root.join("docs/releases/jitpack"))?;
+        fs::write(
+            root.join("docs/releases/jitpack/demo.json"),
+            r#"{"version":"0.1.2"}"#,
+        )?;
+        git_text(&root, &["add", "docs"])?;
+        git_text(&root, &["commit", "-m", "newer confirmed release"])?;
+        git_text(&root, &["push", "origin", "main"])?;
+        let before = remote_tags(&root)?;
+        let fetch = |url: &str, _: bool| failed_response(url, &source);
+        let preview = reconcile_failed_jitpack_with(&root, "demo", &[], false, &fetch)?;
+        assert_eq!(preview.len(), 2);
+        assert!(
+            preview.iter().all(|entry| entry.action == "eligible"),
+            "{}",
+            serde_json::to_string(&preview)?
+        );
+        assert_eq!(remote_tags(&root)?, before);
+        let selected =
+            reconcile_failed_jitpack_with(&root, "demo", &["0.1.0".into()], true, &fetch)?;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "archived");
+        let remaining = reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].action, "archived");
+        for (version, oid) in [("0.1.0", first), ("0.1.1", second)] {
+            assert_eq!(
+                remote_oid(&root, &attempt("failed", "demo", version, "jitpack"))?,
+                Some(oid)
+            );
+            assert!(remote_oid(&root, &attempt("pending", "demo", version, "jitpack"))?.is_none());
+            assert_eq!(
+                remote_oid(&root, &canonical("demo", version, "jitpack"))?,
+                Some(source.clone())
+            );
+        }
+        assert!(reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_preserves_active_wrong_source_public_and_uncertain_attempts() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        add_failed_attempt(&root, "0.1.0", &source)?;
+        let before = remote_tags(&root)?;
+        for scenario in [
+            "building",
+            "wrong-source",
+            "artifact",
+            "network",
+            "status-changed",
+        ] {
+            let statuses = std::cell::Cell::new(0);
+            let fetch = |url: &str, _: bool| -> Result<Option<Vec<u8>>> {
+                if scenario == "network" {
+                    anyhow::bail!("unavailable")
+                }
+                if url.contains("/api/builds/") {
+                    statuses.set(statuses.get() + 1);
+                    let status = if scenario == "building"
+                        || (scenario == "status-changed" && statuses.get() > 1)
+                    {
+                        "Building"
+                    } else {
+                        "Error"
+                    };
+                    let commit = if scenario == "wrong-source" {
+                        "b".repeat(40)
+                    } else {
+                        source.clone()
+                    };
+                    Ok(Some(serde_json::to_vec(
+                        &json!({"status":status,"commit":commit}),
+                    )?))
+                } else if scenario == "artifact" && url.ends_with("-sources.jar") {
+                    Ok(Some(vec![1]))
+                } else {
+                    Ok(None)
+                }
+            };
+            let report = reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?;
+            assert_eq!(report[0].action, "needs-review", "{scenario}");
+            assert_eq!(remote_tags(&root)?, before, "{scenario}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_preserves_upload_markers_and_confirmed_history() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        add_failed_attempt(&root, "0.1.0", &source)?;
+        add_failed_attempt(&root, "0.1.1", &source)?;
+        add_failed_attempt(&root, "0.1.2", &source)?;
+        git_text(
+            &root,
+            &[
+                "tag",
+                &attempt("uploading", "demo", "0.1.0", "jitpack"),
+                &source,
+            ],
+        )?;
+        git_text(&root, &["push", "origin", "--tags"])?;
+        fs::create_dir_all(root.join("docs/releases/history/demo"))?;
+        fs::create_dir_all(root.join("docs/releases/jitpack"))?;
+        fs::write(
+            root.join("docs/releases/history/demo/0.1.1-jitpack.json"),
+            r#"{"destinations":{"jitpack":{}}}"#,
+        )?;
+        fs::write(
+            root.join("docs/releases/jitpack/demo.json"),
+            r#"{"version":"0.1.2"}"#,
+        )?;
+        git_text(&root, &["add", "docs"])?;
+        git_text(&root, &["commit", "-m", "confirmed records"])?;
+        git_text(&root, &["push", "origin", "main"])?;
+        let before = remote_tags(&root)?;
+        let fetch = |url: &str, _: bool| failed_response(url, &source);
+        let report = reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?;
+        assert_eq!(report.len(), 3);
+        assert!(report.iter().all(|entry| entry.action == "needs-review"));
+        assert_eq!(remote_tags(&root)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_atomic_lease_preserves_replaced_pending_journal() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        add_failed_attempt(&root, "0.1.0", &source)?;
+        let pending = attempt("pending", "demo", "0.1.0", "jitpack");
+        let statuses = std::cell::Cell::new(0);
+        let fetch = |url: &str, _: bool| -> Result<Option<Vec<u8>>> {
+            if url.contains("/api/builds/") {
+                statuses.set(statuses.get() + 1);
+                if statuses.get() == 2 {
+                    git_text(
+                        &root,
+                        &[
+                            "tag",
+                            "-f",
+                            "-a",
+                            &pending,
+                            &source,
+                            "-m",
+                            "concurrent reservation",
+                        ],
+                    )?;
+                    git_text(&root, &["push", "--force", "origin", &refname(&pending)])?;
+                }
+            }
+            failed_response(url, &source)
+        };
+        let report = reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?;
+        assert_eq!(report[0].action, "needs-review");
+        assert_eq!(
+            remote_oid(&root, &pending)?,
+            Some(git_text(&root, &["rev-parse", &refname(&pending)])?)
+        );
+        assert!(remote_oid(&root, &attempt("failed", "demo", "0.1.0", "jitpack"))?.is_none());
         Ok(())
     }
 

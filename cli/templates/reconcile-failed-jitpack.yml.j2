@@ -1,0 +1,41 @@
+name: Reconcile failed JitPack attempts
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Space-separated failed X.Y.Z versions; blank reviews all pending attempts'
+        type: string
+        required: false
+      apply:
+        description: 'Archive proven failures and clear their pending journals (preview first)'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: <<@ workflows.module @>>-release
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Install validated Rust tooling
+        run: cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git --tag '<<@ tooling_ref @>>' android-repo-setup
+      - name: Review or archive failed attempts
+        env:
+          RELEASE_MODULE: '<<@ workflows.module @>>'
+          REQUESTED_VERSIONS: ${{ inputs.versions }}
+          APPLY: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--module "$RELEASE_MODULE")
+          read -r -a versions <<< "$REQUESTED_VERSIONS"
+          for version in "${versions[@]}"; do args+=(--version "$version"); done
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          android-repo-setup module_release reconcile-failed-jitpack "${args[@]}"

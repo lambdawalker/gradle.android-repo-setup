@@ -167,6 +167,17 @@ enum ReleaseCommand {
         source: String,
     },
     AbortUnconfirmed(ReleaseTarget),
+    /// Review failed JitPack journals and optionally archive proven failures.
+    ReconcileFailedJitpack {
+        #[arg(long)]
+        module: String,
+        /// Limit the review to these versions. Repeat for multiple versions.
+        #[arg(long = "version")]
+        versions: Vec<String>,
+        /// Atomically archive eligible journals and remove their pending refs.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 fn release_destination() -> String {
@@ -243,6 +254,11 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
         ReleaseCommand::Finalize { target, source } => {
             journal::finalize(root, &target.module, &target.version, &source, dest)
         }
+        ReleaseCommand::ReconcileFailedJitpack {
+            module,
+            versions,
+            apply,
+        } => journal::reconcile_failed_jitpack(root, &module, &versions, apply),
         ReleaseCommand::AbortUnconfirmed(target) => {
             journal::abort_unconfirmed(root, &target.module, &target.version, dest)
         }
