@@ -39,7 +39,7 @@ fn cli_generates_native_workflows_and_tracks_their_content() {
     let manifest = fs::read(root.path().join(".project/setup/workflow-generation.json")).unwrap();
     let hashes: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&manifest).unwrap();
-    assert_eq!(hashes.len(), 10);
+    assert_eq!(hashes.len(), 11);
     assert_eq!(fs::read_dir(&output).unwrap().count(), hashes.len());
     for (name, expected) in hashes {
         let contents = fs::read_to_string(output.join(&name)).unwrap();
@@ -174,5 +174,91 @@ fn cli_rejects_app_module_paths_and_shell_expressions_before_writing() {
             assert!(String::from_utf8_lossy(&result.stderr).contains("workflows.app_module"));
             assert!(!root.path().join(".github/workflows").exists());
         }
+    }
+}
+
+#[test]
+fn reconciliation_workflow_defaults_to_preview_and_serializes_with_publication() {
+    let root = fixture();
+    let generated = run(root.path(), &[]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = root.path().join(".github/workflows");
+    let cleanup: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(output.join("reconcile-failed-jitpack.yml")).unwrap(),
+    )
+    .unwrap();
+    let publish: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(output.join("publish-library.yml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cleanup["on"]["workflow_dispatch"]["inputs"]["apply"]["default"],
+        false
+    );
+    assert_eq!(cleanup["concurrency"]["cancel-in-progress"], false);
+    let groups: Vec<_> = publish["jobs"]
+        .as_mapping()
+        .unwrap()
+        .values()
+        .filter_map(|job| job["concurrency"]["group"].as_str())
+        .collect();
+    assert!(groups.contains(&cleanup["concurrency"]["group"].as_str().unwrap()));
+    assert_eq!(
+        cleanup["jobs"]["reconcile"]["if"],
+        "github.ref == 'refs/heads/main'"
+    );
+    let steps = cleanup["jobs"]["reconcile"]["steps"].as_sequence().unwrap();
+    let command = steps.last().unwrap()["run"].as_str().unwrap();
+    assert!(command.contains("if [[ \"$APPLY\" == true ]]"));
+    assert!(command.contains("module_release reconcile-failed-jitpack"));
+    assert!(!command.contains("${{ inputs."));
+}
+
+#[test]
+fn reconciliation_install_uses_tag_or_revision_for_the_selected_tooling_pin() {
+    for (pin, flag) in [
+        ("v0.1.6", "--tag"),
+        ("1234567890abcdef1234567890abcdef12345678", "--rev"),
+    ] {
+        let root = fixture();
+        let result = run(root.path(), &["--overwrite", "--set-tooling-ref", pin]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &fs::read_to_string(
+                root.path()
+                    .join(".github/workflows/reconcile-failed-jitpack.yml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let install = &workflow["jobs"]["reconcile"]["steps"][1];
+        assert_eq!(install["env"]["TOOLING_REF"], pin);
+        let script = install["run"].as_str().unwrap();
+        assert!(script.contains("ref=(--tag \"$TOOLING_REF\")"));
+        assert!(script.contains("ref=(--rev \"$TOOLING_REF\")"));
+        assert!(script.contains("\"${ref[@]}\" android-repo-setup"));
+        // The generated job uses Ubuntu. Execute its selection with a harmless
+        // Cargo stub on Unix, without downloading or installing anything.
+        #[cfg(unix)]
+        {
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(format!("cargo() {{ printf '%s\\n' \"$@\"; }}\n{script}"))
+                .env("TOOLING_REF", pin)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let arguments = String::from_utf8(output.stdout).unwrap();
+            assert!(arguments.contains(&format!("{flag}\n{pin}\nandroid-repo-setup\n")));
+        }
+        #[cfg(not(unix))]
+        let _ = flag;
     }
 }

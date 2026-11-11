@@ -20,6 +20,7 @@ const TEMPLATES: &[(&str, &str)] = templates!(
     "build-signed-demo-apk.yml",
     "documentation.yml",
     "finalize-release.yml",
+    "reconcile-failed-jitpack.yml",
     "publish-demo-common.yml",
     "publish-jitpack.yml",
     "publish-library.yml",
