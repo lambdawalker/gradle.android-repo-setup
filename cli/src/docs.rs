@@ -27,6 +27,8 @@ const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default, rename = "bootstrap")]
+    _bootstrap: Option<serde_yaml_ng::Value>,
     #[serde(default, rename = "verification")]
     _verification: Option<crate::release::VerificationConfig>,
     #[serde(default, rename = "android_modules")]

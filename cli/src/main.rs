@@ -2,6 +2,7 @@ macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($ar
 
 mod assets;
 mod associations;
+mod bootstrap;
 mod confirmation;
 mod discovery;
 mod docs;
@@ -10,10 +11,12 @@ mod gpg;
 mod jitpack;
 mod journal;
 mod localization;
+mod project_checks;
 mod publishing;
 mod release;
 mod release_identity;
 mod setup;
+mod setup_check;
 mod signing;
 mod ui;
 mod vault;
@@ -49,7 +52,22 @@ enum Command {
         allow_missing: bool,
     },
     /// Select setup operations interactively.
-    Setup,
+    Setup {
+        #[command(subcommand)]
+        command: Option<SetupCommand>,
+    },
+    Bootstrap {
+        #[command(subcommand)]
+        command: BootstrapCommand,
+    },
+    ProjectChecks {
+        #[command(subcommand)]
+        command: ProjectChecksCommand,
+    },
+    ReleaseValidate {
+        #[arg(long)]
+        source: String,
+    },
     /// Discover evaluated Android Gradle modules (read-only unless --save).
     Discover {
         #[arg(long)]
@@ -111,6 +129,30 @@ enum Command {
         base: Option<String>,
         #[arg(long, help = "Verify that the site builds successfully")]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    Check,
+}
+#[derive(Subcommand)]
+enum BootstrapCommand {
+    Generate {
+        #[arg(long)]
+        overwrite: bool,
+    },
+    Check,
+}
+#[derive(Subcommand)]
+enum ProjectChecksCommand {
+    Screenshots {
+        #[arg(long)]
+        module: String,
+    },
+    Junit {
+        #[arg(long)]
+        suite: String,
     },
 }
 
@@ -303,7 +345,7 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
-    match cli.command.unwrap_or(Command::Setup) {
+    match cli.command.unwrap_or(Command::Setup { command: None }) {
         Command::CheckLocalization { allow_missing } => localization::check(&root, allow_missing)?,
         Command::Assets {
             command: AssetsCommand::Prepare { module, source },
@@ -325,7 +367,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .path
                 .trim_end_matches(':')
         ),
-        Command::Setup => ui::run(|| setup::run(&root))?,
+        Command::Setup { command: None } => ui::run(|| setup::run(&root))?,
+        Command::Setup {
+            command: Some(SetupCommand::Check),
+        } => setup_check::run(&root)?,
+        Command::Bootstrap { command } => match command {
+            BootstrapCommand::Generate { overwrite } => bootstrap::run(&root, false, overwrite)?,
+            BootstrapCommand::Check => bootstrap::run(&root, true, false)?,
+        },
+        Command::ProjectChecks { command } => match command {
+            ProjectChecksCommand::Screenshots { module } => {
+                project_checks::screenshots(&root, &module)?
+            }
+            ProjectChecksCommand::Junit { suite } => project_checks::junit(&root, &suite)?,
+        },
+        Command::ReleaseValidate { source } => project_checks::release_validate(&root, &source)?,
         Command::Signing(options) => ui::run(|| setup::sign(&root, options))?,
         Command::ModuleRelease { command } => run_release(&root, command)?,
         Command::Workflows {

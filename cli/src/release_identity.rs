@@ -151,6 +151,7 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         "docs/agents",
         "docs/releases.md",
         ".project/setup/config.yaml",
+        ".project/verification",
         ".project/setup/repositories.yml",
         ".github/workflows/publish-library.yml",
         ".github/workflows/publish-jitpack.yml",

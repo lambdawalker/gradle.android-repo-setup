@@ -35,6 +35,11 @@ jobs:
           if [[ -f .project/setup/repositories.yml ]]; then
             android-repo-setup publishing_config generate
           fi
+      - name: Refresh adopted bootstrap
+        run: |
+          if [[ -f .project/setup/bootstrap.ps1 ]]; then
+            android-repo-setup bootstrap generate --overwrite
+          fi
       - name: Create review patch
         run: |
           git add .project/setup/config.yaml .github/workflows .project/setup/workflow-generation.json
@@ -43,6 +48,10 @@ jobs:
           fi
           if [[ -f .project/setup/modules.properties ]]; then
             git add .project/setup/modules.properties
+          fi
+          if [[ -f .project/setup/bootstrap.ps1 ]]; then
+            git add setup.sh setup.bat .project/setup/bootstrap.ps1 .gitignore
+            if [[ -f jitpack.yml ]]; then git add jitpack.yml; fi
           fi
           git diff --cached --binary > workflow-update.patch
       - uses: actions/upload-artifact@v6
