@@ -29,7 +29,7 @@ fn confirmed_record<'a>(config: &Config, record: &'a Value) -> Result<&'a str> {
 
 fn archive_name(record: &Value) -> Result<String> {
     let version = string(record, "version")?;
-    if record.get("source_tag").is_some() {
+    if record.get("release_identity").is_none() && record.get("source_tag").is_some() {
         Ok(format!("{version}-{}", string(record, "repository")?))
     } else {
         Ok(version.to_owned())
@@ -66,6 +66,7 @@ fn validate(config: &Config, entry: &Value) -> Result<()> {
         );
     }
     let mut scope = None;
+    let first_identity = records.values().next().unwrap().get("release_identity");
     for (target, record) in records {
         ensure!(
             confirmed_record(config, record)? == target
@@ -73,6 +74,10 @@ fn validate(config: &Config, entry: &Value) -> Result<()> {
                     .iter()
                     .all(|key| record[key] == entry[key]),
             "Archive identity conflict"
+        );
+        ensure!(
+            record.get("release_identity") == first_identity,
+            "Archive release identity conflict"
         );
         let path = archive_path(record)?;
         ensure!(

@@ -62,6 +62,7 @@ pub(super) fn read_reservation(
         "Journal source/version mismatch"
     );
     validate_record(root, module, version, destination, &record)?;
+    crate::release_identity::validate_record(root, &record)?;
     Ok((record, local))
 }
 

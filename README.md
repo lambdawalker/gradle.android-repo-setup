@@ -377,6 +377,34 @@ Release fingerprints include `.project/setup/config.yaml` and
 repository configuration changes the release identity. Finalization also
 requires `.project/setup` to agree with the current main branch.
 
+### Shared version identity
+
+New module versions use one immutable source and build-input fingerprint across
+Maven Central and JitPack. The first destination reserves the annotated
+`release-identity/<module>/<version>` tag atomically with its publication journal.
+The tag records `schema`, `module`, `version`, `source`, and `fingerprint`;
+publication records carry the same object as `release_identity`.
+
+Publishing that version to another destination reuses its exact source commit.
+Matching inputs reuse the canonical version; changed inputs require a newer
+version. Explicit versions cannot replace a reserved identity, and registry
+verification overrides do not bypass this rule. The fingerprint covers tracked
+library sources, build configuration, toolchain pins, publishing helpers and
+verification settings. This guarantees matching source/build inputs, rather
+than identical provider artifact bytes: signing and publication metadata can
+differ.
+
+Destinations retain separate pending/upload markers, hashes and confirmation
+status. If publication is interrupted, use the existing finalization flow for
+the same destination and version; an uncertain Central upload must never be
+blindly uploaded again. Failed attempts retain their immutable shared identity.
+Confirmed destinations appear together in the version's documentation archive.
+
+Historical provider-specific records and tags remain unchanged, including equal
+version numbers that came from different commits. They are not retroactively
+declared equivalent. New shared versions advance beyond that historical module
+history; old pending attempts remain recoverable through finalization.
+
 ### Zola documentation websites
 
 Repositories opt in to the shared Zola backend by checking in `sites/zola.toml`. `android-repo-setup build_docs --check` then prepares immutable release/development content and runs Zola 0.23.6; repositories without that file retain the existing renderer. Existing Astro documentation commands remain supported.
@@ -427,7 +455,7 @@ android-repo-setup workflows --check
 android-repo-setup build_docs --check
 ```
 
-Review and commit generated workflow changes. Output is `sites/dist/`, ready for the generated GitHub Pages workflow. Canonical pages use `/<language>/<module>/<version>/` and matching `/raw/*.md` endpoints; `development` is visibly unreleased. Confirmed provider routes can share a semantic version while retaining different source commits and installation coordinates. Version/language changes preserve the guide when available, and explain an overview fallback otherwise.
+Review and commit generated workflow changes. Output is `sites/dist/`, ready for the generated GitHub Pages workflow. Canonical pages use `/<language>/<module>/<version>/` and matching `/raw/*.md` endpoints; `development` is visibly unreleased. New shared identities combine confirmed destinations under one version while preserving their installation coordinates. Historical provider-specific routes retain their original source commits. Version/language changes preserve the guide when available, and explain an overview fallback otherwise.
 
 Use `--base <absolute-preview-url>` when previewing on another host, or `--base /path` to change the configured host's path prefix. Historical Git objects and optional translation trees must be available; fetch full history. `--check` validates generated local links, anchors and images. It does not check external website availability or render Android UI. See [Demo Common's website guide](https://github.com/lambdawalker/android.apexfission.demo-common/blob/main/sites/README.md) for the complete source/translation ownership rules and preview.
 

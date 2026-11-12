@@ -170,6 +170,19 @@ pub(crate) fn validate_record(target: &str, module: &str, record: &Value) -> Res
         matches("[0-9a-f]{40}", string(record, "source")?),
         "Invalid installation source"
     );
+    if let Some(identity) = record.get("release_identity") {
+        ensure!(
+            identity.is_object()
+                && identity["schema"] == 1
+                && ["module", "version", "source"]
+                    .iter()
+                    .all(|key| identity[key] == record[key])
+                && identity["fingerprint"]
+                    .as_str()
+                    .is_some_and(|value| matches("[0-9a-f]{64}", value)),
+            "Invalid installation release identity"
+        );
+    }
     let consumer = string_or(record, "consumer_version", version)?;
     ensure!(
         matches("[A-Za-z0-9_][A-Za-z0-9_.~+-]*", consumer),

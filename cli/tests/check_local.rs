@@ -305,6 +305,27 @@ fn confirmation_checks_the_annotated_remote_reservation_before_network_requests(
     assert_error(run(&candidate.source), "Remote reservation differs");
     git(root, &["push", "origin", &reference]);
     assert_error(
+        run(&candidate.source),
+        "Missing or conflicting canonical identity tag",
+    );
+    git(
+        root,
+        &[
+            "-c",
+            "tag.gpgsign=false",
+            "tag",
+            "-a",
+            "release-identity/demo/9.8.7",
+            "-m",
+            &record["release_identity"].to_string(),
+        ],
+    );
+    git(
+        root,
+        &["push", "origin", "refs/tags/release-identity/demo/9.8.7"],
+    );
+
+    assert_error(
         run(SHA_PLACEHOLDER),
         "Confirmation source differs from reservation",
     );

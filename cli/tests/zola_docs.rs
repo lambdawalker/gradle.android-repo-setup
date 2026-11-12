@@ -69,6 +69,118 @@ fn real_zola_builds_recursive_bilingual_scopes_and_raw_routes() {
 }
 
 #[test]
+fn real_zola_merges_canonical_destinations_in_one_bilingual_version_scope() {
+    use serde_json::{json, Value};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init"]);
+    write(
+        root,
+        ".project/setup/config.yaml",
+        include_str!("fixtures/config.yaml"),
+    );
+    write(
+        root,
+        "sites/zola.toml",
+        "base_url = \"https://example.com/\"\n",
+    );
+    write(root, "docs/agents/index.md", "# Released overview\n");
+    write(root, "docs/releases.md", "# Publishing\n");
+    write(root, "IMPORT.md", "# Development installation\n");
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-m",
+        "source",
+    ]);
+    let source = git(&["rev-parse", "HEAD"]);
+    for provider in ["maven-central", "jitpack"] {
+        let mut record = json!({"module":"demo-common","version":"1.9.3","source":source,
+            "group":"com.example.android","artifact":format!("{provider}-artifact"),
+            "phase":"confirmed-public","repository":provider,"source_tag":format!("demo-common/v1.9.3-{provider}"),
+            "release_identity":{"schema":1,"module":"demo-common","version":"1.9.3","source":source,"fingerprint":"a".repeat(64)}});
+        if provider == "jitpack" {
+            record["consumer_version"] = json!("demo-common~v1.9.3-jitpack");
+            record["repository_url"] = json!("https://jitpack.io");
+        }
+        let path = if provider == "maven-central" {
+            "docs/releases/demo-common.json"
+        } else {
+            "docs/releases/jitpack/demo-common.json"
+        };
+        write(root, path, &record.to_string());
+        let seed = Command::new(env!("CARGO_BIN_EXE_android-repo-setup"))
+            .arg("--project")
+            .arg(root)
+            .args(["documentation_history", "seed"])
+            .output()
+            .unwrap();
+        assert!(
+            seed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&seed.stderr)
+        );
+    }
+    let out = run(root);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dist = root.join("sites/dist");
+    let scopes: Value =
+        serde_json::from_slice(&fs::read(dist.join("versions.json")).unwrap()).unwrap();
+    let released: Vec<_> = scopes
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|scope| scope["development"] == false)
+        .collect();
+    assert_eq!(
+        released.len(),
+        2,
+        "One canonical release scope per language"
+    );
+    for lang in ["en", "es"] {
+        let scope = released
+            .iter()
+            .find(|scope| scope["language"] == lang)
+            .unwrap();
+        assert_eq!(scope["version"], "1.9.3");
+        assert_eq!(scope["source"], source);
+        assert_eq!(scope["destinations"], json!(["jitpack", "maven-central"]));
+        let installation = fs::read_to_string(
+            dist.join(format!("{lang}/demo-common/1.9.3/installation/index.html")),
+        )
+        .unwrap();
+        assert!(installation.contains("com.example.android:maven-central-artifact:1.9.3"));
+        assert!(installation
+            .contains("com.example.android:jitpack-artifact:demo-common~v1.9.3-jitpack"));
+        assert!(dist.join(format!("1.9.3/{lang}/install.html")).exists());
+        assert!(!dist
+            .join(format!("{lang}/demo-common/1.9.3-jitpack"))
+            .exists());
+    }
+}
+
+#[test]
 fn real_zola_keeps_provider_archives_and_fresh_translation_overlays() {
     use serde_json::json;
     use sha2::{Digest, Sha256};

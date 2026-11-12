@@ -8,6 +8,7 @@ mod jitpack;
 mod journal;
 mod publishing;
 mod release;
+mod release_identity;
 mod setup;
 mod signing;
 mod ui;
