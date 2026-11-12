@@ -188,6 +188,67 @@ APK signing, GitHub signing and publishing environments, workflow previews,
 and vault viewing and recreation. The standalone `signing` and
 `setup_github_environments` commands use the same interface.
 
+### Public Android signing associations
+
+Selecting **APK signing key** creates or verifies the keystore and writes a public
+association file for App Links and passkey setup:
+
+```text
+~/.projects/<repo-name>/secrets/setup-<id>.vault.associations.json
+```
+
+It appends `.associations.json` to the vault's complete filename and sits beside
+`setup-<id>.vault`. The ID follows the vault's repository/signing
+environment identity; separate environments get separate files. `--state-dir`
+and `--vault-path` overrides also apply to the export location. The filename ID
+is unrelated to the certificate fingerprint contained in the file.
+
+Enter the actual installed Android application IDs when prompted; the wizard
+remembers them in the encrypted vault. To supply project defaults, add:
+
+```yaml
+signing:
+  application_ids:
+    - com.example.app
+```
+
+Configured IDs take precedence over remembered answers and are shown for review.
+Use each variant's resolved `applicationId`, including any suffix; a Gradle
+namespace or repository name might differ. List multiple IDs only when those apps
+use this signing certificate. For example, do not list a debug application here
+if it is signed by a separate debug keystore.
+
+The export uses the existing backend import schema:
+
+```json
+[
+  {
+    "packageName": "com.example.app",
+    "sha256CertFingerprints": ["<uppercase colon-separated SHA-256 fingerprint>"]
+  }
+]
+```
+
+The CLI hashes the selected alias's DER certificate, not the APK or keystore
+file. The JSON contains only public package names and fingerprints; keys and
+passwords stay private. Each successful run atomically replaces this generated
+snapshot with the selected apps and current certificate, without accumulating
+old keys. Failed extraction preserves the previous file.
+
+To export an existing key, run `android-repo-setup signing`, select **APK signing
+key**, and reuse the existing keystore and alias. A GitHub-only run that finds
+all remote secrets already configured does not inspect those secrets or export
+an identity; use the local key operation to refresh the file.
+
+In Attestra's **Add from public JSON** action, enter the printed export path and
+approve it for the intended backend environment. Attestra still owns publishing
+`/.well-known/assetlinks.json`; this CLI does not deploy it. The signing
+environment (default `demo-apk-release`) does not select a backend environment.
+For Google Play builds, use the Play app-signing certificate when it differs
+from the local/upload certificate.
+
+### Wizard controls
+
 Use Tab and Shift+Tab to move between controls, Space to toggle a checkbox,
 and Enter to activate a button. Ctrl+V pastes a single line into the focused
 field. Password fields are masked. Saved answers default to reuse after

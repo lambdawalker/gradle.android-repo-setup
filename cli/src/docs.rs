@@ -37,6 +37,8 @@ struct Config {
     _workflows: Option<serde_yaml_ng::Value>,
     #[serde(default, rename = "key_alias")]
     _key_alias: Option<serde_yaml_ng::Value>,
+    #[serde(default, rename = "signing")]
+    _signing: Option<serde_yaml_ng::Value>,
 }
 
 impl Config {

@@ -3,6 +3,8 @@ title: Demo Common
 modules:
   demo-common: Demo Common
 key_alias: demo-common
+signing:
+  application_ids: [com.example.democommon]
 tooling_ref: v0.1.4
 workflows:
   module: demo-common

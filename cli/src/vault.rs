@@ -285,6 +285,8 @@ pub struct VaultState {
         skip_serializing_if = "Option::is_none"
     )]
     pub signing_passwords: Option<SigningPasswords>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub android_application_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub publishing_values: BTreeMap<String, BTreeMap<String, String>>,
 }

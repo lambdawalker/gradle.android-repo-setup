@@ -52,6 +52,8 @@ struct Config {
     _modules: BTreeMap<String, String>,
     #[serde(default, rename = "key_alias")]
     _key_alias: Option<String>,
+    #[serde(default, rename = "signing")]
+    _signing: Option<serde_yaml_ng::Value>,
 }
 
 #[derive(Deserialize)]
