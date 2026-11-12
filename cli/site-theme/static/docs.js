@@ -3,6 +3,8 @@
   const body = document.body;
   const es = body.dataset.language === 'es';
   const base = new URL(body.dataset.base, location.href);
+  // Zola may omit the trailing slash; assets resolve relative to a directory.
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
   const dialog = document.querySelector('#search-dialog');
   const input = document.querySelector('#search-input');
   const results = document.querySelector('#search-results');
