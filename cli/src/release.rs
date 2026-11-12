@@ -78,6 +78,7 @@ pub(super) fn verification_config(root: &Path, source: &str) -> Result<Verificat
 
 #[derive(Serialize)]
 pub(crate) struct Record<'a> {
+    release_identity: crate::release_identity::Identity,
     module: &'a str,
     version: &'a str,
     source: &'a str,
@@ -142,6 +143,7 @@ pub(crate) fn check_local<'a>(
         sha256.insert(suffix, format!("{:x}", Sha256::digest(&data)));
     }
     Ok(Record {
+        release_identity: crate::release_identity::Identity::new(root, module, version, source)?,
         module,
         version,
         source,

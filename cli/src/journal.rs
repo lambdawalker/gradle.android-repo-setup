@@ -2,10 +2,10 @@ use crate::confirmation::{
     git_text, read_reservation, registry_fetch, validate_record, validate_record_at,
 };
 use crate::release::{check_local, coordinates, git, CENTRAL, JITPACK, SUFFIXES};
+use crate::release_identity::{self, fingerprint, Identity};
 use anyhow::{ensure, Context, Result};
 use regex::Regex;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -199,6 +199,7 @@ fn stable_name(root: &Path, record: &Value) -> Result<String> {
 }
 
 fn verify_stable(root: &Path, record: &Value) -> Result<()> {
+    release_identity::validate_record(root, record)?;
     let name = stable_name(root, record)?;
     let oid = remote_oid(root, &name)?.context("Missing source tag")?;
     ensure!(
@@ -219,52 +220,6 @@ fn output(module: &str, version: &str, source: &str, skip: bool) -> Result<()> {
             .write_all(value.as_bytes())?;
     }
     Ok(())
-}
-
-fn fingerprint(root: &Path, module: &str, source: &str) -> Result<String> {
-    let local = [
-        "src/main",
-        "build.gradle.kts",
-        "README.md",
-        "docs",
-        "consumer-rules.pro",
-        "proguard-rules.pro",
-    ]
-    .map(|path| format!("{module}/{path}"));
-    let mut args = vec!["ls-tree", "-r", source, "--"];
-    args.extend(local.iter().map(String::as_str));
-    args.extend([
-        "build.gradle.kts",
-        "settings.gradle.kts",
-        "gradle",
-        "gradlew",
-        "gradlew.bat",
-        "LICENSE",
-        "jitpack.yml",
-        "scripts",
-        "publishing",
-        "docs/agents",
-        "docs/releases.md",
-        ".project/setup/config.yaml",
-        ".project/setup/repositories.yml",
-        ".github/workflows/publish-library.yml",
-        ".github/workflows/publish-jitpack.yml",
-    ]);
-    let listing = git_text(root, &args)?;
-    let entries = listing
-        .lines()
-        .filter(|line| {
-            !line
-                .split_once('\t')
-                .is_some_and(|(_, path)| path.starts_with("scripts/tests/"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let properties = git_text(root, &["show", &format!("{source}:gradle.properties")])?;
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(format!("{entries}\n{}", properties.trim()))
-    ))
 }
 
 fn history_version<'a>(name: &'a str, module: &str, destination: &str) -> Option<&'a str> {
@@ -290,17 +245,21 @@ fn select(
     tags: &BTreeMap<String, String>,
     requested: Option<&str>,
 ) -> Result<(String, String)> {
-    let mut versions = BTreeMap::new();
-    let mut add = |version: &str, oid: &str| -> Result<()> {
-        let commit = peel(root, oid)?;
-        if let Some(old) = versions.insert(version.to_owned(), commit.clone()) {
-            ensure!(old == commit, "Conflicting source identities for {module} {version}; reconcile history before publishing");
+    let _ = destination;
+    let mut versions = BTreeSet::new();
+    for name in tags.keys() {
+        for provider in ["maven-central", "jitpack"] {
+            if let Some(version) = history_version(name, module, provider) {
+                versions.insert(version.to_owned());
+            }
         }
-        Ok(())
-    };
-    for (name, oid) in tags {
-        if let Some(version) = history_version(name, module, destination) {
-            add(version, oid)?;
+        for prefix in [format!("{module}/v"), format!("release-identity/{module}/")] {
+            if let Some(version) = name
+                .strip_prefix(&prefix)
+                .filter(|v| version_key(v).is_ok())
+            {
+                versions.insert(version.to_owned());
+            }
         }
     }
     let listing = git_text(
@@ -314,68 +273,75 @@ fn select(
             "docs/releases",
         ],
     )?;
-    for path in listing
-        .lines()
-        .filter(|path| path.ends_with(".json") && !path.starts_with("docs/releases/history/"))
-    {
-        let Some(record) = remote_file(root, path)?.filter(|value| !value.is_null()) else {
+    for path in listing.lines().filter(|p| p.ends_with(".json")) {
+        let Some(record) = remote_file(root, path)?.filter(|v| !v.is_null()) else {
             continue;
         };
-        let recorded_module = field(&record, "module")?;
-        let recorded_destination = record_destination(&record)?;
-        let version = field(&record, "version")?;
-        validate_record_at(
-            root,
-            recorded_module,
-            version,
-            recorded_destination,
-            &record,
-            false,
-        )?;
-        if recorded_module != module || recorded_destination != destination {
-            continue;
-        }
-        let candidates = match record_tag(&record) {
-            Some(name) => vec![name.to_owned()],
-            None => legacy_tags(&record)?.to_vec(),
-        };
-        let recorded_source = field(&record, "source")?;
-        let mut found = false;
-        for candidate in candidates {
-            if let Some(oid) = tags.get(&candidate) {
-                if peel(root, oid)? == recorded_source {
-                    add(version, oid)?;
-                    found = true;
-                    break;
+        if record["module"] == module {
+            if let Some(version) = record["version"]
+                .as_str()
+                .filter(|v| version_key(v).is_ok())
+            {
+                versions.insert(version.to_owned());
+                if let Some(destinations) = record["destinations"].as_object() {
+                    crate::docs::validate_archive(root, &record)?;
+                    for publication in destinations.values() {
+                        verify_stable(root, publication)?;
+                    }
+                } else {
+                    validate_record_at(
+                        root,
+                        module,
+                        version,
+                        record_destination(&record)?,
+                        &record,
+                        false,
+                    )?;
+                    verify_stable(root, &record)?;
                 }
             }
         }
-        ensure!(found, "Confirmed release is missing its source tag");
+    }
+    let latest = versions.iter().max_by_key(|v| version_key(v).ok());
+    let selected_fingerprint = fingerprint(root, module, source)?;
+    // Validate every shared identity, even when a caller requests a different version.
+    let mut identities = BTreeMap::new();
+    for version in &versions {
+        let identity = release_identity::read(root, module, version)?;
+        ensure!(
+            identity.is_some() || !tags.contains_key(&release_identity::tag(module, version)),
+            "Canonical identity disappeared during selection"
+        );
+        if let Some(identity) = identity {
+            identities.insert(version.clone(), identity);
+        }
     }
     if let Some(requested) = requested {
         version_key(requested)?;
-    }
-    let Some((latest, original)) = versions
-        .iter()
-        .max_by_key(|(version, _)| version_key(version).ok())
-    else {
-        return Ok((requested.unwrap_or("0.1.0").to_owned(), source.to_owned()));
-    };
-    ancestor(root, original, source)
-        .context("Latest module release must be an ancestor of selected source")?;
-    let same = fingerprint(root, module, source)? == fingerprint(root, module, original)?;
-    if let Some(requested) = requested {
+        if let Some(identity) = identities.get(requested) {
+            ensure!(
+                identity.fingerprint == selected_fingerprint,
+                "Explicit canonical version has different build inputs; choose a newer version"
+            );
+            ancestor(root, &identity.source, source)?;
+            return Ok((requested.into(), identity.source.clone()));
+        }
         ensure!(
-            compare(requested, latest)?.is_gt(),
-            "Explicit version must be newer than the latest identity; use Finalize for recovery"
+            latest.is_none_or(|latest| compare(requested, latest).is_ok_and(Ordering::is_gt)),
+            "Explicit version must be newer than all module history; use Finalize for recovery"
         );
-        return Ok((requested.to_owned(), source.to_owned()));
+        return Ok((requested.into(), source.into()));
     }
-    if same {
-        Ok((latest.clone(), original.clone()))
-    } else {
-        Ok((bump_patch(latest)?, source.to_owned()))
+    let Some(latest) = latest else {
+        return Ok(("0.1.0".into(), source.into()));
+    };
+    if let Some(identity) = identities.get(latest) {
+        ancestor(root, &identity.source, source)?;
+        if identity.fingerprint == selected_fingerprint {
+            return Ok((latest.clone(), identity.source.clone()));
+        }
     }
+    Ok((bump_patch(latest)?, source.into()))
 }
 
 fn ensure_available(
@@ -783,6 +749,7 @@ pub(super) fn prepare(
     if let Some(record) = current(root, module, destination)? {
         if record["version"] == version {
             validate_record(root, module, &version, destination, &record)?;
+            verify_stable(root, &record)?;
             ensure!(
                 record["source"] == source,
                 "Destination version has conflicting source"
@@ -869,6 +836,19 @@ fn reserve_validated(
         );
     }
     fetch_tags(root)?;
+    let tags = remote_tags(root)?;
+    let (selected_version, selected_source) =
+        select(root, module, source, destination, &tags, Some(version))?;
+    ensure!(
+        selected_version == version && selected_source == source,
+        "Reservation must use canonical source selected by Prepare"
+    );
+    let identity = Identity::new(root, module, version, source)?;
+    ensure!(
+        record["release_identity"] == serde_json::to_value(&identity)?,
+        "Reservation identity differs from build inputs"
+    );
+    let existing_identity = release_identity::read(root, module, version)?;
     let pending_override = allow_pending_jitpack.then_some((version, source));
     ensure_available(
         root,
@@ -884,9 +864,33 @@ fn reserve_validated(
     let pending_ref = refname(&pending);
     let pending_lease = format!("--force-with-lease={pending_ref}:");
     let stable_lease = format!("--force-with-lease={stable_ref}:");
+    let identity_ref = refname(&identity.tag());
+    let identity_lease = format!("--force-with-lease={identity_ref}:");
     let mut args = vec!["push", "--atomic", &pending_lease];
+    if existing_identity.is_none() {
+        git_text(
+            root,
+            &[
+                "-c",
+                "tag.gpgSign=false",
+                "tag",
+                "-a",
+                "--cleanup=verbatim",
+                &identity.tag(),
+                source,
+                "-m",
+                &format!("{}{}\n", serde_json::to_string(&identity)?, tag_nonce()?),
+            ],
+        )?;
+        args.push(&identity_lease);
+    }
+
     let stable_oid = remote_oid(root, &stable)?;
     if let Some(oid) = &stable_oid {
+        ensure!(
+            existing_identity.is_some(),
+            "Legacy destination version cannot be adopted into canonical identity"
+        );
         ensure!(
             peel(root, oid)? == source,
             "Canonical tag has different source"
@@ -895,6 +899,9 @@ fn reserve_validated(
         args.push(&stable_lease);
     }
     args.push("origin");
+    if existing_identity.is_none() {
+        args.push(&identity_ref);
+    }
     if stable_oid.is_none() {
         git_text(
             root,
@@ -1304,6 +1311,223 @@ mod tests {
     use super::*;
 
     #[test]
+    fn archived_coordinates_remain_valid_after_publication_coordinates_change() -> Result<()> {
+        let (_temp, root, _) = failed_attempt_fixture()?;
+        fs::write(
+            root.join(".project/setup/config.yaml"),
+            "repository: example/demo\ntitle: Demo\ntooling_ref: v1.0.0\nmodules:\n  demo: Demo\n",
+        )?;
+        fs::write(
+            root.join("gradle.properties"),
+            "GROUP=com.old\nPOM_ARTIFACT_ID=old-demo\n",
+        )?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "old coordinates"])?;
+        let old_source = git_text(&root, &["rev-parse", "HEAD"])?;
+        let record = |version: &str, source: &str, group: &str, artifact: &str| {
+            json!({
+                "module":"demo", "version":version, "source":source, "group":group, "artifact":artifact,
+                "repository":"maven-central", "repository_url":CENTRAL, "phase":"confirmed-public",
+                "source_tag":format!("demo/v{version}-maven-central"),
+                "sha256": SUFFIXES.into_iter().map(|suffix| (suffix, "a".repeat(64))).collect::<BTreeMap<_,_>>()
+            })
+        };
+        let old_record = record("1.0.0", &old_source, "com.old", "old-demo");
+        git_text(&root, &["tag", "demo/v1.0.0-maven-central", &old_source])?;
+        fs::write(
+            root.join("gradle.properties"),
+            "GROUP=com.new\nPOM_ARTIFACT_ID=new-demo\n",
+        )?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "rename publication coordinates"])?;
+        let latest_source = git_text(&root, &["rev-parse", "HEAD"])?;
+        let latest_record = record("1.0.1", &latest_source, "com.new", "new-demo");
+        git_text(&root, &["tag", "demo/v1.0.1-maven-central", &latest_source])?;
+        let archive = json!({"schema":1, "module":"demo", "version":"1.0.0", "source":old_source,
+            "documentation_ref":old_source, "destinations":{"maven-central":old_record}});
+        let archive_path = root.join("docs/releases/history/demo/1.0.0-maven-central.json");
+        fs::create_dir_all(archive_path.parent().unwrap())?;
+        let original_archive = serde_json::to_vec_pretty(&archive)?;
+        fs::write(&archive_path, &original_archive)?;
+        fs::write(
+            root.join("docs/releases/demo.json"),
+            serde_json::to_vec(&latest_record)?,
+        )?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "record releases"])?;
+        git_text(&root, &["push", "origin", "main", "--tags"])?;
+        let head = git_text(&root, &["rev-parse", "HEAD"])?;
+        let tags = remote_tags(&root)?;
+        assert_eq!(
+            select(&root, "demo", &head, "maven-central", &tags, None)?,
+            ("1.0.2".into(), head)
+        );
+        assert_eq!(fs::read(&archive_path)?, original_archive);
+        Ok(())
+    }
+
+    #[test]
+    fn competing_providers_cannot_reserve_different_sources_for_one_version() -> Result<()> {
+        let (temp, seed, _) = failed_attempt_fixture()?;
+        fs::write(seed.join("gradle.properties"), "GROUP=com.example\n")?;
+        git_text(&seed, &["add", "."])?;
+        git_text(&seed, &["commit", "-m", "build properties"])?;
+        let first = git_text(&seed, &["rev-parse", "HEAD"])?;
+        fs::write(seed.join("unrelated"), "no build change")?;
+        git_text(&seed, &["add", "."])?;
+        git_text(&seed, &["commit", "-m", "unrelated"])?;
+        let second = git_text(&seed, &["rev-parse", "HEAD"])?;
+        git_text(&seed, &["push", "origin", "main"])?;
+        let remote = temp.path().join("origin.git");
+        let mut candidates = Vec::new();
+        for (name, destination, source) in [
+            ("left", "maven-central", &first),
+            ("right", "jitpack", &second),
+        ] {
+            git_text(
+                temp.path(),
+                &["clone", "--branch", "main", remote.to_str().unwrap(), name],
+            )?;
+            let root = temp.path().join(name);
+            configure_fixture_git(&root)?;
+            let record = json!({"module":"demo", "version":"1.0.0", "source":source, "repository":destination, "group":"com.example", "artifact":"demo", "release_identity":Identity::new(&root,"demo","1.0.0",source)?});
+            candidates.push((root, record));
+        }
+        let ready = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|threads| {
+            let handles: Vec<_> = candidates
+                .iter()
+                .map(|(root, record)| {
+                    let ready = &ready;
+                    threads.spawn(move || {
+                        ready.wait();
+                        reserve_validated(root, record, false, &|_, _| Ok(None))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        fetch_tags(&seed)?;
+        let identity = release_identity::read(&seed, "demo", "1.0.0")?.unwrap();
+        let tags = remote_tags(&seed)?;
+        assert_eq!(tags.len(), 3);
+        assert!(identity.source == first || identity.source == second);
+        // A forced provider override still cannot use an existing version with another source.
+        let loser = candidates
+            .iter()
+            .find(|(_, r)| r["source"] != identity.source)
+            .unwrap();
+        assert!(reserve_validated(&loser.0, &loser.1, true, &|_, _| Ok(None)).is_err());
+        let other = if identity.source == first {
+            "jitpack"
+        } else {
+            "maven-central"
+        };
+        let canonical_oid = remote_oid(&seed, &identity.tag())?;
+        let reuse = json!({"module":"demo", "version":"1.0.0", "source":identity.source,
+            "repository":other, "group":"com.example", "artifact":"demo", "release_identity":identity});
+        reserve_validated(&seed, &reuse, false, &|_, _| Ok(None))?;
+        assert_eq!(remote_oid(&seed, &identity.tag())?, canonical_oid);
+        assert_eq!(remote_tags(&seed)?.len(), 5);
+        assert!(reserve_validated(&seed, &reuse, false, &|_, _| Ok(None)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_selection_reuses_source_and_rejects_changed_inputs_and_corruption() -> Result<()> {
+        let (_temp, root, _) = failed_attempt_fixture()?;
+        fs::write(root.join("gradle.properties"), "GROUP=com.example\n")?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "properties"])?;
+        let source = git_text(&root, &["rev-parse", "HEAD"])?;
+        let identity = Identity::new(&root, "demo", "1.2.3", &source)?;
+        git_text(
+            &root,
+            &[
+                "tag",
+                "-a",
+                &identity.tag(),
+                &source,
+                "-m",
+                &serde_json::to_string(&identity)?,
+            ],
+        )?;
+        git_text(&root, &["push", "origin", "main", "--tags"])?;
+        fs::write(root.join("unrelated.txt"), "docs only")?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "unrelated"])?;
+        git_text(&root, &["push", "origin", "main"])?;
+        let head = git_text(&root, &["rev-parse", "HEAD"])?;
+        let tags = remote_tags(&root)?;
+        for destination in ["maven-central", "jitpack"] {
+            for requested in [None, Some("1.2.3")] {
+                assert_eq!(
+                    select(&root, "demo", &head, destination, &tags, requested)?,
+                    ("1.2.3".into(), source.clone())
+                );
+            }
+        }
+        fs::write(root.join("gradle.properties"), "GROUP=com.changed\n")?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "build input change"])?;
+        let changed = git_text(&root, &["rev-parse", "HEAD"])?;
+        assert_eq!(
+            select(&root, "demo", &changed, "jitpack", &tags, None)?.0,
+            "1.2.4"
+        );
+        assert!(select(&root, "demo", &changed, "jitpack", &tags, Some("1.2.3")).is_err());
+        let mut record = json!({"module":"demo", "version":"1.2.3", "source":source, "release_identity":identity});
+        release_identity::validate_record(&root, &record)?;
+        record["release_identity"]["fingerprint"] = json!("0".repeat(64));
+        assert!(release_identity::validate_record(&root, &record).is_err());
+        record["release_identity"] = serde_json::to_value(&identity)?;
+        git_text(
+            &root,
+            &["push", "origin", &format!(":refs/tags/{}", identity.tag())],
+        )?;
+        assert!(release_identity::validate_record(&root, &record).is_err());
+        assert!(select(&root, "demo", &head, "jitpack", &tags, None).is_err());
+        git_text(
+            &root,
+            &[
+                "tag",
+                "-f",
+                "-a",
+                &identity.tag(),
+                &changed,
+                "-m",
+                "malformed",
+            ],
+        )?;
+        git_text(&root, &["push", "origin", "--tags"])?;
+        assert!(release_identity::validate_record(&root, &record).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_other_destination_sets_shared_version_floor() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        fs::write(root.join("gradle.properties"), "GROUP=com.example\n")?;
+        git_text(&root, &["add", "."])?;
+        git_text(&root, &["commit", "-m", "properties"])?;
+        git_text(&root, &["push", "origin", "main"])?;
+        git_text(&root, &["tag", "demo/v2.0.0-jitpack", &source])?;
+        git_text(&root, &["push", "origin", "--tags"])?;
+        let head = git_text(&root, &["rev-parse", "HEAD"])?;
+        let tags = remote_tags(&root)?;
+        assert_eq!(
+            select(&root, "demo", &head, "maven-central", &tags, None)?.0,
+            "2.0.1"
+        );
+        assert!(select(&root, "demo", &head, "maven-central", &tags, Some("2.0.0")).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn release_identity_tracks_verification_config_and_repository_registry() -> Result<()> {
         let project = tempfile::tempdir()?;
         let root = project.path();
@@ -1550,7 +1774,9 @@ mod tests {
         let pending = attempt("pending", module, version, destination);
         assert_eq!(
             remote_tags(&seed)?.keys().collect::<BTreeSet<_>>(),
-            [&stable, &pending].into_iter().collect(),
+            [&stable, &pending, &release_identity::tag(module, version)]
+                .into_iter()
+                .collect(),
         );
         let (journal, _) = read_reservation(winners[0], module, version, destination, "")?;
         assert_eq!(journal["workflow_run"], "same-run");

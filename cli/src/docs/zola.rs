@@ -781,6 +781,13 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
                     metadata.push(json!({"slug":guide,"title":title,"href":href,"raw":raw_href}));
                 }
                 let mut scope_data = json!({"language":lang,"module":module,"label":label,"version":version,"root":scope,"source":source,"documentation_ref":reference.unwrap_or(development_ref),"development":entry.is_none(),"pages":metadata});
+                if let Some(entry) = entry {
+                    scope_data["destinations"] = json!(entry["destinations"]
+                        .as_object()
+                        .context("Invalid archive destinations")?
+                        .keys()
+                        .collect::<Vec<_>>());
+                }
                 if let Some(tree) = translation {
                     scope_data["translation_tree"] = json!(tree);
                 }

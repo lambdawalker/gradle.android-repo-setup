@@ -30,6 +30,136 @@ fn success(root: &Path, args: &[&str]) -> Output {
     output
 }
 
+fn canonical_record(provider: &str) -> Value {
+    let source = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut record = json!({
+        "module": "demo-common", "version": "1.9.3", "source": source,
+        "group": "com.example.android", "artifact": format!("{provider}-artifact"),
+        "phase": "confirmed-public", "repository": provider,
+        "source_tag": format!("demo-common/v1.9.3-{provider}"),
+        "release_identity": {"schema": 1, "module": "demo-common", "version": "1.9.3",
+            "source": source, "fingerprint": "b".repeat(64)}
+    });
+    if provider == "jitpack" {
+        record["consumer_version"] = json!("demo-common~v1.9.3-jitpack");
+        record["repository_url"] = json!("https://jitpack.io");
+    }
+    record
+}
+
+#[test]
+fn canonical_destinations_merge_only_with_the_same_embedded_identity() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    write(
+        root,
+        ".project/setup/config.yaml",
+        include_str!("fixtures/config.yaml"),
+    );
+    let central = canonical_record("maven-central");
+    write(root, "docs/releases/demo-common.json", &central.to_string());
+    success(root, &["documentation_history", "seed"]);
+    let path = root.join("docs/releases/history/demo-common/1.9.3.json");
+    assert!(
+        path.exists(),
+        "Canonical versions use a shared version route"
+    );
+    let jitpack = canonical_record("jitpack");
+    let original = fs::read(&path).unwrap();
+    for field in ["fingerprint", "source"] {
+        let mut conflict = jitpack.clone();
+        if field == "source" {
+            conflict["source"] = json!("cccccccccccccccccccccccccccccccccccccccc");
+            conflict["release_identity"][field] = conflict["source"].clone();
+        } else {
+            conflict["release_identity"][field] = json!("c".repeat(64));
+        }
+        write(
+            root,
+            "docs/releases/jitpack/demo-common.json",
+            &conflict.to_string(),
+        );
+        assert!(!run(root, &["documentation_history", "seed"])
+            .status
+            .success());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "Conflicts must not rewrite history"
+        );
+    }
+    write(
+        root,
+        "docs/releases/jitpack/demo-common.json",
+        &jitpack.to_string(),
+    );
+    success(root, &["documentation_history", "seed"]);
+    success(root, &["documentation_history", "seed"]);
+    let output = success(root, &["documentation_history", "export"]);
+    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(catalog.as_array().unwrap().len(), 1);
+    assert_eq!(catalog[0]["route_version"], "1.9.3");
+    assert_eq!(catalog[0]["destinations"]["maven-central"], central);
+    assert_eq!(catalog[0]["destinations"]["jitpack"], jitpack);
+    let installation = catalog[0]["installation"]["en"].as_str().unwrap();
+    assert!(installation.contains("com.example.android:maven-central-artifact:1.9.3"));
+    assert!(
+        installation.contains("com.example.android:jitpack-artifact:demo-common~v1.9.3-jitpack")
+    );
+}
+
+#[test]
+fn archive_rejects_malformed_embedded_identity_and_legacy_canonical_mixing() {
+    for (field, invalid) in [
+        ("schema", json!(2)),
+        ("module", json!("other")),
+        ("version", json!("1.9.4")),
+        ("source", json!("c".repeat(40))),
+        ("fingerprint", json!("b".repeat(63))),
+        ("fingerprint", json!("G".repeat(64))),
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        write(
+            root,
+            ".project/setup/config.yaml",
+            include_str!("fixtures/config.yaml"),
+        );
+        let mut record = canonical_record("maven-central");
+        record["release_identity"][field] = invalid;
+        write(root, "docs/releases/demo-common.json", &record.to_string());
+        assert!(
+            !run(root, &["documentation_history", "seed"])
+                .status
+                .success(),
+            "Invalid identity {field} accepted"
+        );
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    write(
+        root,
+        ".project/setup/config.yaml",
+        include_str!("fixtures/config.yaml"),
+    );
+    let mut legacy = canonical_record("maven-central");
+    legacy.as_object_mut().unwrap().remove("source_tag");
+    legacy.as_object_mut().unwrap().remove("release_identity");
+    write(root, "docs/releases/demo-common.json", &legacy.to_string());
+    success(root, &["documentation_history", "seed"]);
+    let path = root.join("docs/releases/history/demo-common/1.9.3.json");
+    let original = fs::read(&path).unwrap();
+    write(
+        root,
+        "docs/releases/jitpack/demo-common.json",
+        &canonical_record("jitpack").to_string(),
+    );
+    assert!(!run(root, &["documentation_history", "seed"])
+        .status
+        .success());
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
 #[test]
 fn installation_and_archive_use_confirmed_destination_coordinates() {
     let fixture = tempfile::tempdir().unwrap();
