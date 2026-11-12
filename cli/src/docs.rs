@@ -29,6 +29,12 @@ const GOOGLE: &str = "https://dl.google.com/dl/android/maven2";
 struct Config {
     #[serde(default, rename = "verification")]
     _verification: Option<crate::release::VerificationConfig>,
+    #[serde(default, rename = "android_modules")]
+    _android_modules: Option<crate::discovery::Modules>,
+    #[serde(default, rename = "module_verification")]
+    _module_verification: std::collections::BTreeMap<String, crate::release::VerificationConfig>,
+    #[serde(default, rename = "fingerprint_excluded_properties")]
+    _fingerprint_excluded_properties: std::collections::BTreeMap<String, Vec<String>>,
     repository: String,
     title: String,
     modules: serde_yaml_ng::Mapping,

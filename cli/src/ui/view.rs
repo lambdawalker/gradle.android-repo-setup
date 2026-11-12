@@ -130,6 +130,7 @@ pub(super) fn Wizard(mut hooks: Hooks, props: &mut WizardProps) -> impl Into<Any
         Screen::Busy => "Working on your repository",
         Screen::Text { .. } => "Configure setup",
         Screen::Confirm { .. } => "Review and confirm",
+        Screen::Menu { modules: true, .. } => "Select libraries and apps",
         Screen::Menu { .. } => "Setup deployment",
         Screen::Saved(_) => "Reuse saved answer",
         Screen::Key { .. } => "Maven Central signing key",
@@ -154,7 +155,7 @@ pub(super) fn Wizard(mut hooks: Hooks, props: &mut WizardProps) -> impl Into<Any
                 rows.push(check(model, state.id, Control::Check(0), *checked, "I have reviewed this and want to continue".into(), state.focused() == Some(Control::Check(0))));
             },
             Screen::Saved(label) => rows.push(element!(Text(content: format!("A saved value is available for {label}."), color: Color::White)).into_any()),
-            Screen::Menu { operations, checked } => for (index, ((label, help), checked)) in operations.iter().zip(checked).enumerate() {
+            Screen::Menu { operations, checked, .. } => for (index, ((label, help), checked)) in operations.iter().zip(checked).enumerate() {
                 let control = Control::Check(index);
                 rows.push(element! {
                     View(height: 3, min_height: 3, flex_shrink: 0.0_f32, flex_direction: FlexDirection::Column) {
@@ -222,6 +223,9 @@ pub(super) fn Wizard(mut hooks: Hooks, props: &mut WizardProps) -> impl Into<Any
                 Action::Cancel => "Back / Cancel",
                 Action::Apply => "Apply",
                 Action::Help => "What will this do?",
+                Action::Setup if matches!(state.screen, Screen::Menu { modules: true, .. }) => {
+                    "Continue"
+                }
                 Action::Setup => "Setup",
                 Action::ViewVault => "View vault",
                 Action::RemakeVault => "Remake vault",

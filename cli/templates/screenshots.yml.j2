@@ -22,24 +22,25 @@ jobs:
             <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
       - name: Build and lint the library
-        run: ./gradlew :<<@ workflows.module @>>:assembleRelease :<<@ workflows.module @>>:lintDebug :<<@ workflows.app_module @>>:assembleDebug :<<@ workflows.app_module @>>:lintDebug --no-daemon
+        run: ./gradlew <<@ workflows.module_path @>>:assembleRelease <<@ workflows.module_path @>>:lintDebug <<@ workflows.app_checks @>> --no-daemon
       - name: Render candidates or validate approved screenshots
         shell: bash
         run: |
           set -euo pipefail
-          reference=<<@ workflows.module @>>/src/screenshotTestDebug/reference
-          task=:<<@ workflows.module @>>:validateDebugScreenshotTest
+          reference=<<@ workflows.module_directory_shell @>>/src/screenshotTestDebug/reference
+          task=<<@ workflows.module_path @>>:validateDebugScreenshotTest
           if ! git ls-files -- "$reference" | awk '/\.png$/ { found = 1 } END { exit !found }'; then
-            task=:<<@ workflows.module @>>:updateDebugScreenshotTest
+            task=<<@ workflows.module_path @>>:updateDebugScreenshotTest
           fi
           ./gradlew "$task" --no-daemon
           mkdir -p screenshot-manifest
           git rev-parse HEAD > screenshot-manifest/source.txt
+          : > screenshot-manifest/images.sha256
           if [[ -d "$reference" ]]; then
             find "$reference" -name '*.png' -type f -print0 | sort -z |
               xargs -0 -r sha256sum > screenshot-manifest/images.sha256
           fi
-          test "$(wc -l < screenshot-manifest/images.sha256)" -eq <<@ workflows.screenshot_count @>>
+          <<@ workflows.screenshot_assertion @>>
       - name: Upload screenshots and test reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -47,6 +48,6 @@ jobs:
           name: <<@ workflows.module @>>-screenshot-results
           path: |
             screenshot-manifest/
-            <<@ workflows.module @>>/src/screenshotTestDebug/reference/
-            <<@ workflows.module @>>/build/reports/screenshotTest/
-            <<@ workflows.module @>>/build/outputs/screenshotTest-results/
+            <<@ workflows.module_directory @>>/src/screenshotTestDebug/reference/
+            <<@ workflows.module_directory @>>/build/reports/screenshotTest/
+            <<@ workflows.module_directory @>>/build/outputs/screenshotTest-results/

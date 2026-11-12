@@ -1,5 +1,7 @@
 # Android repository setup Gradle plugins
 
+Module discovery and multi-library setup are available in the **0.1.11 source release**: [module selection, independent publishing, and migration guide](docs/module-discovery.md). Run `android-repo-setup` for a first menu of detected libraries/apps, or `android-repo-setup discover` to inspect them without saving.
+
 Gradle builds and publishes Android artifacts. The companion Rust CLI configures the project, manages release reservations, verifies public artifacts, and generates documentation.
 
 ## Use a published release

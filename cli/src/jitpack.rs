@@ -44,11 +44,19 @@ pub(crate) fn build(root: &Path) -> Result<()> {
     } else {
         "gradlew"
     };
+    let selected = crate::discovery::module(root, module)?;
+    ensure!(
+        selected.selected && selected.kind == crate::discovery::Kind::Library,
+        "Module is not a selected library"
+    );
     let status = Command::new(root.canonicalize()?.join(wrapper))
         .current_dir(root)
         .args([
             "--no-daemon",
-            &format!(":{module}:publishToMavenLocal"),
+            &format!(
+                "{}:publishToMavenLocal",
+                selected.path.trim_end_matches(':')
+            ),
             "-PjitpackBuild=true",
             &format!("-PreleaseModule={module}"),
             &format!("-PreleaseVersion={version}"),

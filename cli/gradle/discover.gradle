@@ -1,0 +1,40 @@
+// Read the evaluated model: convention plugins, aliases and projectDir remapping
+// have already been resolved. No Android plugin is applied by this script.
+import groovy.json.JsonOutput
+
+def applicationIds = [:].withDefault { [] }
+gradle.beforeProject { p ->
+    p.pluginManager.withPlugin('com.android.application') {
+        def components = p.extensions.findByName('androidComponents')
+        if (components != null) {
+            components.onVariants(components.selector().all()) { variant ->
+                applicationIds[p.path].add(variant.applicationId.get())
+            }
+        }
+    }
+}
+
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    root.tasks.register('androidRepoSetupDiscover') {
+        doLast {
+            def modules = root.allprojects.collect { p ->
+                def app = p.pluginManager.hasPlugin('com.android.application')
+                def library = p.pluginManager.hasPlugin('com.android.library')
+                def android = p.extensions.findByName('android')
+                def ids = applicationIds[p.path]
+                if (app && ids.isEmpty() && android != null && android.hasProperty('defaultConfig')) {
+                    def id = android.defaultConfig.applicationId
+                    if (id != null) ids.add(id.toString())
+                }
+                [path: p.path,
+                 directory: root.projectDir.toPath().relativize(p.projectDir.toPath()).toString().replace('\\', '/'),
+                 kind: app ? 'application' : library ? 'library' : 'other',
+                 namespace: (app || library) && android != null ? android.namespace : null,
+                 application_ids: ids.unique().sort(),
+                 screenshots: p.pluginManager.hasPlugin('com.android.compose.screenshot')]
+            }.sort { it.path }
+            new File(System.getProperty('androidRepoSetup.report')).text = JsonOutput.toJson([schema: 1, modules: modules])
+        }
+    }
+}

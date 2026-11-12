@@ -432,3 +432,140 @@ fn zola_sites_install_verified_rust_renderer_without_node() {
         }
     }
 }
+
+#[test]
+fn discovered_modules_get_independent_workflows_and_disabled_modules_are_omitted() {
+    let root = fixture();
+    let path = root.path().join(".project/setup/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["android_modules"] = serde_yaml_ng::from_str(
+        r#"
+libs--vision:
+  path: ':libs:vision'
+  directory: components/detection
+  kind: library
+  selected: true
+model:
+  path: ':model'
+  directory: model
+  kind: library
+  selected: true
+phone:
+  path: ':apps:phone'
+  directory: mobile/phone
+  kind: application
+  selected: true
+unused:
+  path: ':unused'
+  directory: unused
+  kind: application
+  selected: false
+"#,
+    )
+    .unwrap();
+    fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = root.path().join(".github/workflows");
+    assert!(output.join("publish-libs--vision.yml").exists());
+    assert!(output.join("publish-model.yml").exists());
+    assert!(!output.join("publish-demo-common.yml").exists());
+    assert!(!output.join("build-signed-unused-apk.yml").exists());
+    let apk = fs::read_to_string(output.join("build-signed-phone-apk.yml")).unwrap();
+    assert!(apk.contains(":apps:phone:assembleRelease"));
+    assert!(apk.contains("mobile/phone/build/outputs/apk/release/"));
+    let finalize = fs::read_to_string(output.join("finalize-release.yml")).unwrap();
+    assert!(finalize.contains("options: [\"libs--vision\", \"model\"]"));
+    assert!(!output.join("screenshots.yml").exists());
+    let docs: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(&fs::read(output.join("documentation.yml")).unwrap()).unwrap();
+    assert!(docs["on"]["workflow_run"]["workflows"]
+        .as_sequence()
+        .unwrap()
+        .contains(&"Publish model".into()));
+    assert!(fs::read_to_string(output.join("update-workflows.yml"))
+        .unwrap()
+        .contains("git add .project/setup/modules.properties"));
+    assert!(run(root.path(), &["--check"]).status.success());
+    config["android_modules"]["model"]["selected"] = false.into();
+    fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    assert!(!run(root.path(), &["--check"]).status.success());
+    assert!(run(root.path(), &["--overwrite"]).status.success());
+    assert!(!output.join("publish-model.yml").exists());
+}
+
+#[test]
+fn app_only_and_library_only_generation_and_registry_updates() {
+    for kind in ["application", "library"] {
+        let root = fixture();
+        let config_path = root.path().join(".project/setup/config.yaml");
+        let mut config: serde_yaml_ng::Value =
+            serde_yaml_ng::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        config["android_modules"] = serde_yaml_ng::from_str(&format!("only:\n  path: ':only'\n  directory: 'source/mobile app'\n  kind: {kind}\n  selected: true\n")).unwrap();
+        fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+        fs::write(root.path().join(".project/setup/repositories.yml"), "repositories:\n  maven-central: {environment: central, publisher: central}\n  jitpack: {environment: jitpack, publisher: jitpack}\n").unwrap();
+        let result = run(root.path(), &[]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = root.path().join(".github/workflows");
+        assert_eq!(output.join("publish-only.yml").exists(), kind == "library");
+        assert_eq!(
+            output.join("build-signed-only-apk.yml").exists(),
+            kind == "application"
+        );
+        let inventory =
+            fs::read_to_string(root.path().join(".project/setup/modules.properties")).unwrap();
+        assert!(inventory.contains("only.path=:only"));
+        let generated = Command::new(env!("CARGO_BIN_EXE_android-repo-setup"))
+            .arg("--project")
+            .arg(root.path())
+            .args(["publishing_config", "generate"])
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        if kind == "application" {
+            let apk = fs::read_to_string(output.join("build-signed-only-apk.yml")).unwrap();
+            assert!(apk.contains("apks=('source/mobile app'/build/outputs/apk/release/"));
+        }
+    }
+}
+
+#[test]
+fn yaml_like_module_ids_remain_strings_and_discovered_projects_skip_demo_screenshots() {
+    let root = fixture();
+    let path = root.path().join(".project/setup/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["android_modules"] = serde_yaml_ng::from_str(
+        "'true': {path: ':true', directory: lib, kind: library, selected: true}",
+    )
+    .unwrap();
+    fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = root.path().join(".github/workflows");
+    let publish: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(&fs::read(output.join("publish-true.yml")).unwrap()).unwrap();
+    assert_eq!(
+        publish["jobs"]["publish"]["with"]["module"].as_str(),
+        Some("true")
+    );
+    let docs = fs::read_to_string(output.join("documentation.yml")).unwrap();
+    assert!(!docs.contains("cd docs/screenshots"));
+}

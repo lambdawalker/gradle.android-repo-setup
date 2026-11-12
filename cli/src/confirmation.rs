@@ -346,7 +346,7 @@ pub(crate) fn confirm(
         record["source"] == expected_source,
         "Confirmation source differs from reservation"
     );
-    let contract = crate::release::verification_config(root, &expected_source)?;
+    let contract = crate::release::verification_config(root, &expected_source, module)?;
     let fetch = registry_fetch(repository_url);
     let started = Instant::now();
     loop {

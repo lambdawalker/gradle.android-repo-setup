@@ -72,7 +72,7 @@ jobs:
       RELEASE_PUBLISHER: ${{ needs.configuration.outputs.publisher }}
     # Shared with automatic/manual finalization; the delay never holds this lock.
     concurrency:
-      group: <<@ workflows.module @>>-release
+      group: <<@ workflows.concurrency @>>
       cancel-in-progress: false
     outputs:
       skip: ${{ steps.release.outputs.skip }}
@@ -142,7 +142,8 @@ jobs:
           SOURCE_SHA: ${{ steps.release.outputs.source }}
         run: |
           env -u RELEASE_REPOSITORY -u MAVEN_REPOSITORY_URL -u MAVEN_REPOSITORY_USERNAME -u MAVEN_REPOSITORY_PASSWORD android-repo-setup publishing_config check
-          ./gradlew verifyImportDocs ":$RELEASE_MODULE:lintRelease" ":$RELEASE_MODULE:assembleRelease" ":$RELEASE_MODULE:publishAllPublicationsToVerificationRepository" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
+          MODULE_PATH=$(android-repo-setup module-path "$RELEASE_MODULE")
+          ./gradlew verifyImportDocs "$MODULE_PATH:lintRelease" "$MODULE_PATH:assembleRelease" "$MODULE_PATH:publishAllPublicationsToVerificationRepository" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
           android-repo-setup module_release check-local --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
       - name: Reserve immutable version, source, and artifact hashes
         if: steps.release.outputs.skip != 'true'
@@ -171,7 +172,8 @@ jobs:
             central) task=publishAndReleaseToMavenCentral ;;
             *) echo 'Unknown repository'; exit 1 ;;
           esac
-          ./gradlew ":$RELEASE_MODULE:$task" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon --console=plain 2>&1 | tee "$RUNNER_TEMP/repository-publish.log"
+          MODULE_PATH=$(android-repo-setup module-path "$RELEASE_MODULE")
+          ./gradlew "$MODULE_PATH:$task" "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon --console=plain 2>&1 | tee "$RUNNER_TEMP/repository-publish.log"
       - name: Retain deployment log
         if: always()
         uses: actions/upload-artifact@v7

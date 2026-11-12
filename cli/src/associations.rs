@@ -55,7 +55,17 @@ pub fn application_ids(root: &Path, saved: &[String]) -> Result<Vec<String>> {
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let discovered = crate::discovery::load(root)?
+        .map(|modules| {
+            modules
+                .into_values()
+                .filter(|m| m.selected && m.kind == crate::discovery::Kind::Application)
+                .flat_map(|m| m.application_ids)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     match configured {
+        None if !discovered.is_empty() => validate_ids(&discovered),
         Some(ids) => validate_ids(&ids),
         None if saved.is_empty() => Ok(Vec::new()),
         None => validate_ids(saved),

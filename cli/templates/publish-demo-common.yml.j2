@@ -33,6 +33,6 @@ jobs:
     secrets: inherit
     with:
       repository: ${{ inputs.repository }}
-      module: <<@ workflows.module @>>
+      module: '<<@ workflows.module @>>'
       version: ${{ inputs.version }}
       bypass_version_verification: ${{ inputs.bypass_version_verification }}

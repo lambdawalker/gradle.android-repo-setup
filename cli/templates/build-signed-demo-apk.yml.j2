@@ -48,7 +48,7 @@ jobs:
             <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
       - name: Build unsigned demo APK
-        run: ./gradlew :<<@ workflows.app_module @>>:assembleRelease --no-daemon
+        run: ./gradlew <<@ workflows.app_path @>>:assembleRelease --no-daemon
 
       - name: Align, sign, and verify APK
         env:
@@ -64,7 +64,7 @@ jobs:
           : "${ANDROID_KEY_PASSWORD:?Missing signing key password}"
 
           shopt -s nullglob
-          apks=(<<@ workflows.app_module @>>/build/outputs/apk/release/*-unsigned.apk)
+          apks=(<<@ workflows.app_directory_shell @>>/build/outputs/apk/release/*-unsigned.apk)
           if [[ -z "${apks[0]-}" || -n "${apks[1]-}" ]]; then
             echo "::error::Expected exactly one unsigned release APK."
             exit 1

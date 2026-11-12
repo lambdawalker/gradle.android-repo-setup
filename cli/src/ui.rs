@@ -63,6 +63,7 @@ enum Question {
         operations: Vec<(String, String)>,
         first_run: bool,
     },
+    Modules(Vec<(String, String, bool)>),
     Key,
     Form {
         title: String,
@@ -137,6 +138,12 @@ pub fn menu(operations: &[(&str, &str, &str)], first_run: bool) -> Result<Menu> 
     })? {
         Answer::Menu(value) => Ok(value),
         _ => Ok(Menu::Exit),
+    }
+}
+pub fn select_modules(entries: Vec<(String, String, bool)>) -> Result<Option<Vec<usize>>> {
+    match request(Question::Modules(entries))? {
+        Answer::Menu(Menu::Setup(selected)) => Ok(Some(selected)),
+        _ => Ok(None),
     }
 }
 pub fn key_choice() -> Result<Option<KeyChoice>> {

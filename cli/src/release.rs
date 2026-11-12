@@ -1,4 +1,6 @@
+mod contracts;
 use anyhow::{ensure, Context, Result};
+use contracts::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,12 +21,17 @@ struct ProjectConfig {
     modules: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct VerificationConfig {
     pub class_prefix: String,
     pub required_api_artifacts: Vec<String>,
     pub bytecode_major: u16,
+    pub required_api_dependencies: Vec<DependencyPin>,
+    pub required_assets: Option<AssetSource>,
+    pub forbidden_asset_suffixes: Vec<String>,
+    #[serde(skip_deserializing)]
+    pub asset_sha256: BTreeMap<String, String>,
 }
 
 impl Default for VerificationConfig {
@@ -33,6 +40,10 @@ impl Default for VerificationConfig {
             class_prefix: "com/apexfission/android/democommon/".into(),
             required_api_artifacts: vec!["foundation".into(), "ui".into()],
             bytecode_major: 61,
+            required_api_dependencies: Vec::new(),
+            required_assets: None,
+            forbidden_asset_suffixes: Vec::new(),
+            asset_sha256: BTreeMap::new(),
         }
     }
 }
@@ -53,11 +64,16 @@ impl VerificationConfig {
                 .all(|id| !id.trim().is_empty()),
             "verification.required_api_artifacts must contain nonempty artifact IDs"
         );
+        validate_contract(self)?;
         Ok(())
     }
 }
 
-pub(super) fn verification_config(root: &Path, source: &str) -> Result<VerificationConfig> {
+pub(super) fn verification_config(
+    root: &Path,
+    source: &str,
+    module: &str,
+) -> Result<VerificationConfig> {
     let output = git(
         root,
         &["show", &format!("{source}:.project/setup/config.yaml")],
@@ -70,10 +86,19 @@ pub(super) fn verification_config(root: &Path, source: &str) -> Result<Verificat
     struct Config {
         #[serde(default)]
         verification: VerificationConfig,
+        #[serde(default)]
+        module_verification: BTreeMap<String, VerificationConfig>,
     }
     let config: Config = serde_yaml_ng::from_slice(&output.stdout)?;
-    config.verification.validate()?;
-    Ok(config.verification)
+    let mut contract = config
+        .module_verification
+        .into_iter()
+        .find(|(id, _)| id == module)
+        .map(|(_, value)| value)
+        .unwrap_or(config.verification);
+    resolve_contract(root, source, &mut contract)?;
+    contract.validate()?;
+    Ok(contract)
 }
 
 #[derive(Serialize)]
@@ -85,6 +110,7 @@ pub(crate) struct Record<'a> {
     group: String,
     artifact: String,
     sha256: BTreeMap<&'static str, String>,
+    verification: VerificationConfig,
     phase: &'static str,
     workflow_run: &'a str,
     repository: &'a str,
@@ -120,7 +146,8 @@ pub(crate) fn check_local<'a>(
         "Tracked files differ from source or Git could not verify the checkout"
     );
 
-    let contract = verification_config(root, source)?;
+    let contract = verification_config(root, source, module)?;
+    verify_published_dependencies(&contract, &crate::confirmation::registry_fetch(CENTRAL))?;
     let coordinates = coordinates(root, module, version, destination, true)?;
     let Coordinates {
         group,
@@ -150,6 +177,7 @@ pub(crate) fn check_local<'a>(
         group,
         artifact,
         sha256,
+        verification: contract,
         phase: "reserved-before-upload",
         workflow_run,
         repository: destination,
@@ -209,6 +237,20 @@ pub(super) fn coordinates_for_record(
         );
     }
     if require_configured {
+        if let Some(modules) = crate::discovery::load(root)? {
+            let selected = modules
+                .get(module)
+                .context("Unknown configured Android module")?;
+            ensure!(
+                selected.selected && selected.kind == crate::discovery::Kind::Library,
+                "Release module is not a selected library"
+            );
+            let expected = crate::discovery::inventory(root, &modules)?;
+            ensure!(
+                fs::read_to_string(root.join(".project/setup/modules.properties"))? == expected,
+                "Module inventory is stale; run android-repo-setup workflows --overwrite"
+            );
+        }
         let registry =
             crate::publishing::load_registry(&root.join(".project/setup/repositories.yml"))?;
         ensure!(
@@ -296,6 +338,7 @@ pub(super) fn verify(
                 == [Some(group), Some(artifact), Some(version)],
             "Gradle module coordinates mismatch"
         );
+        verify_module_dependencies(&metadata, contract)?;
         return Ok(());
     }
 
@@ -305,7 +348,33 @@ pub(super) fn verify(
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
         let name = entry.name().to_owned();
-        names.insert(name.clone());
+        ensure!(
+            names.insert(name.clone()),
+            "Duplicate archive entry: {name}"
+        );
+        if suffix == ".aar" && name.starts_with("assets/") && !entry.is_dir() {
+            ensure!(
+                !contract
+                    .forbidden_asset_suffixes
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix)),
+                "Forbidden AAR asset: {name}"
+            );
+            if let Some(assets) = &contract.required_assets {
+                ensure!(
+                    !name.ends_with(&assets.suffix) || contract.asset_sha256.contains_key(&name),
+                    "Unexpected AAR asset absent from immutable source: {name}"
+                );
+            }
+            if let Some(expected) = contract.asset_sha256.get(&name) {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes)?;
+                ensure!(
+                    !bytes.is_empty() && format!("{:x}", Sha256::digest(&bytes)) == *expected,
+                    "AAR asset hash mismatch: {name}"
+                );
+            }
+        }
         if suffix == ".aar" && name == "classes.jar" {
             entry.read_to_end(&mut classes)?;
         } else {
@@ -321,6 +390,18 @@ pub(super) fn verify(
     }
     match suffix {
         ".aar" => {
+            if let Some(assets) = &contract.required_assets {
+                ensure!(
+                    contract
+                        .asset_sha256
+                        .keys()
+                        .any(|name| name.starts_with("assets/") && name.ends_with(&assets.suffix)),
+                    "Required AAR asset set is empty"
+                );
+            }
+            for name in contract.asset_sha256.keys() {
+                ensure!(names.contains(name), "Missing required AAR asset: {name}");
+            }
             ensure!(
                 names.contains("AndroidManifest.xml") && names.contains("classes.jar"),
                 "AAR is missing manifest or classes.jar"
@@ -411,6 +492,7 @@ fn verify_pom(
             "Missing POM metadata: {path}"
         );
     }
+    verify_pom_dependencies(root, contract)?;
     let mut exported = HashSet::new();
     if let Some(dependencies) = root
         .children()
@@ -477,7 +559,7 @@ mod tests {
             );
         }
         fs::write(&path, "verification:\n  class_prefix: wrong/checkout/\n")?;
-        let contract = verification_config(root, "HEAD")?;
+        let contract = verification_config(root, "HEAD", "demo")?;
         assert_eq!(contract.class_prefix, "com/example/permissions/");
         assert_eq!(contract.required_api_artifacts, vec!["permissions"]);
         assert_eq!(contract.bytecode_major, 61);
