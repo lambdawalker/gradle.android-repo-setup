@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
@@ -505,7 +505,7 @@ fn status_is<T>(result: &Result<T>, code: u16) -> bool {
         .is_some_and(|status| status.0 == code)
 }
 
-fn setup_lock(config: &vault::SetupConfig) -> Result<File> {
+fn setup_lock(config: &vault::SetupConfig) -> Result<vault::FileLock> {
     let secrets = config.project_secrets_dir();
     vault::private_dir(&secrets)?;
     let identity = format!(
