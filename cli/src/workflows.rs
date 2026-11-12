@@ -28,6 +28,7 @@ const TEMPLATES: &[(&str, &str)] = templates!(
     "unit-tests.yml",
     "update-workflows.yml",
     "verify-release-tooling.yml",
+    "verify-localization.yml",
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]

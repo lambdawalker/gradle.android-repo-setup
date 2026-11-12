@@ -8,6 +8,7 @@ mod github;
 mod gpg;
 mod jitpack;
 mod journal;
+mod localization;
 mod publishing;
 mod release;
 mod release_identity;
@@ -34,6 +35,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate Android named string translations across source sets.
+    #[command(name = "check_localization", alias = "check-localization")]
+    CheckLocalization {
+        /// Allow missing translations to fall back to the default strings.
+        #[arg(long)]
+        allow_missing: bool,
+    },
     /// Select setup operations interactively.
     Setup,
     /// Discover evaluated Android Gradle modules (read-only unless --save).
@@ -280,6 +288,7 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
 fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
     match cli.command.unwrap_or(Command::Setup) {
+        Command::CheckLocalization { allow_missing } => localization::check(&root, allow_missing)?,
         Command::Discover { save } => {
             let modules = discovery::discover(&root)?;
             if save {

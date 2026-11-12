@@ -39,7 +39,7 @@ fn cli_generates_native_workflows_and_tracks_their_content() {
     let manifest = fs::read(root.path().join(".project/setup/workflow-generation.json")).unwrap();
     let hashes: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&manifest).unwrap();
-    assert_eq!(hashes.len(), 11);
+    assert_eq!(hashes.len(), 12);
     assert_eq!(fs::read_dir(&output).unwrap().count(), hashes.len());
     for (name, expected) in hashes {
         let contents = fs::read_to_string(output.join(&name)).unwrap();
