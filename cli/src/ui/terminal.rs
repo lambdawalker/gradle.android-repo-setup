@@ -196,49 +196,36 @@ mod tests {
         assert_eq!(bytes.windows(2).filter(|pair| *pair == b"\r\n").count(), 23);
     }
     #[test]
-    fn drop_restores_other_console_modes_after_a_write_error() {
-        use std::sync::{Arc, Mutex};
-        struct FailFirst {
-            failed: bool,
-            bytes: Arc<Mutex<Vec<u8>>>,
-        }
-        impl Write for FailFirst {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                if !self.failed {
-                    self.failed = true;
-                    return Err(io::ErrorKind::BrokenPipe.into());
+    fn cleanup_attempts_every_mode_even_when_an_earlier_restoration_fails() {
+        // Native Windows commands may bypass the writer entirely. Inject the
+        // console operation boundary instead, without touching the host console.
+        for failed in [
+            Restore::Mouse,
+            Restore::Paste,
+            Restore::Fullscreen,
+            Restore::Cursor,
+            Restore::Raw,
+        ] {
+            let mut attempted = Vec::new();
+            restore_modes(|mode| {
+                attempted.push(mode);
+                if mode == failed {
+                    Err(io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
                 }
-                self.bytes.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
+            });
+            assert_eq!(
+                attempted,
+                [
+                    Restore::Mouse,
+                    Restore::Paste,
+                    Restore::Fullscreen,
+                    Restore::Cursor,
+                    Restore::Raw
+                ]
+            );
         }
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        drop(WindowsTerminal {
-            output: Box::new(FailFirst {
-                failed: false,
-                bytes: bytes.clone(),
-            }),
-            size: None,
-            fullscreen: true,
-            mouse: true,
-            paste: true,
-            raw: false,
-            input_started: false,
-        });
-        let bytes = bytes.lock().unwrap();
-        let text = String::from_utf8_lossy(&bytes);
-        assert!(
-            text.contains("\x1b[?2004l"),
-            "bracketed paste restoration was skipped"
-        );
-        assert!(
-            text.contains("\x1b[?1049l"),
-            "alternate screen restoration was skipped"
-        );
-        assert!(text.contains("\x1b[?25h"), "cursor restoration was skipped");
     }
     #[test]
     fn renderer_reports_write_errors() {
@@ -260,15 +247,38 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Restore {
+    Mouse,
+    Paste,
+    Fullscreen,
+    Cursor,
+    Raw,
+}
+
+fn restore_modes(mut restore: impl FnMut(Restore) -> io::Result<()>) {
+    // Each console operation is independent. A failed restoration must never
+    // prevent the remaining modes from being restored, including raw input.
+    for mode in [
+        Restore::Mouse,
+        Restore::Paste,
+        Restore::Fullscreen,
+        Restore::Cursor,
+        Restore::Raw,
+    ] {
+        let _ = restore(mode);
+    }
+}
+
 impl Drop for WindowsTerminal {
     fn drop(&mut self) {
-        // Attempt every restoration even when a preceding console write fails.
-        let _ = self.set_mouse_capture(false);
-        let _ = self.set_bracketed_paste(false);
-        let _ = self.set_fullscreen(false);
-        let _ = self.output.queue(cursor::Show).and_then(Write::flush);
-        if self.raw {
-            let _ = terminal::disable_raw_mode();
-        }
+        restore_modes(|mode| match mode {
+            Restore::Mouse => self.set_mouse_capture(false),
+            Restore::Paste => self.set_bracketed_paste(false),
+            Restore::Fullscreen => self.set_fullscreen(false),
+            Restore::Cursor => self.output.queue(cursor::Show).and_then(Write::flush),
+            Restore::Raw if self.raw => terminal::disable_raw_mode(),
+            Restore::Raw => Ok(()),
+        });
     }
 }
