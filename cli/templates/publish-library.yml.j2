@@ -129,6 +129,12 @@ jobs:
         with:
           cache-disabled: true
 <<@ workflows.release_documentation_runtime @>>
+      - name: Prepare immutable release assets
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_MODULE: ${{ inputs.module }}
+          SOURCE_SHA: ${{ steps.release.outputs.source }}
+        run: android-repo-setup assets prepare --module "$RELEASE_MODULE" --source "$SOURCE_SHA"
       - name: Validate immutable release source
         if: steps.release.outputs.skip != 'true'
         env:

@@ -231,6 +231,7 @@ pub(crate) struct AssetSource {
 }
 
 pub(super) fn validate_contract(contract: &VerificationConfig) -> Result<()> {
+    crate::assets::validate(contract)?;
     let coordinate = Regex::new(r"\A[A-Za-z0-9_][A-Za-z0-9_.-]*\z")?;
     for pin in &contract.required_api_dependencies {
         for (value, property) in [
@@ -322,61 +323,7 @@ pub(super) fn resolve_contract(
             }
         }
     }
-    if let Some(assets) = &contract.required_assets {
-        ensure!(
-            !assets.directory.starts_with('/')
-                && assets
-                    .directory
-                    .split('/')
-                    .all(|part| !matches!(part, "" | "." | ".."))
-                && assets.suffix.starts_with('.')
-                && assets.suffix.len() > 1,
-            "Invalid required asset source"
-        );
-        let prefix = format!("{}/", assets.directory);
-        let output = git(
-            root,
-            &[
-                "ls-tree",
-                "-r",
-                "--name-only",
-                "-z",
-                source,
-                "--",
-                &assets.directory,
-            ],
-        )?;
-        ensure!(
-            output.status.success(),
-            "Could not enumerate immutable assets"
-        );
-        for path in output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|p| !p.is_empty())
-        {
-            let path = std::str::from_utf8(path)?;
-            if !path.ends_with(&assets.suffix) {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(&prefix)
-                .context("Asset outside source directory")?;
-            let blob = git(root, &["show", &format!("{source}:{path}")])?;
-            ensure!(
-                blob.status.success() && !blob.stdout.is_empty(),
-                "Required source asset is missing or empty: {path}"
-            );
-            contract.asset_sha256.insert(
-                format!("assets/{relative}"),
-                format!("{:x}", Sha256::digest(&blob.stdout)),
-            );
-        }
-        ensure!(
-            !contract.asset_sha256.is_empty(),
-            "Required asset source contains no matching assets"
-        );
-    }
+    crate::assets::resolve(root, source, contract)?;
     Ok(())
 }
 

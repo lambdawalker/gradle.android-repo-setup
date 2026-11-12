@@ -29,6 +29,11 @@ pub(crate) struct VerificationConfig {
     pub bytecode_major: u16,
     pub required_api_dependencies: Vec<DependencyPin>,
     pub required_assets: Option<AssetSource>,
+    pub assets: Vec<crate::assets::AssetSet>,
+    #[serde(skip_deserializing)]
+    pub asset_sizes: BTreeMap<String, u64>,
+    #[serde(skip_deserializing)]
+    pub asset_rules: BTreeMap<String, crate::assets::AssetRules>,
     pub forbidden_asset_suffixes: Vec<String>,
     #[serde(skip_deserializing)]
     pub asset_sha256: BTreeMap<String, String>,
@@ -42,6 +47,9 @@ impl Default for VerificationConfig {
             bytecode_major: 61,
             required_api_dependencies: Vec::new(),
             required_assets: None,
+            assets: Vec::new(),
+            asset_sizes: BTreeMap::new(),
+            asset_rules: BTreeMap::new(),
             forbidden_asset_suffixes: Vec::new(),
             asset_sha256: BTreeMap::new(),
         }
@@ -69,7 +77,7 @@ impl VerificationConfig {
     }
 }
 
-pub(super) fn verification_config(
+pub(crate) fn verification_config(
     root: &Path,
     source: &str,
     module: &str,
@@ -360,20 +368,9 @@ pub(super) fn verify(
                     .any(|suffix| name.ends_with(suffix)),
                 "Forbidden AAR asset: {name}"
             );
-            if let Some(assets) = &contract.required_assets {
-                ensure!(
-                    !name.ends_with(&assets.suffix) || contract.asset_sha256.contains_key(&name),
-                    "Unexpected AAR asset absent from immutable source: {name}"
-                );
-            }
-            if let Some(expected) = contract.asset_sha256.get(&name) {
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                ensure!(
-                    !bytes.is_empty() && format!("{:x}", Sha256::digest(&bytes)) == *expected,
-                    "AAR asset hash mismatch: {name}"
-                );
-            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            crate::assets::verify_archive_entry(contract, &name, &bytes)?;
         }
         if suffix == ".aar" && name == "classes.jar" {
             entry.read_to_end(&mut classes)?;
