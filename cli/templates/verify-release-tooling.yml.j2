@@ -31,6 +31,8 @@ jobs:
             17
             <<@ workflows.java_version @>>
       - uses: gradle/actions/setup-gradle@v5
+      - name: Prepare immutable release assets
+        run: android-repo-setup assets prepare --module <<@ workflows.module @>> --source "$(git rev-parse HEAD)"
       - name: Verify the local release artifact
         shell: bash
         run: |

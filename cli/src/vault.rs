@@ -197,7 +197,19 @@ pub fn read_regular_file(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     Ok(Some(data))
 }
 
-pub fn lock_file(path: &Path, contention: &str) -> Result<File> {
+pub struct FileLock {
+    file: File,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing alone can leave flock held by a descriptor inherited during
+        // another thread's fork. Release ownership explicitly before closing.
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+pub fn lock_file(path: &Path, contention: &str) -> Result<FileLock> {
     regular_file_exists(path)?;
     let file = file_options()
         .read(true)
@@ -206,7 +218,7 @@ pub fn lock_file(path: &Path, contention: &str) -> Result<File> {
         .open(path)?;
     ensure!(file.metadata()?.is_file(), "Lock must be a regular file.");
     match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(FileLock { file }),
         Err(error) if error.kind() == fs2::lock_contended_error().kind() => bail!("{contention}"),
         Err(error) => Err(error.into()),
     }
@@ -219,7 +231,7 @@ pub fn lock_path(path: &Path) -> PathBuf {
 }
 
 pub struct VaultLock {
-    _file: File,
+    _file: FileLock,
 }
 
 pub fn lock(config: &SetupConfig, migrate: bool) -> Result<VaultLock> {
@@ -593,6 +605,25 @@ pub fn remake(config: &SetupConfig) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_release_does_not_wait_for_an_inherited_descriptor() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let path = scratch.path().join("resource.lock");
+        let guard = lock_file(&path, "busy")?;
+        // dup shares the same open file description, as a concurrent fork does
+        // until the child execs and closes its CLOEXEC descriptors.
+        let inherited = guard.file.try_clone()?;
+        assert!(lock_file(&path, "busy").is_err());
+        drop(guard);
+        let next = lock_file(&path, "busy")?;
+        drop(inherited);
+        assert!(lock_file(&path, "busy").is_err());
+        drop(next);
+        let _again = lock_file(&path, "busy")?;
+        Ok(())
+    }
 
     #[test]
     fn migrates_and_opens_a_python_vault_then_preserves_saved_answers() -> Result<()> {

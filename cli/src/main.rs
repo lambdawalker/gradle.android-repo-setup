@@ -1,5 +1,6 @@
 macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($arg)*)) }; }
 
+mod assets;
 mod associations;
 mod confirmation;
 mod discovery;
@@ -35,6 +36,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Prepare immutable, configured release assets before building.
+    Assets {
+        #[command(subcommand)]
+        command: AssetsCommand,
+    },
     /// Validate Android named string translations across source sets.
     #[command(name = "check_localization", alias = "check-localization")]
     CheckLocalization {
@@ -105,6 +111,16 @@ enum Command {
         base: Option<String>,
         #[arg(long, help = "Verify that the site builds successfully")]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetsCommand {
+    Prepare {
+        #[arg(long)]
+        module: String,
+        #[arg(long)]
+        source: Option<String>,
     },
 }
 
@@ -289,6 +305,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
     match cli.command.unwrap_or(Command::Setup) {
         Command::CheckLocalization { allow_missing } => localization::check(&root, allow_missing)?,
+        Command::Assets {
+            command: AssetsCommand::Prepare { module, source },
+        } => {
+            let manifest = assets::prepare(&root, &module, source.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
         Command::Discover { save } => {
             let modules = discovery::discover(&root)?;
             if save {

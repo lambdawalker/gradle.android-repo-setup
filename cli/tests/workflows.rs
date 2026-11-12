@@ -324,6 +324,16 @@ fn workflow_contract_defaults_and_overrides_preserve_command_scalars() {
                 .iter()
                 .position(|step| step["name"] == "Validate immutable release source")
                 .unwrap();
+            let preparation = steps
+                .iter()
+                .position(|step| step["name"] == "Prepare immutable release assets")
+                .unwrap();
+            assert!(preparation < validation);
+            assert_eq!(steps[preparation]["run"], "android-repo-setup assets prepare --module \"$RELEASE_MODULE\" --source \"$SOURCE_SHA\"");
+            assert_eq!(
+                steps[preparation]["env"]["RELEASE_MODULE"],
+                "${{ inputs.module }}"
+            );
             assert_eq!(
                 steps[validation]["run"],
                 if customized {

@@ -49,6 +49,7 @@ pub(crate) fn build(root: &Path) -> Result<()> {
         selected.selected && selected.kind == crate::discovery::Kind::Library,
         "Module is not a selected library"
     );
+    crate::assets::prepare(root, module, Some(source))?;
     let status = Command::new(root.canonicalize()?.join(wrapper))
         .current_dir(root)
         .args([

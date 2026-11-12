@@ -99,6 +99,8 @@ fingerprint_excluded_properties:
 
 A module contract replaces the global `verification` fallback. Discovery initializes namespace-based contracts with an empty required API list when no contract exists; review these before release. `bytecode_major` defaults to 61 (Java 17). Exact dependencies also accept literal `group`, `artifact`, and `version` instead of property selectors. They must be available as a POM and its declared JAR/AAR on Maven Central before local release verification proceeds. The model's POM must export the exact dependency at compile scope; Gradle API variants must carry that same pin. This does not rewrite the dependency declaration: the model build must compile against its stable published dependency during release.
 
+See [Release assets](release-assets.md) for multiple asset sets, optional TFLite identification, and scoped Git LFS hydration in the next CLI release.
+
 Asset paths and SHA-256 hashes come from the immutable source commit. The verifier rejects missing, changed, empty, duplicate, or extra assets with the required suffix; a core contract can forbid model assets. Resolved verification facts are recorded alongside artifact hashes. Local/public verification reads the source revision's contract, preserving reproducibility.
 
 Fingerprint exclusions are exact Gradle property names. Exclude only properties that cannot affect that library's artifact. Shared build/tooling changes still conservatively change release fingerprints; model-only sources and explicitly excluded pins do not change the core fingerprint. Existing fingerprints retain their legacy algorithm when no new options are present.
