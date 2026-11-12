@@ -126,13 +126,31 @@ fn update_workflows(root: &Path) -> Result<()> {
 
 pub(crate) fn run(root: &Path) -> Result<()> {
     vault::interactive()?;
+    let Some(modules) = crate::discovery::select(root)? else {
+        return Ok(());
+    };
+    let has_apps = modules
+        .values()
+        .any(|m| m.selected && m.kind == crate::discovery::Kind::Application);
+    let has_libraries = modules
+        .values()
+        .any(|m| m.selected && m.kind == crate::discovery::Kind::Library);
+    let available = OPERATIONS
+        .iter()
+        .copied()
+        .filter(|(id, _, _)| match *id {
+            "key" | "github" => has_apps,
+            "publishing" => has_libraries,
+            _ => true,
+        })
+        .collect::<Vec<_>>();
     let config = signing_config(root)?;
     loop {
         let first_run = !config.state_path().exists()
             && !root
                 .join(".project/setup/workflow-generation.json")
                 .exists();
-        let selected = match crate::ui::menu(&OPERATIONS, first_run)? {
+        let selected = match crate::ui::menu(&available, first_run)? {
             crate::ui::Menu::Setup(selected) => selected,
             crate::ui::Menu::ViewVault => {
                 vault::view(&config)?;
@@ -144,10 +162,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
             }
             crate::ui::Menu::Exit => return Ok(()),
         };
-        let operations = selected
-            .iter()
-            .map(|&i| OPERATIONS[i].0)
-            .collect::<Vec<_>>();
+        let operations = selected.iter().map(|&i| available[i].0).collect::<Vec<_>>();
         if operations.contains(&"workflows") {
             update_workflows(root)?;
         }

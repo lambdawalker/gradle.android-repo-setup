@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 60
     environment: ${{ inputs.environment }}
     concurrency:
-      group: <<@ workflows.module @>>-release
+      group: <<@ workflows.concurrency @>>
       cancel-in-progress: false
     env:
       RELEASE_REPOSITORY: jitpack
@@ -90,7 +90,8 @@ jobs:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           SOURCE_SHA: ${{ steps.release.outputs.source }}
         run: |
-          ./gradlew ":$RELEASE_MODULE:testDebugUnitTest" ":$RELEASE_MODULE:publishAllPublicationsToVerificationRepository" -PjitpackBuild=true -PjitpackScopedTag=true "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
+          MODULE_PATH=$(android-repo-setup module-path "$RELEASE_MODULE")
+          ./gradlew "$MODULE_PATH:testDebugUnitTest" "$MODULE_PATH:publishAllPublicationsToVerificationRepository" -PjitpackBuild=true -PjitpackScopedTag=true "-PreleaseModule=$RELEASE_MODULE" "-PreleaseVersion=$RELEASE_VERSION" --no-daemon
           android-repo-setup module_release check-local --module "$RELEASE_MODULE" --version "$RELEASE_VERSION" --source "$SOURCE_SHA"
       - name: Reserve destination and canonical source tag atomically
         if: steps.release.outputs.skip != 'true'

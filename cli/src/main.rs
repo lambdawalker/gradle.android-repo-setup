@@ -2,6 +2,7 @@ macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($ar
 
 mod associations;
 mod confirmation;
+mod discovery;
 mod docs;
 mod github;
 mod gpg;
@@ -35,6 +36,15 @@ struct Cli {
 enum Command {
     /// Select setup operations interactively.
     Setup,
+    /// Discover evaluated Android Gradle modules (read-only unless --save).
+    Discover {
+        #[arg(long)]
+        save: bool,
+    },
+    /// Review and persist library/application selections.
+    SelectModules,
+    /// Resolve a release ID to its Gradle project path.
+    ModulePath { module: String },
     /// Create or verify the APK key and configure its GitHub environment.
     Signing(setup::SigningOptions),
     /// Preview or generate the managed GitHub workflows.
@@ -270,6 +280,20 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
 fn run(cli: Cli) -> Result<ExitCode> {
     let root = cli.project.canonicalize()?;
     match cli.command.unwrap_or(Command::Setup) {
+        Command::Discover { save } => {
+            let modules = discovery::discover(&root)?;
+            if save {
+                discovery::save(&root, &modules)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&modules)?);
+        }
+        Command::SelectModules => ui::run(|| discovery::select(&root).map(|_| ()))?,
+        Command::ModulePath { module } => println!(
+            "{}",
+            discovery::module(&root, &module)?
+                .path
+                .trim_end_matches(':')
+        ),
         Command::Setup => ui::run(|| setup::run(&root))?,
         Command::Signing(options) => ui::run(|| setup::sign(&root, options))?,
         Command::ModuleRelease { command } => run_release(&root, command)?,

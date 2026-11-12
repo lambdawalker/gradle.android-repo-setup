@@ -115,6 +115,7 @@ pub(super) enum Screen {
     Menu {
         operations: Vec<(String, String)>,
         checked: Vec<bool>,
+        modules: bool,
     },
     Saved(String),
     Key {
@@ -221,8 +222,17 @@ impl Model {
                 Screen::Menu {
                     operations,
                     checked,
+                    modules: false,
                 }
             }
+            Question::Modules(entries) => Screen::Menu {
+                checked: entries.iter().map(|e| e.2).collect(),
+                operations: entries
+                    .into_iter()
+                    .map(|(label, help, _)| (label, help))
+                    .collect(),
+                modules: true,
+            },
             Question::Saved(label) => {
                 self.timeout = Some((Instant::now() + Duration::from_secs(20), "reuse".into()));
                 Screen::Saved(label)
@@ -258,9 +268,17 @@ impl Model {
             Screen::Busy => (vec![], vec![]),
             Screen::Text { .. } => (vec![Control::Field(0)], vec![Continue, Cancel]),
             Screen::Confirm { .. } => (vec![Control::Check(0)], vec![Apply, Cancel]),
-            Screen::Menu { operations, .. } => (
+            Screen::Menu {
+                operations,
+                modules,
+                ..
+            } => (
                 (0..operations.len()).map(Control::Check).collect(),
-                vec![Help, Setup, ViewVault, RemakeVault, Exit],
+                if *modules {
+                    vec![Setup, Cancel]
+                } else {
+                    vec![Help, Setup, ViewVault, RemakeVault, Exit]
+                },
             ),
             Screen::Saved(_) => (vec![], vec![Reuse, New, Cancel]),
             Screen::Key { keys, .. } => (
@@ -515,6 +533,7 @@ impl Model {
                         if let Screen::Menu {
                             operations,
                             checked,
+                            ..
                         } = &self.screen
                         {
                             let help = operations
@@ -540,7 +559,7 @@ impl Model {
                                 .filter_map(|(i, yes)| yes.then_some(i))
                                 .collect::<Vec<_>>();
                             if selected.is_empty() {
-                                self.overlay = Some("Select at least one setup operation.".into());
+                                self.overlay = Some("Select at least one item to continue.".into());
                                 None
                             } else {
                                 Some(Answer::Menu(Menu::Setup(selected)))
@@ -672,6 +691,26 @@ mod regressions {
             panic!("text screen")
         };
         assert!(!edit.display(true, true, 80).contains("fixture"));
+    }
+    #[test]
+    fn module_menu_restores_selection_and_cancels_without_saving() {
+        let entries = vec![
+            (":library".into(), "Library".into(), true),
+            (":app".into(), "App".into(), false),
+        ];
+        let (mut state, rx) = show(Question::Modules(entries.clone()));
+        assert!(!state
+            .controls()
+            .contains(&Control::Action(Action::ViewVault)));
+        assert!(state.timeout.is_none());
+        state.activate(Control::Check(1));
+        state.activate(Control::Action(Action::Setup));
+        assert!(
+            matches!(rx.try_recv(), Ok(Answer::Menu(Menu::Setup(values))) if values == vec![0,1])
+        );
+        let (mut state, rx) = show(Question::Modules(entries));
+        state.activate(Control::Action(Action::Cancel));
+        assert!(matches!(rx.try_recv(), Ok(Answer::Cancel)));
     }
     #[test]
     fn first_run_and_returning_menu_and_vault_actions() {

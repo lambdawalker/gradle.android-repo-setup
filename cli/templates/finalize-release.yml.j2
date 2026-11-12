@@ -15,7 +15,7 @@ on:
         description: 'Module whose existing publication should be finalized'
         type: choice
         required: true
-        options: [<<@ workflows.module @>>]
+        options: [<<@ workflows.module_options @>>]
       version:
         description: 'Existing release X.Y.Z to verify and finalize. Never uploads artifacts.'
         required: true
@@ -78,7 +78,7 @@ jobs:
     # Same repository-wide lock as publishing. Never cancel an active upload/push.
     # The automatic environment delay is a separate job outside this lock.
     concurrency:
-      group: <<@ workflows.module @>>-release
+      group: <<@ workflows.concurrency @>>
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7

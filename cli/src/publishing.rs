@@ -139,7 +139,20 @@ pub(crate) fn generate(root: &Path, check: bool) -> Result<()> {
         ));
     }
     let mut outputs = vec![(root.join(PROPERTIES_PATH), properties)];
-    for name in WORKFLOWS {
+    let names: Vec<String> = if let Some(modules) = crate::discovery::load(root)? {
+        let mut names = modules
+            .iter()
+            .filter(|(_, m)| m.selected && m.kind == crate::discovery::Kind::Library)
+            .map(|(id, _)| format!("publish-{id}.yml"))
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            names.push("finalize-release.yml".into());
+        }
+        names
+    } else {
+        WORKFLOWS.iter().map(|s| (*s).into()).collect()
+    };
+    for name in names {
         let path = root.join(".github/workflows").join(name);
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Could not read {}", path.display()))?;

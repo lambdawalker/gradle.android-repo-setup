@@ -109,6 +109,24 @@ pub(crate) fn validate_record(root: &Path, record: &Value) -> Result<()> {
     Ok(())
 }
 pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<String> {
+    // Resolve the source layout from the immutable revision, not today's checkout.
+    let config_output = crate::release::git(
+        root,
+        &["show", &format!("{source}:.project/setup/config.yaml")],
+    )?;
+    let config: serde_yaml_ng::Value = if config_output.status.success() {
+        serde_yaml_ng::from_slice(&config_output.stdout)?
+    } else {
+        serde_yaml_ng::Value::Null
+    };
+    let directory = config["android_modules"][module]["directory"]
+        .as_str()
+        .unwrap_or(module);
+    let excluded: Vec<String> = if config["fingerprint_excluded_properties"][module].is_null() {
+        vec![]
+    } else {
+        serde_yaml_ng::from_value(config["fingerprint_excluded_properties"][module].clone())?
+    };
     let local = [
         "src/main",
         "build.gradle.kts",
@@ -117,7 +135,7 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         "consumer-rules.pro",
         "proguard-rules.pro",
     ]
-    .map(|path| format!("{module}/{path}"));
+    .map(|path| format!("{}/{path}", directory.trim_end_matches('/')));
     let mut args = vec!["ls-tree", "-r", source, "--"];
     args.extend(local.iter().map(String::as_str));
     args.extend([
@@ -137,6 +155,16 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         ".github/workflows/publish-library.yml",
         ".github/workflows/publish-jitpack.yml",
     ]);
+    let groovy = format!("{}/build.gradle", directory.trim_end_matches('/'));
+    if !config["android_modules"].is_null() {
+        args.extend([
+            groovy.as_str(),
+            "build.gradle",
+            "settings.gradle",
+            "buildSrc",
+            "build-logic",
+        ]);
+    }
     let listing = git_text(root, &args)?;
     let entries = listing
         .lines()
@@ -147,9 +175,69 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let properties = git_text(root, &["show", &format!("{source}:gradle.properties")])?;
+    let mut properties = git_text(root, &["show", &format!("{source}:gradle.properties")])?;
+    if !excluded.is_empty() {
+        properties = properties
+            .lines()
+            .filter(|line| {
+                !line
+                    .split_once('=')
+                    .is_some_and(|(key, _)| excluded.iter().any(|name| name == key.trim()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
     Ok(format!(
         "{:x}",
         Sha256::digest(format!("{entries}\n{}", properties.trim()))
     ))
+}
+
+#[cfg(test)]
+mod module_tests {
+    use super::*;
+    #[test]
+    fn fingerprints_follow_remapped_sources_and_ignore_only_configured_properties() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        std::fs::create_dir_all(root.join(".project/setup"))?;
+        std::fs::create_dir_all(root.join("components/vision/src/main"))?;
+        std::fs::write(root.join(".project/setup/config.yaml"), "android_modules:\n  libs--vision: {path: ':libs:vision', directory: components/vision, kind: library}\nfingerprint_excluded_properties:\n  libs--vision: [modelCoreVersion]\n")?;
+        std::fs::write(
+            root.join("gradle.properties"),
+            "GROUP=com.example\nmodelCoreVersion=1.0.0\n",
+        )?;
+        std::fs::write(root.join("components/vision/src/main/Main.kt"), "first")?;
+        git_text(root, &["init"])?;
+        git_text(root, &["config", "user.name", "Test"])?;
+        git_text(root, &["config", "user.email", "test@example.invalid"])?;
+        let commit = || -> Result<String> {
+            git_text(root, &["add", "."])?;
+            git_text(
+                root,
+                &["-c", "commit.gpgSign=false", "commit", "-m", "fixture"],
+            )?;
+            git_text(root, &["rev-parse", "HEAD"])
+        };
+        let first = commit()?;
+        let original = fingerprint(root, "libs--vision", &first)?;
+        std::fs::write(
+            root.join("gradle.properties"),
+            "GROUP=com.example\nmodelCoreVersion=2.0.0\n",
+        )?;
+        let second = commit()?;
+        assert_eq!(original, fingerprint(root, "libs--vision", &second)?);
+        std::fs::write(root.join("components/vision/src/main/Main.kt"), "second")?;
+        let third = commit()?;
+        assert_ne!(original, fingerprint(root, "libs--vision", &third)?);
+        assert_eq!(original, fingerprint(root, "libs--vision", &first)?);
+        let before_groovy = fingerprint(root, "libs--vision", &third)?;
+        std::fs::write(
+            root.join("components/vision/build.gradle"),
+            "dependencies { api 'example:core:2.0.0' }",
+        )?;
+        let fourth = commit()?;
+        assert_ne!(before_groovy, fingerprint(root, "libs--vision", &fourth)?);
+        Ok(())
+    }
 }

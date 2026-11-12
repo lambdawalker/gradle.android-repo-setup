@@ -85,3 +85,9 @@ jobs:
           fi
           echo "$directory" >> "$GITHUB_PATH"
       - run: cargo test --locked --manifest-path cli/Cargo.toml
+      - name: Verify evaluated Gradle module discovery
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GRADLE_BIN: ${{ github.workspace }}/gradlew
+        run: cargo test --locked --manifest-path cli/Cargo.toml --test gradle_discovery -- --ignored

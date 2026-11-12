@@ -5,7 +5,7 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_run:
-    workflows: ['SUB - Finalize <<@ workflows.title @>> release', 'Publish']
+    workflows: <<@ workflows.release_workflow_names @>>
     types: [completed]
 permissions:
   contents: read

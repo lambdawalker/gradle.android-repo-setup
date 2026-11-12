@@ -41,6 +41,9 @@ jobs:
           if [[ -f .project/setup/repositories.properties ]]; then
             git add .project/setup/repositories.properties
           fi
+          if [[ -f .project/setup/modules.properties ]]; then
+            git add .project/setup/modules.properties
+          fi
           git diff --cached --binary > workflow-update.patch
       - uses: actions/upload-artifact@v6
         with:
