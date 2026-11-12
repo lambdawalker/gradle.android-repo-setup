@@ -528,3 +528,33 @@ Use `--base <absolute-preview-url>` when previewing on another host, or `--base 
 The wizard normalizes legacy X10 and SGR mouse reports that some Windows IDE terminals, including IntelliJ IDEA, deliver as character events. Pointer movement does not alter text or password fields; clicks, dragging and vertical scrolling remain mouse actions. Native console events pass through unchanged. The compatibility layer applies on Windows only, before input reaches the views, and preserves ordinary text and keyboard shortcuts.
 
 The input compatibility fix is included in CLI v0.1.8. The iocraft interface described above requires a release containing this migration, or a build from this branch.
+
+## Android translation validation
+
+Run `android-repo-setup --project /path/to/repository check_localization` (alias
+`check-localization`) to validate named Android `<string>` resources without
+Gradle, an Android SDK, or Python. The generated `verify-localization.yml` runs
+the same check on pull requests and main. Regenerate workflows using a CLI
+release containing this command; old pinned binaries do not support it.
+
+The command discovers `src/<source-set>/res` directories throughout a repository,
+including nested app/library modules, and reads all XML files under `values`
+and locale-only directories such as `values-es`, `values-pt-rBR`, and
+`values-b+es+419`. It skips symlinks, hidden, build, target, bin and node_modules
+directories. Each source set is checked independently; resource roots outside
+the repository or custom source directories are not discovered.
+
+Checks reject malformed XML, duplicate names across files, extra keys, empty
+translations, translations of `translatable="false"` strings, and incompatible
+Java Formatter argument indices/types (including implicit positions, repeated
+arguments, date/time conversions and escaped percent signs). Styled text and
+XML entities are read as text. `formatted="false"` default strings skip format
+comparison. Missing keys fail by default; pass `--allow-missing` to allow
+Android's default-language fallback while retaining the other checks. No fixed
+list of languages is imposed, and the check does not require adding locales.
+
+This first version checks named strings, not plurals, string arrays, translation
+quality, Android escape semantics, or resource-merging behavior. Device/API
+qualifier overlays (for example `values-es-night`) are excluded rather than
+treated as incomplete translations. It prints resource/locale counts, including
+zero when no resources are found.
