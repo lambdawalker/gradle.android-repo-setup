@@ -1,90 +1,101 @@
 //! Decode mouse reports delivered as keystrokes by Windows IDE terminals.
-use cursive::{
-    backend::Backend,
-    event::{Event, Key, MouseButton, MouseEvent},
+use futures::{stream::BoxStream, Stream};
+use iocraft::{
+    FullscreenMouseEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    TerminalEvent,
 };
 use std::{
     collections::VecDeque,
+    io,
+    pin::Pin,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
 const ESCAPE_WAIT: Duration = Duration::from_millis(50);
 const REPORT_WAIT: Duration = Duration::from_millis(250);
 
-pub(super) struct MouseInput {
-    inner: Box<dyn Backend>,
-    pending: Vec<Event>,
+#[derive(Default)]
+struct Decoder {
+    pending: Vec<TerminalEvent>,
     characters: Vec<char>,
     started: Option<Instant>,
-    ready: VecDeque<Event>,
+    ready: VecDeque<TerminalEvent>,
     pressed: Option<MouseButton>,
 }
-impl MouseInput {
-    fn new(inner: Box<dyn Backend>) -> Self {
-        Self {
-            inner,
-            pending: Vec::new(),
-            characters: Vec::new(),
-            started: None,
-            ready: VecDeque::new(),
-            pressed: None,
-        }
-    }
+impl Decoder {
     fn flush(&mut self) {
         self.ready.extend(self.pending.drain(..));
         self.characters.clear();
         self.started = None;
     }
+    fn deadline(&self) -> Option<Instant> {
+        self.started.map(|start| {
+            start
+                + if self.characters.len() <= 2 {
+                    ESCAPE_WAIT
+                } else {
+                    REPORT_WAIT
+                }
+        })
+    }
     fn expire(&mut self, now: Instant) {
-        let wait = if self.characters.len() <= 2 {
-            ESCAPE_WAIT
-        } else {
-            REPORT_WAIT
-        };
-        if self
-            .started
-            .is_some_and(|start| now.saturating_duration_since(start) >= wait)
-        {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
             self.flush();
         }
     }
-    fn accept(&mut self, event: Event, now: Instant) {
-        // A new report may immediately follow a real Escape or interrupted report.
-        // Replay the old input, then parse this prefix instead of leaking its tail.
-        if !self.pending.is_empty()
-            && matches!(
-                event,
-                Event::Key(Key::Esc) | Event::Char('\x1b') | Event::AltChar('[')
-            )
-        {
+    fn accept(&mut self, event: TerminalEvent, now: Instant) {
+        let prefix = match &event {
+            TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                KeyCode::Esc | KeyCode::Char('\x1b') if key.modifiers.is_empty() => Some(false),
+                KeyCode::Char('[') if key.modifiers == KeyModifiers::ALT => Some(true),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(alt_bracket) = prefix {
             self.flush();
-        }
-        if self.pending.is_empty() {
-            match event {
-                Event::Key(Key::Esc) | Event::Char('\x1b') => self.characters.push('\x1b'),
-                Event::AltChar('[') => self.characters.extend(['\x1b', '[']),
-                _ => {
-                    self.ready.push_back(event);
-                    return;
-                }
+            self.characters.push('\x1b');
+            if alt_bracket {
+                self.characters.push('[');
             }
             self.started = Some(now);
             self.pending.push(event);
             return;
         }
-        // Resize/refresh events can interleave with a fragmented report.
-        if matches!(event, Event::Refresh | Event::WindowResize) {
+        if self.pending.is_empty() {
             self.ready.push_back(event);
             return;
         }
-        if let Event::Char(c) = event {
-            self.characters.push(c);
-            self.pending.push(Event::Char(c));
-        } else {
-            self.flush();
-            self.ready.push_back(event);
-            return;
+        match &event {
+            TerminalEvent::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && (key.modifiers - KeyModifiers::SHIFT).is_empty() =>
+            {
+                if let KeyCode::Char(c) = key.code {
+                    self.characters.push(c);
+                } else {
+                    self.flush();
+                    self.ready.push_back(event);
+                    return;
+                }
+            }
+            // Native events and key releases cannot form report bytes.
+            TerminalEvent::Resize(..) | TerminalEvent::FullscreenMouse(..) => {
+                self.ready.push_back(event);
+                return;
+            }
+            TerminalEvent::Key(key) if key.kind == KeyEventKind::Release => {
+                self.ready.push_back(event);
+                return;
+            }
+            _ => {
+                self.flush();
+                self.ready.push_back(event);
+                return;
+            }
         }
+        self.pending.push(event);
         match parse(&self.characters) {
             Report::Incomplete => {}
             Report::Invalid => self.flush(),
@@ -104,13 +115,14 @@ impl MouseInput {
                     2 => Some(MouseButton::Right),
                     _ => None,
                 };
-                let event = if code & 128 != 0 {
+                let kind = if code & 128 != 0 {
                     None
                 } else if code & 64 != 0 {
                     match code & 3 {
-                        0 => Some(MouseEvent::WheelUp),
-                        1 => Some(MouseEvent::WheelDown),
-                        _ => None,
+                        0 => Some(MouseEventKind::ScrollUp),
+                        1 => Some(MouseEventKind::ScrollDown),
+                        2 => Some(MouseEventKind::ScrollLeft),
+                        _ => Some(MouseEventKind::ScrollRight),
                     }
                 } else if release || (legacy && code & 3 == 3 && code & 32 == 0) {
                     let released = if legacy {
@@ -119,26 +131,107 @@ impl MouseInput {
                         self.pressed = None;
                         button
                     };
-                    released.map(MouseEvent::Release)
+                    released.map(MouseEventKind::Up)
                 } else if code & 32 != 0 {
-                    button.map(MouseEvent::Hold)
+                    button.map(MouseEventKind::Drag)
                 } else {
                     button.map(|b| {
                         self.pressed = Some(b);
-                        MouseEvent::Press(b)
+                        MouseEventKind::Down(b)
                     })
                 };
-                if let Some(event) = event {
-                    self.ready.push_back(Event::Mouse {
-                        offset: (0, 0).into(),
-                        position: (x - 1, y - 1).into(),
-                        event,
-                    });
+                if let Some(kind) = kind {
+                    let mut event = FullscreenMouseEvent::new(kind, (x - 1) as u16, (y - 1) as u16);
+                    if code & 4 != 0 {
+                        event.modifiers |= KeyModifiers::SHIFT;
+                    }
+                    if code & 8 != 0 {
+                        event.modifiers |= KeyModifiers::ALT;
+                    }
+                    if code & 16 != 0 {
+                        event.modifiers |= KeyModifiers::CONTROL;
+                    }
+                    self.ready.push_back(TerminalEvent::FullscreenMouse(event));
                 }
             }
         }
     }
 }
+
+/// The timer is polled alongside input so a lone Escape wakes the render loop.
+pub(super) struct MouseInput {
+    inner: BoxStream<'static, io::Result<TerminalEvent>>,
+    decoder: Decoder,
+    timer: Option<(Instant, Pin<Box<smol::Timer>>)>,
+    ended: bool,
+    error: Option<io::Error>,
+}
+impl MouseInput {
+    pub(super) fn new(inner: BoxStream<'static, io::Result<TerminalEvent>>) -> Self {
+        Self {
+            inner,
+            decoder: Decoder::default(),
+            timer: None,
+            ended: false,
+            error: None,
+        }
+    }
+}
+impl Stream for MouseInput {
+    type Item = io::Result<TerminalEvent>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.decoder.ready.pop_front() {
+            return Poll::Ready(Some(Ok(event)));
+        }
+        // Drain queued tails before considering timeouts, with a fairness budget.
+        for _ in 0..128 {
+            if self.ended {
+                break;
+            }
+            match self.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(event))) => self.decoder.accept(event, Instant::now()),
+                Poll::Ready(result) => {
+                    self.ended = true;
+                    self.error = result.and_then(Result::err);
+                    self.decoder.flush();
+                }
+                Poll::Pending => {
+                    self.decoder.expire(Instant::now());
+                    if let Some(deadline) = self.decoder.deadline() {
+                        if self.timer.as_ref().map(|(at, _)| *at) != Some(deadline) {
+                            self.timer = Some((deadline, Box::pin(smol::Timer::at(deadline))));
+                        }
+                        if std::future::Future::poll(self.timer.as_mut().unwrap().1.as_mut(), cx)
+                            .is_ready()
+                        {
+                            self.decoder.expire(Instant::now());
+                        }
+                    } else {
+                        self.timer = None;
+                    }
+                    if let Some(event) = self.decoder.ready.pop_front() {
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+                    return Poll::Pending;
+                }
+            }
+            if let Some(event) = self.decoder.ready.pop_front() {
+                return Poll::Ready(Some(Ok(event)));
+            }
+        }
+        if self.ended {
+            if let Some(error) = self.error.take() {
+                Poll::Ready(Some(Err(error)))
+            } else {
+                Poll::Ready(None)
+            }
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
 enum Report {
     Incomplete,
     Invalid,
@@ -166,7 +259,7 @@ fn parse(chars: &[char]) -> Report {
                 return Report::Incomplete;
             }
             let (code, x, y) = (chars[3] as u32, chars[4] as u32, chars[5] as u32);
-            if code < 32 || code > 287 || x <= 32 || y <= 32 {
+            if code < 32 || code > 287 || x <= 32 || y <= 32 || x > 65568 || y > 65568 {
                 return Report::Invalid;
             }
             Report::Complete {
@@ -208,245 +301,230 @@ fn parse(chars: &[char]) -> Report {
         _ => Report::Invalid,
     }
 }
-impl Backend for MouseInput {
-    fn poll_event(&mut self) -> Option<Event> {
-        if let Some(event) = self.ready.pop_front() {
-            return Some(event);
-        }
-        // Bound work per poll so a mouse-motion flood cannot starve rendering or callbacks.
-        for _ in 0..128 {
-            let now = Instant::now();
-            match self.inner.poll_event() {
-                Some(event) => self.accept(event, now),
-                None => {
-                    // Drain already queued bytes before timing out a prefix: the UI may have
-                    // paused between polls even though the rest of the report is available.
-                    self.expire(now);
-                    return self.ready.pop_front();
-                }
-            }
-            if let Some(event) = self.ready.pop_front() {
-                return Some(event);
-            }
-        }
-        None
-    }
-    fn set_title(&mut self, title: String) {
-        self.inner.set_title(title)
-    }
-    fn refresh(&mut self) {
-        self.inner.refresh()
-    }
-    fn has_colors(&self) -> bool {
-        self.inner.has_colors()
-    }
-    fn screen_size(&self) -> cursive::Vec2 {
-        self.inner.screen_size()
-    }
-    fn move_to(&self, p: cursive::Vec2) {
-        self.inner.move_to(p)
-    }
-    fn print(&self, t: &str) {
-        self.inner.print(t)
-    }
-    fn clear(&self, c: cursive::theme::Color) {
-        self.inner.clear(c)
-    }
-    fn set_color(&self, c: cursive::theme::ColorPair) -> cursive::theme::ColorPair {
-        self.inner.set_color(c)
-    }
-    fn set_effect(&self, e: cursive::theme::Effect) {
-        self.inner.set_effect(e)
-    }
-    fn unset_effect(&self, e: cursive::theme::Effect) {
-        self.inner.unset_effect(e)
-    }
-    fn is_persistent(&self) -> bool {
-        self.inner.is_persistent()
-    }
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-}
-
-#[cfg(windows)]
-pub(super) fn init() -> std::io::Result<Box<dyn Backend>> {
-    let backend = cursive::backends::crossterm::Backend::init()?;
-    Ok(Box::new(MouseInput::new(backend)))
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cursive::{
-        event::{Key, MouseButton, MouseEvent},
-        view::View,
-        views::EditView,
-    };
-    use std::cell::RefCell;
-    struct Events(RefCell<VecDeque<Event>>);
-    impl Backend for Events {
-        fn poll_event(&mut self) -> Option<Event> {
-            self.0.borrow_mut().pop_front()
-        }
-        fn set_title(&mut self, _: String) {}
-        fn refresh(&mut self) {}
-        fn has_colors(&self) -> bool {
-            false
-        }
-        fn screen_size(&self) -> cursive::Vec2 {
-            (80, 24).into()
-        }
-        fn move_to(&self, _: cursive::Vec2) {}
-        fn print(&self, _: &str) {}
-        fn clear(&self, _: cursive::theme::Color) {}
-        fn set_color(&self, c: cursive::theme::ColorPair) -> cursive::theme::ColorPair {
-            c
-        }
-        fn set_effect(&self, _: cursive::theme::Effect) {}
-        fn unset_effect(&self, _: cursive::theme::Effect) {}
+    use futures::{stream, StreamExt};
+    use iocraft::KeyEvent;
+    fn key(code: KeyCode) -> TerminalEvent {
+        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code))
     }
-    fn run(events: Vec<Event>) -> Vec<Event> {
-        let mut backend = MouseInput::new(Box::new(Events(RefCell::new(events.into()))));
-        let mut out = Vec::new();
-        for _ in 0..256 {
-            if let Some(e) = backend.poll_event() {
-                out.push(e)
+    fn chars(text: &str) -> Vec<TerminalEvent> {
+        text.chars().map(|c| key(KeyCode::Char(c))).collect()
+    }
+    fn debug(events: &[TerminalEvent]) -> String {
+        format!("{events:?}")
+    }
+    fn run(events: Vec<TerminalEvent>) -> Vec<TerminalEvent> {
+        smol::block_on(
+            MouseInput::new(stream::iter(events.into_iter().map(Ok)).boxed())
+                .map(Result::unwrap)
+                .collect(),
+        )
+    }
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TerminalEvent {
+        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(kind, column, row))
+    }
+    fn equal(actual: Vec<TerminalEvent>, expected: Vec<TerminalEvent>) {
+        assert_eq!(debug(&actual), debug(&expected));
+    }
+    #[iocraft::component]
+    fn PasswordProbe(mut hooks: iocraft::Hooks) -> impl Into<iocraft::AnyElement<'static>> {
+        use iocraft::prelude::*;
+        let mut password = hooks.use_state(|| String::from("keep-this-password"));
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(key) = event {
+                if key.kind != KeyEventKind::Release {
+                    if let KeyCode::Char(c) = key.code {
+                        let next = format!("{}{c}", password.read().as_str());
+                        password.set(next);
+                    }
+                }
             }
+        });
+        if password.read().ends_with('z') {
+            system.exit();
         }
-        out
+        element!(Text(content: password.read().to_string()))
     }
-    fn chars(text: &str) -> Vec<Event> {
-        text.chars().map(Event::Char).collect()
+    #[test]
+    fn decoded_stream_integrates_with_iocraft_mock_terminal() {
+        use iocraft::prelude::*;
+        let input = MouseInput::new(
+            stream::iter(chars("\x1b[<35;8;4M\x1b[MC>9z").into_iter().map(Ok)).boxed(),
+        );
+        let canvases = smol::block_on(
+            element!(PasswordProbe)
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(
+                    input.map(Result::unwrap),
+                ))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            canvases.last().unwrap().to_string(),
+            "keep-this-passwordz\n"
+        );
     }
     #[test]
     fn windows_ide_mouse_motion_does_not_type_in_password_field() {
         for report in ["\x1b[<35;30;12M", "\x1b[MC>9", "\x1b[<3;30;12M"] {
-            let mut field = EditView::new().secret().content("keep-this-password");
-            for event in run(chars(report)) {
-                field.on_event(event);
-            }
-            assert_eq!(
-                &*field.get_content(),
-                "keep-this-password",
-                "report {report:?}"
-            );
+            // No raw key reaches the password editor; its existing text stays intact.
+            assert!(run(chars(report)).is_empty(), "report {report:?}");
         }
     }
     #[test]
     fn mouse_reports_still_deliver_clicks_and_wheel_events() {
-        let actual = run(chars("\x1b[<0;8;4M\x1b[<0;8;4m\x1b[<64;8;4M\x1b[<65;8;4M"));
-        let expected = [
-            MouseEvent::Press(MouseButton::Left),
-            MouseEvent::Release(MouseButton::Left),
-            MouseEvent::WheelUp,
-            MouseEvent::WheelDown,
-        ]
-        .map(|event| Event::Mouse {
-            offset: (0, 0).into(),
-            position: (7, 3).into(),
-            event,
-        });
-        assert_eq!(actual, expected);
+        equal(
+            run(chars("\x1b[<0;8;4M\x1b[<0;8;4m\x1b[<64;8;4M\x1b[<65;8;4M")),
+            [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+                MouseEventKind::ScrollUp,
+                MouseEventKind::ScrollDown,
+            ]
+            .into_iter()
+            .map(|kind| mouse(kind, 7, 3))
+            .collect(),
+        );
     }
     #[test]
     fn ordinary_text_and_native_keys_remain_unchanged() {
         let mut events = chars("abc[<35;8;4M contraseña🔑");
-        events.push(Event::Key(Key::Tab));
-        assert_eq!(run(events.clone()), events);
+        events.push(key(KeyCode::Tab));
+        equal(run(events.clone()), events);
     }
     #[test]
     fn queued_mouse_tail_survives_a_delayed_poll() {
-        let mut backend =
-            MouseInput::new(Box::new(Events(RefCell::new(chars("[<35;8;4Mz").into()))));
-        backend.accept(Event::Char('\x1b'), Instant::now() - Duration::from_secs(1));
-        assert_eq!(backend.poll_event(), Some(Event::Char('z')));
+        let mut input =
+            MouseInput::new(stream::iter(chars("[<35;8;4Mz").into_iter().map(Ok)).boxed());
+        input
+            .decoder
+            .accept(key(KeyCode::Esc), Instant::now() - Duration::from_secs(1));
+        equal(
+            smol::block_on(input.map(Result::unwrap).collect()),
+            chars("z"),
+        );
     }
-
     #[test]
     fn escape_and_incomplete_input_have_bounded_wait_without_losing_text() {
-        let mut backend = MouseInput::new(Box::new(Events(RefCell::new(VecDeque::new()))));
+        let mut decoder = Decoder::default();
         let now = Instant::now();
-        backend.accept(Event::Key(Key::Esc), now);
-        backend.expire(now + ESCAPE_WAIT);
-        assert_eq!(backend.ready.pop_front(), Some(Event::Key(Key::Esc)));
+        decoder.accept(key(KeyCode::Esc), now);
+        decoder.expire(now + ESCAPE_WAIT);
+        equal(decoder.ready.drain(..).collect(), vec![key(KeyCode::Esc)]);
         for event in chars("\x1b[<12;") {
-            backend.accept(event, now);
+            decoder.accept(event, now);
         }
-        backend.expire(now + REPORT_WAIT);
-        assert_eq!(
-            backend.ready.drain(..).collect::<Vec<_>>(),
-            chars("\x1b[<12;")
-        );
-        assert!(backend.pending.is_empty());
+        decoder.expire(now + REPORT_WAIT);
+        equal(decoder.ready.drain(..).collect(), chars("\x1b[<12;"));
+        assert!(decoder.pending.is_empty());
     }
-
     #[test]
     fn invalid_escape_sequences_and_native_mouse_events_are_preserved() {
         let mut events = chars("a\x1b[not-a-reportb");
-        events.push(Event::Mouse {
-            offset: (0, 0).into(),
-            position: (2, 3).into(),
-            event: MouseEvent::WheelDown,
-        });
-        assert_eq!(run(events.clone()), events);
+        events.push(mouse(MouseEventKind::ScrollDown, 2, 3));
+        equal(run(events.clone()), events);
     }
-
     #[test]
     fn fragmented_reports_do_not_reach_the_view_and_leave_following_typing_intact() {
-        let mut backend = MouseInput::new(Box::new(Events(RefCell::new(VecDeque::new()))));
+        let mut decoder = Decoder::default();
         let now = Instant::now();
         for chunk in ["\x1b[<35;", "8;4M", "\x1b[MC>9"] {
             for event in chars(chunk) {
-                backend.accept(event, now);
+                decoder.accept(event, now);
             }
-            assert!(backend.ready.is_empty());
+            assert!(decoder.ready.is_empty());
         }
-        backend.accept(Event::Char('é'), now);
-        assert_eq!(backend.ready.pop_front(), Some(Event::Char('é')));
+        decoder.accept(key(KeyCode::Char('é')), now);
+        equal(decoder.ready.drain(..).collect(), chars("é"));
     }
     #[test]
     fn a_new_mouse_prefix_is_decoded_after_interrupted_escape_input() {
-        let mut events = vec![Event::Key(Key::Esc), Event::Key(Key::Esc)];
+        let mut events = vec![key(KeyCode::Esc), key(KeyCode::Esc)];
         events.extend(chars("[<35;8;4M"));
-        assert_eq!(run(events), [Event::Key(Key::Esc)]);
-        let mut events = chars("\x1b[<12;\x1b[<35;8;4M");
-        events.push(Event::Char('z'));
-        let mut expected = chars("\x1b[<12;");
-        expected.push(Event::Char('z'));
-        assert_eq!(run(events), expected);
+        equal(run(events), vec![key(KeyCode::Esc)]);
+        equal(run(chars("\x1b[<12;\x1b[<35;8;4Mz")), chars("\x1b[<12;z"));
     }
-
     #[test]
     fn legacy_click_drag_release_and_wheel_keep_their_positions() {
-        let reports = "\x1b[M ($\x1b[M@)$\x1b[M#)$\x1b[M`)$";
-        let mouse = |event, position| Event::Mouse {
-            offset: (0, 0).into(),
-            position,
-            event,
-        };
-        assert_eq!(
-            run(chars(reports)),
-            [
-                mouse(MouseEvent::Press(MouseButton::Left), (7, 3).into()),
-                mouse(MouseEvent::Hold(MouseButton::Left), (8, 3).into()),
-                mouse(MouseEvent::Release(MouseButton::Left), (8, 3).into()),
-                mouse(MouseEvent::WheelUp, (8, 3).into()),
-            ]
+        equal(
+            run(chars("\x1b[M ($\x1b[M@)$\x1b[M#)$\x1b[M`)$")),
+            vec![
+                mouse(MouseEventKind::Down(MouseButton::Left), 7, 3),
+                mouse(MouseEventKind::Drag(MouseButton::Left), 8, 3),
+                mouse(MouseEventKind::Up(MouseButton::Left), 8, 3),
+                mouse(MouseEventKind::ScrollUp, 8, 3),
+            ],
         );
     }
-
     #[test]
     fn alt_bracket_prefix_and_sgr_drag_are_decoded() {
-        let mut events = vec![Event::AltChar('[')];
+        let mut prefix = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('['));
+        prefix.modifiers = KeyModifiers::ALT;
+        let mut events = vec![TerminalEvent::Key(prefix)];
         events.extend(chars("<32;8;4M"));
-        assert_eq!(
+        equal(
             run(events),
-            [Event::Mouse {
-                offset: (0, 0).into(),
-                position: (7, 3).into(),
-                event: MouseEvent::Hold(MouseButton::Left)
-            }]
+            vec![mouse(MouseEventKind::Drag(MouseButton::Left), 7, 3)],
         );
+    }
+    #[test]
+    fn lone_escape_timer_wakes_without_new_input() {
+        smol::block_on(async {
+            let source = stream::iter(vec![Ok(key(KeyCode::Esc))]).chain(stream::pending());
+            let mut input = MouseInput::new(source.boxed());
+            let started = Instant::now();
+            let result = futures::future::select(
+                input.next(),
+                Box::pin(smol::Timer::after(Duration::from_secs(2))),
+            )
+            .await;
+            match result {
+                futures::future::Either::Left((Some(Ok(event)), _)) => {
+                    equal(vec![event], vec![key(KeyCode::Esc)])
+                }
+                _ => panic!("Escape failed to wake its own stream"),
+            }
+            assert!(started.elapsed() >= ESCAPE_WAIT);
+        });
+    }
+    #[test]
+    fn resize_paste_key_release_and_repeat_preserve_input() {
+        let mut repeat = KeyEvent::new(KeyEventKind::Repeat, KeyCode::Char('é'));
+        repeat.modifiers = KeyModifiers::SHIFT;
+        let events = vec![
+            TerminalEvent::Resize(80, 24),
+            TerminalEvent::BracketedPaste("\x1b[<35;8;4M contraseña🔑".into()),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Release, KeyCode::Char('x'))),
+            TerminalEvent::Key(repeat),
+        ];
+        equal(run(events.clone()), events);
+    }
+    #[test]
+    fn errors_and_eof_replay_pending_input_then_finish() {
+        let events = stream::iter(vec![
+            Ok(key(KeyCode::Esc)),
+            Err(io::Error::from(io::ErrorKind::BrokenPipe)),
+        ]);
+        let actual = smol::block_on(MouseInput::new(events.boxed()).collect::<Vec<_>>());
+        assert_eq!(actual.len(), 2);
+        assert!(matches!(&actual[0], Ok(TerminalEvent::Key(event)) if event.code == KeyCode::Esc));
+        assert_eq!(
+            actual[1].as_ref().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        equal(run(chars("\x1b[<12;")), chars("\x1b[<12;"));
+    }
+    #[test]
+    fn malformed_report_length_is_bounded_and_unicode_is_replayed() {
+        let input = format!("\x1b[<{}🔑", "1".repeat(80));
+        equal(run(chars(&input)), chars(&input));
+    }
+    #[test]
+    fn mouse_motion_flood_yields_and_eventually_delivers_text() {
+        let input = format!("{}z", "\x1b[<35;8;4M".repeat(1000));
+        equal(run(chars(&input)), chars("z"));
     }
 }
