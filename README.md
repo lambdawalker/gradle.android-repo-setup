@@ -560,3 +560,14 @@ quality, Android escape semantics, or resource-merging behavior. Device/API
 qualifier overlays (for example `values-es-night`) are excluded rather than
 treated as incomplete translations. It prints resource/locale counts, including
 zero when no resources are found.
+
+## Shared bootstrap and project checks
+
+Generate maintained cross-platform launchers with `android-repo-setup bootstrap generate`.
+Use `bootstrap check` for drift, and `setup check` to include publishing/workflow
+configuration and evaluated Gradle inventory. See [bootstrap](docs/bootstrap.md).
+
+Generic screenshot inventories, required JUnit cases, and isolated release-source
+validation are configured in `.project/verification/checks.json`. See
+[project checks](docs/shared-project-checks.md). Consumers retain only their
+domain-specific documentation/media engines; shared helper tests live here.
