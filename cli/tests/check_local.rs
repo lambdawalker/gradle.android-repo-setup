@@ -312,6 +312,10 @@ fn confirmation_checks_the_annotated_remote_reservation_before_network_requests(
         root,
         &[
             "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
             "tag.gpgsign=false",
             "tag",
             "-a",
