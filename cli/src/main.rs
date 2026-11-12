@@ -1,5 +1,6 @@
 macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($arg)*)) }; }
 
+mod associations;
 mod confirmation;
 mod docs;
 mod github;

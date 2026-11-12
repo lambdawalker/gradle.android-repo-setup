@@ -1,3 +1,4 @@
+use crate::associations;
 use crate::github::GitHubApi;
 use crate::vault::{
     confirm, expand_home, lock_file, lock_path, parent, private_dir, private_screen, prompt,
@@ -231,7 +232,7 @@ fn prepare_keystore(
     Ok(())
 }
 
-fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
+fn resolve_file_path(candidate: &Path) -> Result<PathBuf> {
     let candidate = std::path::absolute(expand_home(candidate)?)?;
     regular_file_exists(&candidate)?;
     let mut resolved = PathBuf::new();
@@ -252,6 +253,11 @@ fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
         }
     }
     regular_file_exists(&resolved)?;
+    Ok(resolved)
+}
+
+fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
+    let resolved = resolve_file_path(candidate)?;
     let inside_project = resolved.starts_with(root)
         && (root.join(".git").symlink_metadata().is_ok()
             || root.join(".project/setup/config.yaml").is_file());
@@ -451,6 +457,81 @@ fn upload(
     Ok(())
 }
 
+fn prepare_signing_files(
+    keytool: &Path,
+    config: &SetupConfig,
+    passwords: &SigningPasswords,
+    application_ids: &[String],
+    reuse: bool,
+) -> Result<()> {
+    let application_ids = associations::validate_ids(application_ids)?;
+    let output = associations::path(config);
+    let keystore = Path::new(&passwords.keystore);
+    let resolved_output = resolve_file_path(&output)?;
+    let resolved_keystore = resolve_file_path(keystore)?;
+    #[cfg(windows)]
+    let same_path = resolved_output.to_string_lossy().to_lowercase()
+        == resolved_keystore.to_string_lossy().to_lowercase();
+    #[cfg(not(windows))]
+    let same_path = resolved_output == resolved_keystore;
+    ensure!(!same_path, "The public association file must not replace the signing keystore. Choose a different keystore path.");
+    regular_file_exists(&output)?;
+    private_dir(parent(&output))?;
+    let directory = Builder::new()
+        .prefix(".certificate-")
+        .tempdir_in(parent(&output))?;
+    let certificate = directory.path().join("signing.der");
+    let key = passwords.key.as_deref().context("Missing key password")?;
+    prepare_keystore(
+        keytool,
+        keystore,
+        &passwords.alias,
+        &passwords.store,
+        key,
+        reuse,
+    )?;
+    // Hash the certificate bytes, independent of keytool's display language and formatting.
+    run_keytool(
+        keytool,
+        "-exportcert",
+        keystore,
+        &passwords.alias,
+        &passwords.store,
+        key,
+        &[
+            "-file",
+            certificate
+                .to_str()
+                .context("Certificate path must be UTF-8.")?,
+        ],
+    )?;
+    let bytes = read_regular_file(&certificate, 1024 * 1024)?
+        .context("keytool did not export the signing certificate.")?;
+    associations::write(&output, &application_ids, &bytes)
+}
+
+fn choose_application_ids(root: &Path, saved: &[String]) -> Result<Vec<String>> {
+    let defaults = associations::application_ids(root, saved)?;
+    if !defaults.is_empty() {
+        setup_message!("Android application IDs: {}", defaults.join(", "));
+        if use_saved("Android application IDs")? {
+            return Ok(defaults);
+        }
+    }
+    loop {
+        let joined = defaults.join(", ");
+        let value = prompt(
+            "Android application IDs (comma-separated installed package names)",
+            (!joined.is_empty()).then_some(joined.as_str()),
+        )?;
+        let ids = value.split(',').map(str::to_owned).collect::<Vec<_>>();
+        match associations::validate_ids(&ids) {
+            Ok(ids) => return Ok(ids),
+            Err(error) => setup_message!("{error}"),
+        }
+    }
+}
+
 pub fn run(
     root: &Path,
     config: &SetupConfig,
@@ -495,6 +576,7 @@ pub fn run(
                 "All APK signing secrets already exist. Existing values were preserved."
             );
             if !local {
+                setup_message!("To create or refresh the public Android association file, select APK signing key and verify your existing local keystore.");
                 vault.state.finish("github");
                 vault.save()?;
                 return Ok(true);
@@ -547,8 +629,16 @@ pub fn run(
     let (key, new_key) = read_password("Key password", !reuse, passwords.key.as_deref())?;
     passwords.key = Some(key);
     vault.save()?;
+    let application_ids = choose_application_ids(root, &vault.state.android_application_ids)?;
+    vault.state.android_application_ids = application_ids.clone();
+    vault.save()?;
     setup_message!("Repository {}", config.repository);
     setup_message!("Keystore {}", path.display());
+    setup_message!("Android application IDs: {}", application_ids.join(", "));
+    setup_message!(
+        "Write public signing associations to {}",
+        associations::path(config).display()
+    );
     setup_message!(
         "{}",
         if reuse {
@@ -583,12 +673,12 @@ pub fn run(
     vault.state.start(operations);
     vault.save()?;
     let passwords = vault.state.signing_passwords.as_ref().unwrap();
-    let key = passwords.key.as_deref().unwrap();
-    prepare_keystore(&keytool, &path, &alias, &passwords.store, key, reuse)?;
+    prepare_signing_files(&keytool, config, passwords, &application_ids, reuse)?;
     setup_message!(
         "Keystore ready at {}. Keep an offline backup.",
         path.display()
     );
+    setup_message!("Public Android associations: {}. Import this JSON in your backend's association manager for the intended environment.", associations::path(config).display());
     vault.state.finish("key");
     vault.save()?;
     if let Some((api, state)) = remote {
@@ -610,6 +700,119 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_rejects_export_keystore_collision_before_mutation() -> Result<()> {
+        let keytool = find_keytool()?;
+        let scratch = tempfile::tempdir()?;
+        let config = SetupConfig::new(
+            "owner/example".into(),
+            "release".into(),
+            "main".into(),
+            Some(scratch.path().to_owned()),
+            None,
+            None,
+        )?;
+        let output = associations::path(&config);
+        // The lexical paths differ but refer to the same file, even before it exists.
+        fs::create_dir_all(parent(&output).join("nested"))?;
+        let alias_path = parent(&output)
+            .join("nested/..")
+            .join(output.file_name().unwrap());
+        let passwords = SigningPasswords {
+            keystore: alias_path.to_str().unwrap().to_owned(),
+            alias: "test".into(),
+            store: "fixture-store".into(),
+            key: Some("fixture-key".into()),
+        };
+        prepare_keystore(
+            &keytool,
+            &output,
+            "test",
+            "fixture-store",
+            "fixture-key",
+            false,
+        )?;
+        let original = fs::read(&output)?;
+        let ids = vec!["com.example.app".into()];
+        assert!(
+            prepare_signing_files(&keytool, &config, &passwords, &ids, true).is_err(),
+            "export accepted the selected keystore as its destination"
+        );
+        assert_eq!(fs::read(&output)?, original);
+        fs::remove_file(&output)?;
+        assert!(prepare_signing_files(&keytool, &config, &passwords, &ids, false).is_err());
+        assert!(
+            !output.exists(),
+            "collision was detected only after creating a key"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signing_files_export_real_certificate_identity_on_create_and_reuse() -> Result<()> {
+        let keytool = find_keytool()?;
+        let scratch = tempfile::tempdir()?;
+        let config = SetupConfig::new(
+            "owner/example".into(),
+            "release".into(),
+            "main".into(),
+            Some(scratch.path().to_owned()),
+            None,
+            None,
+        )?;
+        let mut passwords = SigningPasswords {
+            keystore: scratch
+                .path()
+                .join("example.jks")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            alias: "test".into(),
+            store: "fixture-store".into(),
+            key: Some("fixture-key".into()),
+        };
+        let ids = vec!["com.example.app".into()];
+        prepare_signing_files(&keytool, &config, &passwords, &ids, false)?;
+        let output = crate::associations::path(&config);
+        assert!(
+            output.is_file(),
+            "signing setup did not create the public association file"
+        );
+        let original_key = fs::read(&passwords.keystore)?;
+        let original_export = fs::read(&output)?;
+        let value: Value = serde_json::from_slice(&original_export)?;
+        let fingerprint = value[0]["sha256CertFingerprints"][0].as_str().unwrap();
+        let listing = Command::new(&keytool)
+            .args([
+                "-J-Duser.language=en",
+                "-J-Duser.country=US",
+                "-list",
+                "-v",
+                "-keystore",
+                &passwords.keystore,
+                "-alias",
+                &passwords.alias,
+                "-storepass:env",
+                "ASSOCIATION_TEST_PASSWORD",
+            ])
+            .env("ASSOCIATION_TEST_PASSWORD", &passwords.store)
+            .output()?;
+        assert!(listing.status.success());
+        assert!(
+            String::from_utf8_lossy(&listing.stdout).contains(&format!("SHA256: {fingerprint}"))
+        );
+        assert_eq!(value.as_array().unwrap().len(), 1);
+        assert_eq!(value[0]["packageName"], "com.example.app");
+        fs::remove_file(&output)?;
+        prepare_signing_files(&keytool, &config, &passwords, &ids, true)?;
+        assert_eq!(fs::read(&output)?, original_export);
+        assert_eq!(fs::read(&passwords.keystore)?, original_key);
+        passwords.store = "incorrect-password".into();
+        assert!(prepare_signing_files(&keytool, &config, &passwords, &ids, true).is_err());
+        assert_eq!(fs::read(&output)?, original_export);
+        Ok(())
+    }
 
     #[test]
     fn generated_passwords_meet_keytool_requirements() -> Result<()> {
