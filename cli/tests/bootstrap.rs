@@ -230,6 +230,16 @@ fn documentation_bootstrap_uses_its_own_pin_and_checks_drift() {
     let ignore = fs::read_to_string(root.path().join(".gitignore")).unwrap();
     assert!(ignore.contains("/.project/setup/cache/"));
     assert!(ignore.contains("/.project/docs/cache/"));
+    let workflow =
+        fs::read_to_string(root.path().join(".github/workflows/verify-setup.yml")).unwrap();
+    assert!(
+        workflow.contains("          sh ./docs.sh check\n"),
+        "opted-in verification must use the standalone docs check:\n{workflow}"
+    );
+    assert!(workflow.contains("          fetch-depth: 0\n          lfs: true\n"));
+    assert!(!workflow.contains("sh ./setup.sh module-release verify"));
+    assert!(!workflow.contains("sh ./setup.sh documentation-history verify"));
+    assert!(workflow.contains("run: docs.bat bootstrap check\n"));
     assert!(run(root.path(), &["check"]).status.success());
     fs::write(root.path().join("docs.sh"), "changed").unwrap();
     assert!(!run(root.path(), &["check"]).status.success());

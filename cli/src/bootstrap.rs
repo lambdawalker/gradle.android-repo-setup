@@ -26,7 +26,7 @@ pub(crate) fn expected(root: &Path) -> Result<BTreeMap<&'static str, String>> {
         ),
         (
             ".github/workflows/verify-setup.yml",
-            include_str!("../bootstrap/verify-setup.yml")
+            normalize_newlines(include_str!("../bootstrap/verify-setup.yml"))
                 .replace("@JAVA@", &java_versions(&config)),
         ),
     ]);
