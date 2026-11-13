@@ -202,7 +202,18 @@ private fun certificateFingerprint(certificate: java.security.cert.Certificate):
         .digest(certificate.encoded)
         .joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xff) }
 
-internal fun Project.verifyLocalSigning(convention: AndroidSigningConvention) {
+internal data class LocalSigningVerification(
+    val keystore: File,
+    val keystorePathSource: SigningValueSource,
+    val alias: String,
+    val aliasSource: SigningValueSource,
+    val fingerprint: String,
+    val certificate: X509Certificate?,
+)
+
+internal fun Project.localSigningVerification(
+    convention: AndroidSigningConvention,
+): LocalSigningVerification {
     val local = signingProperties()
     val keystorePath = signingSetting(local, convention.keystorePathInput)
         ?.takeIf { it.value.isNotBlank() }
@@ -253,30 +264,41 @@ internal fun Project.verifyLocalSigning(convention: AndroidSigningConvention) {
             ?: throw org.gradle.api.GradleException(
                 "Alias '${alias.value}' has no certificate in '${keystore.path}'"
             )
-        val fingerprint = certificateFingerprint(certificate)
-
-        logger.lifecycle("Local Android signing verification: PASS")
-        logger.lifecycle("  Keystore: ${keystore.absolutePath}")
-        logger.lifecycle("  Keystore path source: ${keystorePath.source.description}")
-        logger.lifecycle("  Alias: ${alias.value}")
-        logger.lifecycle("  Alias source: ${alias.source.description}")
-        logger.lifecycle("  SHA-256: $fingerprint")
-        if (certificate is X509Certificate) {
-            logger.lifecycle("  Subject: ${certificate.subjectX500Principal.name}")
-            logger.lifecycle("  Issuer: ${certificate.issuerX500Principal.name}")
-            logger.lifecycle("  Valid from: ${certificate.notBefore}")
-            logger.lifecycle("  Valid until: ${certificate.notAfter}")
-            certificate.checkValidity()
-            logger.lifecycle("  Certificate validity: current")
-        }
-        logger.lifecycle(
-            "  Expected signed variant: " +
-                if (convention.createSignedDebug) convention.signedDebugName else "(none configured)"
+        return LocalSigningVerification(
+            keystore = keystore,
+            keystorePathSource = keystorePath.source,
+            alias = alias.value,
+            aliasSource = alias.source,
+            fingerprint = certificateFingerprint(certificate),
+            certificate = certificate as? X509Certificate,
         )
-        logger.lifecycle("No signing passwords were printed.")
     } finally {
         storeChars.fill('\u0000')
     }
+}
+
+internal fun Project.verifyLocalSigning(convention: AndroidSigningConvention) {
+    val verification = localSigningVerification(convention)
+    verification.certificate?.checkValidity()
+
+    logger.lifecycle("Local Android signing verification: PASS")
+    logger.lifecycle("  Keystore: ${verification.keystore.absolutePath}")
+    logger.lifecycle("  Keystore path source: ${verification.keystorePathSource.description}")
+    logger.lifecycle("  Alias: ${verification.alias}")
+    logger.lifecycle("  Alias source: ${verification.aliasSource.description}")
+    logger.lifecycle("  SHA-256: ${verification.fingerprint}")
+    verification.certificate?.let { certificate ->
+        logger.lifecycle("  Subject: ${certificate.subjectX500Principal.name}")
+        logger.lifecycle("  Issuer: ${certificate.issuerX500Principal.name}")
+        logger.lifecycle("  Valid from: ${certificate.notBefore}")
+        logger.lifecycle("  Valid until: ${certificate.notAfter}")
+        logger.lifecycle("  Certificate validity: current")
+    }
+    logger.lifecycle(
+        "  Expected signed variant: " +
+            if (convention.createSignedDebug) convention.signedDebugName else "(none configured)"
+    )
+    logger.lifecycle("No signing passwords were printed.")
 }
 
 internal fun Project.configureSigningConventions(
