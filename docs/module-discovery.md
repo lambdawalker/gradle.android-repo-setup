@@ -1,4 +1,4 @@
-# Discover and configure Android modules
+# Discover and configure Gradle modules
 
 Available in the 0.1.11 source release. Publish/install the matching CLI and Gradle plugin before adopting the generated workflows. Existing `workflows.module` / `workflows.app_module` configurations still render their original workflow names until discovery is saved.
 
@@ -14,9 +14,9 @@ android-repo-setup publishing_config generate
 
 Discovery runs the project's Gradle wrapper with a bundled init script and configuration cache disabled. It evaluates the project's normal build configuration but runs no build or publication task. Run only in a project you trust. The project must configure successfully with its normal JDK/Android SDK/dependencies. Discovery errors are reported and leave selections unchanged; the CLI does not guess module types from folder names or build-file text.
 
-Applied `com.android.library` and `com.android.application` plugins determine type. Kotlin/Groovy build scripts, version-catalog aliases, convention plugins, nested projects, root Android projects, and remapped project directories are resolved by Gradle itself. Non-Android projects are omitted. Included/composite builds are separate build roots: run `--project` against each root. Project directories outside the selected root are rejected.
+Applied `com.android.library` and `com.android.application` plugins determine type. Kotlin/Groovy build scripts, version-catalog aliases, convention plugins, nested projects, root Android projects, and remapped project directories are resolved by Gradle itself. Kotlin JVM (`org.jetbrains.kotlin.jvm`) and `java-library` projects are discovered as `jvm-library`; other projects are omitted. Android identities take precedence when plugins overlap. See [JVM library publishing](jvm-libraries.md) for explicit verification and Gradle integration requirements. Included/composite builds are separate build roots: run `--project` against each root. Project directories outside the selected root are rejected.
 
-The first screen selects all detected Android modules. Later runs restore selections by Gradle path and select newly discovered modules. Cancel leaves configuration unchanged. Unchecking a module excludes its setup and generated workflows, not its Gradle project or dependency relationships. Library-only selections omit signing operations; app-only selections omit library publishing operations.
+The first screen selects all detected supported modules. Later runs restore selections by Gradle path and select newly discovered modules. Cancel leaves configuration unchanged. Unchecking a module excludes its setup and generated workflows, not its Gradle project or dependency relationships. Library-only selections omit signing operations; app-only selections omit library publishing operations.
 
 For a new checkout, saving can bootstrap `.project/setup/config.yaml` from a GitHub `origin` remote. The CLI does not rewrite Gradle build scripts: apply the publishing plugin to each selected library and the root plugin as described in the main README, retaining POM metadata and any project-specific pinned dependency logic. Configure `GROUP`, `JITPACK_GROUP`, and per-module artifact IDs before releasing.
 

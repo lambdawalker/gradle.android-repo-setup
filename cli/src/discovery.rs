@@ -16,7 +16,17 @@ pub(crate) type Modules = BTreeMap<String, Module>;
 pub(crate) enum Kind {
     Library,
     Application,
+    #[serde(rename = "jvm-library")]
+    JvmLibrary,
     Other,
+}
+impl Kind {
+    pub(crate) fn is_library(&self) -> bool {
+        matches!(self, Self::Library | Self::JvmLibrary)
+    }
+    pub(crate) fn is_jvm(&self) -> bool {
+        matches!(self, Self::JvmLibrary)
+    }
 }
 fn selected() -> bool {
     true
@@ -52,7 +62,7 @@ pub(crate) fn validate(modules: &Modules) -> Result<()> {
     for (id, m) in modules {
         ensure!(
             m.kind != Kind::Other,
-            "android_modules must contain only Android libraries and apps"
+            "android_modules must contain only Android libraries, apps, and JVM libraries"
         );
         ensure!(
             id_pattern.is_match(id) && id != "." && id != "..",
@@ -228,7 +238,7 @@ pub(crate) fn save(root: &Path, modules: &Modules) -> Result<()> {
     if config["modules"].is_null() {
         config["modules"] = serde_yaml_ng::Value::Mapping(Default::default());
     }
-    for (id, m) in modules.iter().filter(|(_, m)| m.kind == Kind::Library) {
+    for (id, m) in modules.iter().filter(|(_, m)| m.kind.is_library()) {
         // Retain historical labels and deselected library histories.
         if config["modules"][id].is_null() {
             config["modules"][id] = id.clone().into();
@@ -259,11 +269,7 @@ pub(crate) fn save(root: &Path, modules: &Modules) -> Result<()> {
     inventory_file.write_all(inventory(root, modules)?.as_bytes())?;
     inventory_file.persist(inventory_path)?;
     let registry = root.join(".project/setup/repositories.yml");
-    if !registry.exists()
-        && modules
-            .values()
-            .any(|m| m.kind == Kind::Library && m.selected)
-    {
+    if !registry.exists() && modules.values().any(|m| m.kind.is_library() && m.selected) {
         let legacy = root.join("publishing/repositories.yml");
         let contents = if legacy.is_file() {
             fs::read_to_string(legacy)?
@@ -297,6 +303,7 @@ pub(crate) fn inventory(root: &Path, modules: &Modules) -> Result<String> {
             match m.kind {
                 Kind::Library => "library",
                 Kind::Application => "application",
+                Kind::JvmLibrary => "jvm-library",
                 Kind::Other => "other",
             }
         ));
@@ -304,11 +311,11 @@ pub(crate) fn inventory(root: &Path, modules: &Modules) -> Result<String> {
     Ok(text)
 }
 pub(crate) fn select(root: &Path) -> Result<Option<Modules>> {
-    setup_message!("Discovering Android libraries and apps through Gradle…");
+    setup_message!("Discovering Android and JVM modules through Gradle…");
     let mut modules = discover(root)?;
     ensure!(
         !modules.is_empty(),
-        "No Android library or application plugins found in this Gradle build."
+        "No Android library, application, or JVM library plugins found in this Gradle build."
     );
     let entries = modules
         .iter()
@@ -317,8 +324,10 @@ pub(crate) fn select(root: &Path) -> Result<Option<Modules>> {
                 format!(
                     "{} — {}",
                     m.path,
-                    if m.kind == Kind::Library {
-                        "Library"
+                    if m.kind.is_jvm() {
+                        "JVM library"
+                    } else if m.kind.is_library() {
+                        "Android library"
                     } else {
                         "App"
                     }
@@ -341,6 +350,21 @@ pub(crate) fn select(root: &Path) -> Result<Option<Modules>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accepts_root_jvm_library_and_preserves_selection() {
+        let report =
+            br#"{"schema":1,"modules":[{"path":":","directory":"","kind":"jvm-library"}]}"#;
+        let mut modules = parse_report(report, None).unwrap();
+        assert_eq!(modules["root"].directory, ".");
+        assert!(modules["root"].kind.is_library());
+        assert!(modules["root"].kind.is_jvm());
+        modules.get_mut("root").unwrap().selected = false;
+        assert!(!parse_report(report, Some(&modules)).unwrap()["root"].selected);
+        assert_eq!(
+            serde_json::to_string(&modules["root"].kind).unwrap(),
+            "\"jvm-library\""
+        );
+    }
     #[test]
     fn rejects_collision_traversal_and_duplicates() {
         for modules in [

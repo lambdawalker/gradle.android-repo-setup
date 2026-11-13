@@ -1,4 +1,4 @@
-//! Read-only verification of generated setup and evaluated Android inventory.
+//! Read-only verification of generated setup and evaluated module inventory.
 use anyhow::{ensure, Context, Result};
 use std::{collections::BTreeMap, fs, path::Path};
 pub(crate) fn run(root: &Path) -> Result<()> {
@@ -17,20 +17,20 @@ fn verify_inventory(root: &Path, actual: &crate::discovery::Modules) -> Result<(
     if let Some(saved) = crate::discovery::load(root)? {
         ensure!(
             saved.len() == actual.len(),
-            "Android module inventory changed; run discover --save and review changes"
+            "Gradle module inventory changed; run discover --save and review changes"
         );
         for (id, expected) in saved {
             let found = actual
                 .values()
                 .find(|m| m.path == expected.path)
-                .with_context(|| format!("Android module {id} disappeared; run discover --save"))?;
+                .with_context(|| format!("Gradle module {id} disappeared; run discover --save"))?;
             ensure!(
                 expected.screenshots == found.screenshots
                     && expected.directory == found.directory
                     && expected.kind == found.kind
                     && expected.namespace == found.namespace
                     && expected.application_ids == found.application_ids,
-                "Android module {id} changed; run discover --save and review changes"
+                "Gradle module {id} changed; run discover --save and review changes"
             );
         }
     } else {
@@ -53,10 +53,10 @@ fn verify_inventory(root: &Path, actual: &crate::discovery::Modules) -> Result<(
         {
             expected.insert(":app".into(), crate::discovery::Kind::Application);
         }
-        ensure!(!expected.is_empty(), "No saved Android inventory or legacy module selections; run discover --save and review selections");
+        ensure!(!expected.is_empty(), "No saved module inventory or legacy module selections; run discover --save and review selections");
         ensure!(
             actual.len() == expected.len(),
-            "Legacy module selection differs from evaluated Android modules; run discover --save"
+            "Legacy module selection differs from evaluated Gradle modules; run discover --save"
         );
         for (path, kind) in expected {
             ensure!(

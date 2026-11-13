@@ -21,6 +21,7 @@ gradle.projectsEvaluated {
             def modules = root.allprojects.collect { p ->
                 def app = p.pluginManager.hasPlugin('com.android.application')
                 def library = p.pluginManager.hasPlugin('com.android.library')
+                def jvm = !app && !library && !p.pluginManager.hasPlugin('application') && (p.pluginManager.hasPlugin('org.jetbrains.kotlin.jvm') || p.pluginManager.hasPlugin('java-library'))
                 def android = p.extensions.findByName('android')
                 def ids = applicationIds[p.path]
                 if (app && ids.isEmpty() && android != null && android.hasProperty('defaultConfig')) {
@@ -29,7 +30,7 @@ gradle.projectsEvaluated {
                 }
                 [path: p.path,
                  directory: root.projectDir.toPath().relativize(p.projectDir.toPath()).toString().replace('\\', '/'),
-                 kind: app ? 'application' : library ? 'library' : 'other',
+                 kind: app ? 'application' : library ? 'library' : jvm ? 'jvm-library' : 'other',
                  namespace: (app || library) && android != null ? android.namespace : null,
                  application_ids: ids.unique().sort(),
                  screenshots: p.pluginManager.hasPlugin('com.android.compose.screenshot')]

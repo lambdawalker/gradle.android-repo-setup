@@ -96,3 +96,53 @@ fn jitpack_entry_validates_the_tag_and_source_before_invoking_gradle() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("Required asset set"));
     assert!(!output_file.exists());
 }
+
+#[test]
+fn root_jvm_jitpack_publishes_the_root_without_android_namespace() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir_all(root.join(".project/setup")).unwrap();
+    fs::write(root.join(".project/setup/config.yaml"), "modules: {root: Coordinates}\nandroid_modules:\n  root: {path: ':', directory: '.', kind: jvm-library}\nmodule_verification:\n  root: {packaging: jar, class_prefix: 'example/', required_api_artifacts: []}\n").unwrap();
+    fs::write(
+        root.join("gradlew"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > gradle-invocation\n",
+    )
+    .unwrap();
+    fs::set_permissions(root.join("gradlew"), fs::Permissions::from_mode(0o755)).unwrap();
+    git(root, &["init"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "JVM fixture",
+        ],
+    );
+    git(root, &["tag", "root/v1.2.3-jitpack"]);
+    let result = Command::new(env!("CARGO_BIN_EXE_android-repo-setup"))
+        .arg("--project")
+        .arg(root)
+        .arg("jitpack_build")
+        .env("VERSION", "root~v1.2.3-jitpack")
+        .env("GIT_COMMIT", git(root, &["rev-parse", "HEAD"]))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let invocation = fs::read_to_string(root.join("gradle-invocation")).unwrap();
+    assert!(
+        invocation.contains("\n:publishToMavenLocal\n"),
+        "{invocation}"
+    );
+    assert!(!invocation.contains("::"));
+}
