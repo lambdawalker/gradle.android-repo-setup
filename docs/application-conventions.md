@@ -30,8 +30,19 @@ ANDROID_KEY_PASSWORD
 
 No signing configuration is installed when the path is absent or blank. When a
 path is present, the plugin validates the keystore, certificate alias and private
-key before configuring Android signing. Signed builds require
-`--no-configuration-cache`.
+key before configuring Android signing.
+
+Signing problems are intentionally non-blocking. A missing file, missing or
+incorrect password, unreadable keystore, missing alias/certificate, wrong key
+password, or configuration-cache conflict leaves registered signing disabled and
+project sync continues. Optional signed variants such as `signedDebug` are
+created only when the complete signing identity is usable. Normal debug/release
+variants keep their existing/default signing state.
+
+The plugin logs a focused warning that names the failing input and, where useful,
+whether its value came from an environment variable, `local.properties`, or a
+plugin default. Environment variables take precedence over `local.properties`.
+Signed local builds require `--no-configuration-cache`.
 
 Projects can preserve older input names or other conventions:
 

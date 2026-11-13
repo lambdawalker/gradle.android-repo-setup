@@ -1,10 +1,11 @@
 package com.apexfission.release
 
 import com.android.build.api.dsl.ApplicationExtension
+import java.io.File
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.UnrecoverableKeyException
 import java.util.Properties
-import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configureEach
 import org.gradle.kotlin.dsl.create
@@ -24,39 +25,230 @@ open class AndroidSigningConvention {
     var debugSourceDirectory: String? = null
 }
 
+internal enum class SigningValueSource(val description: String) {
+    ENVIRONMENT("environment variable"),
+    LOCAL_PROPERTIES("local.properties"),
+    DEFAULT("plugin default"),
+}
+
+internal data class SigningSetting(
+    val value: String,
+    val source: SigningValueSource,
+)
+
+internal data class SigningIssue(
+    val summary: String,
+    val guidance: String? = null,
+)
+
 private fun Project.signingProperties(): Properties = Properties().apply {
-    val contents = providers.fileContents(rootProject.layout.projectDirectory.file("local.properties")).asText.orNull
+    val contents = providers.fileContents(
+        rootProject.layout.projectDirectory.file("local.properties"),
+    ).asText.orNull
     contents?.reader()?.use { load(it) }
 }
 
-private fun Project.signingSetting(properties: Properties, name: String): String? =
-    providers.environmentVariable(name).orNull ?: properties.getProperty(name)
+private fun Project.signingSetting(properties: Properties, name: String): SigningSetting? {
+    providers.environmentVariable(name).orNull?.let {
+        return SigningSetting(it, SigningValueSource.ENVIRONMENT)
+    }
+    properties.getProperty(name)?.let {
+        return SigningSetting(it, SigningValueSource.LOCAL_PROPERTIES)
+    }
+    return null
+}
+
+private fun Project.reportSigningUnavailable(
+    convention: AndroidSigningConvention,
+    issue: SigningIssue,
+) {
+    val consequences = buildList {
+        if (convention.createSignedDebug) {
+            add("The '${convention.signedDebugName}' build variant will not be created.")
+        }
+        if (convention.signDebug) {
+            add("The normal debug variant keeps its default Android debug signing.")
+        }
+        if (convention.signRelease) {
+            add("The normal release variant keeps its existing signing state.")
+        }
+        add("Project sync continues normally.")
+    }.joinToString(" ")
+
+    val guidance = issue.guidance?.let { " $it" }.orEmpty()
+    logger.warn(
+        "[android-repo-setup] Local Android signing unavailable: ${issue.summary}. " +
+            consequences + guidance,
+    )
+}
+
+private fun Throwable.causes(): Sequence<Throwable> =
+    generateSequence(this) { it.cause }.take(8)
+
+private fun Throwable.looksLikePasswordFailure(): Boolean =
+    causes().any { error ->
+        error is UnrecoverableKeyException || error.message.orEmpty().lowercase().let { message ->
+            "password" in message &&
+                ("incorrect" in message ||
+                    "verification failed" in message ||
+                    "failed to decrypt" in message ||
+                    "tampered" in message)
+        }
+    }
+
+private fun Throwable.looksLikeFormatFailure(): Boolean =
+    causes().any { error ->
+        error.message.orEmpty().lowercase().let { message ->
+            "unrecognized keystore format" in message ||
+                "invalid keystore format" in message ||
+                "not a jks" in message ||
+                "not a pkcs12" in message
+        }
+    }
+
+private fun aliases(store: KeyStore): String {
+    val values = store.aliases().toList().sorted()
+    return when {
+        values.isEmpty() -> "The keystore contains no aliases."
+        values.size <= 8 -> "Available aliases: ${values.joinToString(", ")}."
+        else -> "Available aliases include: ${values.take(8).joinToString(", ")} (+${values.size - 8} more)."
+    }
+}
+
+internal fun inspectSigningKey(
+    keystore: File,
+    alias: SigningSetting,
+    storePassword: SigningSetting,
+    keyPassword: SigningSetting,
+    storePasswordInput: String,
+    aliasInput: String,
+    keyPasswordInput: String,
+): SigningIssue? {
+    val storeChars = storePassword.value.toCharArray()
+    val keyChars = keyPassword.value.toCharArray()
+    try {
+        val store = try {
+            KeyStore.getInstance(keystore, storeChars)
+        } catch (error: Exception) {
+            return when {
+                error.looksLikePasswordFailure() -> SigningIssue(
+                    "$storePasswordInput from ${storePassword.source.description} did not unlock " +
+                        "keystore '${keystore.path}'",
+                    "Check that password source first. Environment variables override local.properties.",
+                )
+                error.looksLikeFormatFailure() -> SigningIssue(
+                    "Keystore '${keystore.path}' is not a readable JKS or PKCS12 keystore",
+                    "Verify that $aliasInput points to the intended Android signing keystore and that the file is not corrupt.",
+                )
+                else -> SigningIssue(
+                    "Keystore '${keystore.path}' could not be opened with $storePasswordInput " +
+                        "from ${storePassword.source.description}",
+                    "The file exists, so verify the store password and keystore format. " +
+                        "Environment variables override local.properties.",
+                )
+            }
+        }
+
+        if (!store.containsAlias(alias.value)) {
+            return SigningIssue(
+                "Alias '${alias.value}' from ${alias.source.description} was not found in " +
+                    "keystore '${keystore.path}'",
+                "${aliases(store)} Check $aliasInput.",
+            )
+        }
+        if (!store.isKeyEntry(alias.value)) {
+            return SigningIssue(
+                "Alias '${alias.value}' exists in keystore '${keystore.path}' but is not a private-key entry",
+                "Choose the alias that owns the Android signing private key.",
+            )
+        }
+        if (store.getCertificate(alias.value) == null) {
+            return SigningIssue(
+                "Alias '${alias.value}' in keystore '${keystore.path}' has no signing certificate",
+                "Use a private-key entry that includes its certificate chain.",
+            )
+        }
+
+        val key = try {
+            store.getKey(alias.value, keyChars)
+        } catch (_: Exception) {
+            return SigningIssue(
+                "$keyPasswordInput from ${keyPassword.source.description} did not unlock private " +
+                    "key alias '${alias.value}' in '${keystore.path}'",
+                if (keyPassword.source == SigningValueSource.DEFAULT) {
+                    "$keyPasswordInput was omitted, so the store password was tried. Set $keyPasswordInput when the key uses a different password."
+                } else {
+                    "Check $keyPasswordInput. Environment variables override local.properties."
+                },
+            )
+        }
+        if (key !is PrivateKey) {
+            return SigningIssue(
+                "Alias '${alias.value}' in keystore '${keystore.path}' does not contain a private signing key",
+                "Choose the Android application signing key alias.",
+            )
+        }
+        return null
+    } finally {
+        storeChars.fill('\u0000')
+        keyChars.fill('\u0000')
+    }
+}
 
 internal fun Project.configureSigningConventions(
     android: ApplicationExtension,
     convention: AndroidSigningConvention,
 ) {
     val local = signingProperties()
-    val keystorePath = signingSetting(local, convention.keystorePathInput)?.takeIf { it.isNotBlank() }
+    val keystorePath = signingSetting(local, convention.keystorePathInput)
+        ?.takeIf { it.value.isNotBlank() }
         ?: return
 
-    require(!gradle.startParameter.isConfigurationCacheRequested) {
-        "Registered Android signing requires --no-configuration-cache to avoid persisting signing credentials"
+    if (gradle.startParameter.isConfigurationCacheRequested) {
+        reportSigningUnavailable(
+            convention,
+            SigningIssue(
+                "registered signing is disabled while Gradle configuration cache is enabled",
+                "Disable configuration cache for signed local builds with --no-configuration-cache.",
+            ),
+        )
+        return
     }
-    val keystore = rootProject.file(keystorePath)
-    require(keystore.isFile) {
-        "${convention.keystorePathInput} must reference an existing keystore"
-    }
-    val storePassword = signingSetting(local, convention.keystorePasswordInput)
-    require(!storePassword.isNullOrBlank()) {
-        "Set ${convention.keystorePasswordInput} when ${convention.keystorePathInput} is set"
-    }
-    val alias = signingSetting(local, convention.keyAliasInput)
-        ?.takeIf { it.isNotBlank() } ?: convention.defaultAlias
-    val keyPassword = signingSetting(local, convention.keyPasswordInput)
-        ?.takeIf { it.isNotBlank() } ?: storePassword
 
-    validateSigningKey(
+    val keystore = rootProject.file(keystorePath.value)
+    if (!keystore.isFile) {
+        reportSigningUnavailable(
+            convention,
+            SigningIssue(
+                "${convention.keystorePathInput} from ${keystorePath.source.description} points to " +
+                    "missing file '${keystore.path}'",
+                "Run local signing setup again or correct ${convention.keystorePathInput}.",
+            ),
+        )
+        return
+    }
+
+    val storePassword = signingSetting(local, convention.keystorePasswordInput)
+    if (storePassword == null || storePassword.value.isBlank()) {
+        reportSigningUnavailable(
+            convention,
+            SigningIssue(
+                "${convention.keystorePasswordInput} is missing while " +
+                    "${convention.keystorePathInput} points to '${keystore.path}'",
+                "Set ${convention.keystorePasswordInput} in the environment or ignored local.properties.",
+            ),
+        )
+        return
+    }
+
+    val alias = signingSetting(local, convention.keyAliasInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: SigningSetting(convention.defaultAlias, SigningValueSource.DEFAULT)
+    val keyPassword = signingSetting(local, convention.keyPasswordInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: SigningSetting(storePassword.value, SigningValueSource.DEFAULT)
+
+    val issue = inspectSigningKey(
         keystore = keystore,
         alias = alias,
         storePassword = storePassword,
@@ -65,13 +257,17 @@ internal fun Project.configureSigningConventions(
         aliasInput = convention.keyAliasInput,
         keyPasswordInput = convention.keyPasswordInput,
     )
+    if (issue != null) {
+        reportSigningUnavailable(convention, issue)
+        return
+    }
 
     val registered = android.signingConfigs.findByName("registered")
         ?: android.signingConfigs.create("registered")
     registered.storeFile = keystore
-    registered.storePassword = storePassword
-    registered.keyAlias = alias
-    registered.keyPassword = keyPassword
+    registered.storePassword = storePassword.value
+    registered.keyAlias = alias.value
+    registered.keyPassword = keyPassword.value
 
     if (convention.signDebug) {
         android.buildTypes.named("debug") { signingConfig = registered }
@@ -96,37 +292,5 @@ internal fun Project.configureSigningConventions(
                 extendsFrom(configurations.getByName("debug$scope"))
             }
         }
-    }
-}
-
-private fun validateSigningKey(
-    keystore: java.io.File,
-    alias: String,
-    storePassword: String,
-    keyPassword: String,
-    storePasswordInput: String,
-    aliasInput: String,
-    keyPasswordInput: String,
-) {
-    val storeChars = storePassword.toCharArray()
-    val keyChars = keyPassword.toCharArray()
-    try {
-        val store = try {
-            KeyStore.getInstance(keystore, storeChars)
-        } catch (_: Exception) {
-            throw GradleException("Cannot open signing keystore; check $storePasswordInput and the keystore format")
-        }
-        require(store.isKeyEntry(alias) && store.getCertificate(alias) != null) {
-            "$aliasInput must identify a private signing key with a certificate"
-        }
-        val key = try {
-            store.getKey(alias, keyChars)
-        } catch (_: Exception) {
-            throw GradleException("Cannot unlock signing key; check $keyPasswordInput (defaults to the store password)")
-        }
-        require(key is PrivateKey) { "$aliasInput must identify a private signing key" }
-    } finally {
-        storeChars.fill('\u0000')
-        keyChars.fill('\u0000')
     }
 }

@@ -1,7 +1,11 @@
 package com.apexfission.release
 
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.security.KeyStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,6 +19,80 @@ class AndroidApplicationConventionTest {
         assertTrue(signing.signDebug)
         assertTrue(signing.signRelease)
         assertFalse(signing.createSignedDebug)
+    }
+
+    @Test fun `signing validation identifies a wrong store password without throwing`() {
+        val file = Files.createTempFile("signing-", ".jks").toFile()
+        try {
+            val password = "correct-password".toCharArray()
+            KeyStore.getInstance("JKS").apply {
+                load(null, password)
+                FileOutputStream(file).use { store(it, password) }
+            }
+            val issue = inspectSigningKey(
+                keystore = file,
+                alias = SigningSetting("release", SigningValueSource.DEFAULT),
+                storePassword = SigningSetting("wrong-password", SigningValueSource.LOCAL_PROPERTIES),
+                keyPassword = SigningSetting("wrong-password", SigningValueSource.DEFAULT),
+                storePasswordInput = "ANDROID_KEYSTORE_PASSWORD",
+                aliasInput = "ANDROID_KEY_ALIAS",
+                keyPasswordInput = "ANDROID_KEY_PASSWORD",
+            )
+            assertNotNull(issue)
+            assertTrue(issue!!.summary.contains("ANDROID_KEYSTORE_PASSWORD from local.properties"))
+            assertTrue(issue.summary.contains("did not unlock"))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test fun `signing validation reports the missing alias and available aliases`() {
+        val file = Files.createTempFile("signing-", ".jks").toFile()
+        try {
+            val password = "fixture-password".toCharArray()
+            KeyStore.getInstance("JKS").apply {
+                load(null, password)
+                FileOutputStream(file).use { store(it, password) }
+            }
+            val issue = inspectSigningKey(
+                keystore = file,
+                alias = SigningSetting("missing-alias", SigningValueSource.ENVIRONMENT),
+                storePassword = SigningSetting("fixture-password", SigningValueSource.ENVIRONMENT),
+                keyPassword = SigningSetting("fixture-password", SigningValueSource.DEFAULT),
+                storePasswordInput = "ANDROID_KEYSTORE_PASSWORD",
+                aliasInput = "ANDROID_KEY_ALIAS",
+                keyPasswordInput = "ANDROID_KEY_PASSWORD",
+            )
+            assertNotNull(issue)
+            assertTrue(issue!!.summary.contains("missing-alias"))
+            assertTrue(issue.summary.contains("environment variable"))
+            assertTrue(issue.guidance.orEmpty().contains("contains no aliases"))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test fun `signing validation distinguishes an unreadable keystore file`() {
+        val file = Files.createTempFile("signing-", ".txt").toFile()
+        try {
+            file.writeText("not a keystore")
+            val issue = inspectSigningKey(
+                keystore = file,
+                alias = SigningSetting("release", SigningValueSource.DEFAULT),
+                storePassword = SigningSetting("fixture-password", SigningValueSource.LOCAL_PROPERTIES),
+                keyPassword = SigningSetting("fixture-password", SigningValueSource.DEFAULT),
+                storePasswordInput = "ANDROID_KEYSTORE_PASSWORD",
+                aliasInput = "ANDROID_KEY_ALIAS",
+                keyPasswordInput = "ANDROID_KEY_PASSWORD",
+            )
+            assertNotNull(issue)
+            assertTrue(
+                issue!!.summary.contains("not a readable JKS or PKCS12") ||
+                    issue.summary.contains("could not be opened"),
+            )
+        } finally {
+            file.delete()
+        }
     }
 
     @Test fun `endpoint templates can reference other configured properties`() {
