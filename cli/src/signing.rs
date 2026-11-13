@@ -531,6 +531,24 @@ fn signing_property_line(line: &str) -> bool {
     })
 }
 
+fn local_properties_path(value: &str) -> String {
+    let (value, windows_path) = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        (format!(r"\\{rest}"), true)
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        (rest.to_owned(), true)
+    } else {
+        let windows_drive = value.as_bytes().get(1) == Some(&b':')
+            && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        let unc = value.starts_with(r"\\");
+        (value.to_owned(), windows_drive || unc)
+    };
+    if windows_path {
+        value.replace('\\', "/")
+    } else {
+        value
+    }
+}
+
 fn escape_property_value(value: &str) -> String {
     let mut escaped = String::new();
     for ch in value.chars() {
@@ -583,7 +601,7 @@ fn local_properties_content(existing: &str, passwords: &SigningPasswords) -> Res
     lines.push(LOCAL_PROPERTIES_BEGIN.into());
     lines.push(format!(
         "ANDROID_KEYSTORE_PATH={}",
-        escape_property_value(&passwords.keystore)
+        local_properties_path(&passwords.keystore)
     ));
     lines.push(format!(
         "ANDROID_KEYSTORE_PASSWORD={}",
