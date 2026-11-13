@@ -33,10 +33,12 @@ pub(super) fn new() -> io::Result<WindowsTerminal> {
         std::env::var("TERMINAL_EMULATOR").ok().as_deref(),
         std::env::var("ANDROID_REPO_SETUP_NO_MOUSE").ok().as_deref(),
     ) {
-        // Clear both console and terminal-emulator tracking left by a previous
-        // run. On Windows QueueableCommand uses WinAPI for this command, so
-        // explicitly send the ANSI reset as well.
-        backend.output.queue(event::DisableMouseCapture)?;
+        // Clear terminal-emulator mouse protocols before the render loop starts.
+        // Do not call Crossterm's native DisableMouseCapture here: on Windows
+        // Crossterm has not initialized its saved console modes until raw mode
+        // starts, and the premature native command fails with
+        // "Initial console modes not set". Native mouse state is managed later
+        // by the backend after console initialization.
         write_mouse_reset(&mut backend.output)?;
         backend.output.flush()?;
     }
