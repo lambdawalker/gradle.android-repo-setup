@@ -376,7 +376,7 @@ pub(crate) fn prepare(
 ) -> Result<BTreeMap<String, Asset>> {
     let selected = crate::discovery::module(root, module)?;
     ensure!(
-        selected.selected && selected.kind == crate::discovery::Kind::Library,
+        selected.selected && selected.kind.is_library(),
         "Module is not a selected library"
     );
     let head = git(root, &["rev-parse", "HEAD"])?;

@@ -327,10 +327,69 @@ pub(super) fn resolve_contract(
     Ok(())
 }
 
+fn verify_jvm_variants(metadata: &serde_json::Value, contract: &VerificationConfig) -> Result<()> {
+    let variants = metadata["variants"]
+        .as_array()
+        .context("Missing Gradle variants")?;
+    let mut usages = HashSet::new();
+    for variant in variants.iter().filter(|variant| {
+        variant["attributes"]["org.gradle.category"] == "library"
+            && matches!(
+                variant["attributes"]["org.gradle.usage"].as_str(),
+                Some("java-api" | "java-runtime")
+            )
+    }) {
+        let attrs = &variant["attributes"];
+        usages.insert(attrs["org.gradle.usage"].as_str().unwrap());
+        ensure!(
+            match attrs.get("org.jetbrains.kotlin.platform.type") {
+                Some(platform) => platform == "jvm",
+                None => !contract.require_kotlin_stdlib,
+            },
+            "Unexpected Gradle JVM platform"
+        );
+        ensure!(
+            attrs["org.gradle.jvm.version"]
+                .as_u64()
+                .is_some_and(|version| version > 0
+                    && contract
+                        .jvm_version
+                        .is_none_or(|expected| version == u64::from(expected))),
+            "Unexpected Gradle JVM target"
+        );
+        let deps = variant["dependencies"].as_array();
+        ensure!(
+            !contract.require_kotlin_stdlib
+                || deps.is_some_and(|deps| deps
+                    .iter()
+                    .any(|dep| dep["group"] == "org.jetbrains.kotlin"
+                        && dep["module"] == "kotlin-stdlib")),
+            "Kotlin standard library missing from Gradle variant"
+        );
+        if let Some(deps) = deps {
+            ensure!(
+                !deps.iter().any(|dep| contract
+                    .forbidden_dependency_group_prefixes
+                    .iter()
+                    .any(|prefix| dep["group"].as_str().unwrap_or("").starts_with(prefix))),
+                "Forbidden dependency group in Gradle metadata"
+            );
+        }
+    }
+    ensure!(
+        usages.contains("java-api") && usages.contains("java-runtime"),
+        "Missing JVM API/runtime library variants"
+    );
+    Ok(())
+}
+
 pub(super) fn verify_module_dependencies(
     metadata: &serde_json::Value,
     contract: &VerificationConfig,
 ) -> Result<()> {
+    if contract.packaging == Packaging::Jar {
+        verify_jvm_variants(metadata, contract)?;
+    }
     if contract.required_api_dependencies.is_empty() {
         return Ok(());
     }
@@ -372,6 +431,38 @@ pub(super) fn verify_pom_dependencies(
     root: roxmltree::Node<'_, '_>,
     contract: &VerificationConfig,
 ) -> Result<()> {
+    let dependencies: Vec<_> = root
+        .children()
+        .filter(|node| node.has_tag_name("dependencies"))
+        .flat_map(|node| node.children())
+        .filter(|node| node.has_tag_name("dependency"))
+        .collect();
+    let mut stdlib = false;
+    for dep in dependencies {
+        let text = |key| {
+            dep.children()
+                .find(|node| node.has_tag_name(key))
+                .and_then(|node| node.text())
+        };
+        ensure!(
+            !contract
+                .forbidden_dependency_group_prefixes
+                .iter()
+                .any(|prefix| text("groupId").unwrap_or("").starts_with(prefix)),
+            "Forbidden dependency group in POM"
+        );
+        if text("groupId") == Some("org.jetbrains.kotlin")
+            && text("artifactId") == Some("kotlin-stdlib")
+            && matches!(text("scope").unwrap_or("compile"), "compile" | "runtime")
+            && text("optional").unwrap_or("false") == "false"
+        {
+            stdlib = true;
+        }
+    }
+    ensure!(
+        !contract.require_kotlin_stdlib || stdlib,
+        "Kotlin standard library dependency missing from POM"
+    );
     for pin in &contract.required_api_dependencies {
         let dependencies: Vec<_> = root
             .children()
@@ -467,4 +558,199 @@ pub(super) fn verify_published_dependencies(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod jvm_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn contract() -> VerificationConfig {
+        serde_yaml_ng::from_str("packaging: jar\nclass_prefix: com/example/\nbytecode_major: 55\njvm_version: 11\nrequired_api_artifacts: []\nrequire_kotlin_stdlib: true\nforbidden_dependency_group_prefixes: [androidx.compose]\n").unwrap()
+    }
+
+    fn metadata() -> serde_json::Value {
+        serde_json::json!({"component":{"group":"g","module":"a","version":"v"},"variants":[
+            {"attributes":{"org.gradle.category":"library","org.gradle.usage":"java-api","org.gradle.jvm.version":11,"org.jetbrains.kotlin.platform.type":"jvm"},"dependencies":[{"group":"org.jetbrains.kotlin","module":"kotlin-stdlib"}]},
+            {"attributes":{"org.gradle.category":"library","org.gradle.usage":"java-runtime","org.gradle.jvm.version":11,"org.jetbrains.kotlin.platform.type":"jvm"},"dependencies":[{"group":"org.jetbrains.kotlin","module":"kotlin-stdlib"}]},
+            {"attributes":{"org.gradle.category":"documentation","org.gradle.usage":"java-runtime"}}
+        ]})
+    }
+
+    #[test]
+    fn jvm_variants_enforce_target_platform_dependencies_and_both_usages() {
+        let contract = contract();
+        assert!(verify_module_dependencies(&metadata(), &contract).is_ok());
+        for field in [
+            "org.gradle.jvm.version",
+            "org.jetbrains.kotlin.platform.type",
+            "org.gradle.usage",
+        ] {
+            let mut invalid = metadata();
+            invalid["variants"][0]["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                verify_module_dependencies(&invalid, &contract).is_err(),
+                "{field}"
+            );
+        }
+        for deps in [
+            serde_json::json!([]),
+            serde_json::json!([{"group":"org.jetbrains.kotlin","module":"kotlin-stdlib"},{"group":"androidx.compose.runtime","module":"runtime"}]),
+        ] {
+            let mut invalid = metadata();
+            invalid["variants"][1]["dependencies"] = deps;
+            assert!(verify_module_dependencies(&invalid, &contract).is_err());
+        }
+    }
+
+    #[test]
+    fn plain_java_variants_allow_absent_kotlin_platform_but_reject_wrong_platforms() {
+        let mut contract = contract();
+        contract.require_kotlin_stdlib = false;
+        let mut java = metadata();
+        for variant in java["variants"].as_array_mut().unwrap().iter_mut().take(2) {
+            variant["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("org.jetbrains.kotlin.platform.type");
+            variant.as_object_mut().unwrap().remove("dependencies");
+        }
+        assert!(verify_module_dependencies(&java, &contract).is_ok());
+        contract.require_kotlin_stdlib = true;
+        assert!(verify_module_dependencies(&java, &contract).is_err());
+        contract.require_kotlin_stdlib = false;
+        for platform in [
+            serde_json::json!("native"),
+            serde_json::json!("androidJvm"),
+            serde_json::json!(null),
+        ] {
+            java["variants"][0]["attributes"]["org.jetbrains.kotlin.platform.type"] = platform;
+            assert!(verify_module_dependencies(&java, &contract).is_err());
+        }
+    }
+
+    #[test]
+    fn jar_checks_classes_bytecode_crc_and_primary_extension() -> Result<()> {
+        let contract = contract();
+        assert_eq!(contract.suffixes()[1], ".jar");
+        for (name, major, valid) in [
+            ("com/example/Math.class", 55, true),
+            ("com/other/Math.class", 55, false),
+            ("com/example/Math.class", 61, false),
+        ] {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer.start_file(name, zip::write::SimpleFileOptions::default())?;
+            writer.write_all(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, major])?;
+            let bytes = writer.finish()?.into_inner();
+            assert_eq!(
+                verify(&bytes, ".jar", "g", "a", "v", true, &contract).is_ok(),
+                valid
+            );
+            assert!(verify(&bytes, ".aar", "g", "a", "v", true, &contract).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jar_contents_ignore_manifest_and_reject_duplicate_entries() -> Result<()> {
+        let build = |manifest: &[u8]| -> Result<Vec<u8>> {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer.start_file(
+                "META-INF/MANIFEST.MF",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )?;
+            writer.write_all(manifest)?;
+            writer.start_file("source.kt", zip::write::SimpleFileOptions::default())?;
+            writer.write_all(b"source")?;
+            Ok(writer.finish()?.into_inner())
+        };
+        assert_eq!(
+            jar_contents(&build(b"one")?)?,
+            jar_contents(&build(b"two")?)?
+        );
+        assert_eq!(jar_contents(&build(b"one")?)?.len(), 1);
+        // Mutate the manifest payload without changing its stored CRC.
+        let mut corrupt = build(b"unique-manifest")?;
+        let offset = corrupt
+            .windows(b"unique-manifest".len())
+            .position(|part| part == b"unique-manifest")
+            .unwrap();
+        corrupt[offset] ^= 1;
+        assert!(jar_contents(&corrupt).is_err());
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["a.kt", "b.kt"] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default())?;
+            writer.write_all(b"source")?;
+        }
+        let mut duplicate = writer.finish()?.into_inner();
+        for offset in 0..duplicate.len() - 3 {
+            if &duplicate[offset..offset + 4] == b"b.kt" {
+                duplicate[offset] = b'a';
+            }
+        }
+        assert!(jar_contents(&duplicate).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn java_only_sources_are_accepted_for_jvm_but_not_aar() -> Result<()> {
+        for name in ["Geometry.java", "com/example/Geometry.java"] {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer.start_file(name, zip::write::SimpleFileOptions::default())?;
+            writer.write_all(b"class Geometry {}")?;
+            let bytes = writer.finish()?.into_inner();
+            assert!(verify(&bytes, "-sources.jar", "g", "a", "v", true, &contract()).is_ok());
+            assert!(verify(
+                &bytes,
+                "-sources.jar",
+                "g",
+                "a",
+                "v",
+                true,
+                &VerificationConfig::default()
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_snapshots_remain_aar_without_jvm_fields() -> Result<()> {
+        let contract = VerificationConfig::default();
+        let mut snapshot = serde_json::to_value(&contract)?;
+        for key in [
+            "packaging",
+            "jvm_version",
+            "require_kotlin_stdlib",
+            "forbidden_dependency_group_prefixes",
+        ] {
+            snapshot.as_object_mut().unwrap().remove(key);
+        }
+        let record = serde_json::json!({"verification_schema":1,"verification":snapshot});
+        assert_eq!(
+            reserved_verification(Path::new("."), &record)?.suffixes()[1],
+            ".aar"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pom_jvm_policy_checks_packaging_stdlib_and_compose() -> Result<()> {
+        let contract = contract();
+        for (deps, valid) in [
+            ("<dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency>",true),
+            ("",false),
+            ("<dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency><dependency><groupId>androidx.compose.runtime</groupId><artifactId>runtime</artifactId></dependency>",false),
+            ("<dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><scope>test</scope></dependency>",false)
+        ] {
+            let xml = format!("<project><dependencies>{deps}</dependencies></project>");
+            let document = roxmltree::Document::parse(&xml)?;
+            assert_eq!(verify_pom_dependencies(document.root_element(),&contract).is_ok(),valid);
+        }
+        Ok(())
+    }
 }

@@ -438,7 +438,7 @@ fn artifact_base(url: &str, group: &str, artifact: &str, version: &str) -> Strin
 }
 
 fn artifacts_exist(base: &str, fetch: &Fetch<'_>) -> Result<bool> {
-    for suffix in SUFFIXES {
+    for suffix in SUFFIXES.into_iter().chain([".jar"]) {
         if fetch(&format!("{base}{suffix}"), true)?.is_some() {
             return Ok(true);
         }
@@ -1161,6 +1161,11 @@ pub(super) fn finalize(
     fetch_tags(root)?;
     let (journal, pending_oid) =
         read_reservation(root, module, version, destination, scope(destination))?;
+    ensure!(
+        crate::confirmation::publication_suffixes(root, &journal)?
+            == crate::confirmation::publication_suffixes(root, &record)?,
+        "Confirmation changed primary artifact packaging"
+    );
     let mut expected = journal.clone();
     expected["phase"] = json!("confirmed-public");
     if destination == "jitpack" {
@@ -1307,6 +1312,19 @@ pub(super) fn abort_unconfirmed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_jvm_jar_publication_blocks_reallocation() -> Result<()> {
+        assert!(artifacts_exist(
+            "https://example.invalid/artifact",
+            &|url, _| {
+                Ok(url
+                    .ends_with("artifact.jar")
+                    .then(|| b"already published".to_vec()))
+            }
+        )?);
+        Ok(())
+    }
 
     #[test]
     fn archived_coordinates_remain_valid_after_publication_coordinates_change() -> Result<()> {
@@ -1794,7 +1812,7 @@ mod tests {
         let server = std::thread::spawn(move || -> Result<Vec<String>> {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut paths = Vec::new();
-            while paths.len() < SUFFIXES.len() + 2 && Instant::now() < deadline {
+            while paths.len() < SUFFIXES.len() + 3 && Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1853,10 +1871,13 @@ mod tests {
         );
         let paths = server.join().expect("mock server panicked")?;
         result?;
-        assert_eq!(paths.len(), SUFFIXES.len() + 2);
+        assert_eq!(paths.len(), SUFFIXES.len() + 3);
         assert_eq!(paths.first(), paths.last());
         assert!(paths[0].starts_with("/api/builds/"));
-        for (path, suffix) in paths[1..paths.len() - 1].iter().zip(SUFFIXES) {
+        for (path, suffix) in paths[1..paths.len() - 1]
+            .iter()
+            .zip(SUFFIXES.into_iter().chain([".jar"]))
+        {
             assert!(path.ends_with(suffix), "{path}");
         }
         Ok(())

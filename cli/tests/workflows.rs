@@ -871,3 +871,70 @@ fn explicit_shared_astro_uses_node_even_while_legacy_zola_files_remain() {
     assert!(workflow.contains("actions/setup-node@v7"));
     assert!(!workflow.contains("Install pinned Zola"));
 }
+
+#[test]
+fn root_jvm_workflows_use_scoped_jvm_tasks_without_android_requirements() {
+    let root = fixture();
+    fs::write(root.path().join(".project/setup/config.yaml"), "repository: example/coordinates\ntooling_ref: v0.1.25\nmodules: {root: Coordinates}\nandroid_modules:\n  root: {path: ':', directory: '.', kind: jvm-library}\nworkflows: {title: Coordinates, java_version: 17}\n").unwrap();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let workflows = root.path().join(".github/workflows");
+    for entry in fs::read_dir(&workflows).unwrap() {
+        let entry = entry.unwrap();
+        let text = fs::read_to_string(entry.path()).unwrap();
+        for android in [
+            "lintRelease",
+            "assembleRelease",
+            "testDebugUnitTest",
+            "verifyImportDocs",
+            "setup-android",
+        ] {
+            assert!(
+                !text.contains(android),
+                "{} contains {android}",
+                entry.path().display()
+            );
+        }
+    }
+    assert!(fs::read_to_string(workflows.join("unit-tests.yml"))
+        .unwrap()
+        .contains("./gradlew :test"));
+    assert!(
+        fs::read_to_string(workflows.join("verify-release-tooling-root.yml"))
+            .unwrap()
+            .contains(":build :publishAllPublicationsToVerificationRepository")
+    );
+    assert!(workflows.join("publish-root.yml").is_file());
+    assert!(!workflows.join("verify-localization.yml").exists());
+    assert!(!workflows.join("build-signed-root-apk.yml").exists());
+}
+
+#[test]
+fn mixed_workflows_scope_jvm_and_android_checks_by_selected_module() {
+    let root = fixture();
+    fs::write(root.path().join(".project/setup/config.yaml"), "repository: example/mixed\ntooling_ref: v0.1.25\nmodules: {jvm: JVM, android: Android}\nandroid_modules:\n  jvm: {path: ':libs:jvm', directory: 'jvm', kind: jvm-library}\n  android: {path: ':android', directory: android, kind: library}\nworkflows: {title: Mixed}\n").unwrap();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let workflows = root.path().join(".github/workflows");
+    let tests = fs::read_to_string(workflows.join("unit-tests.yml")).unwrap();
+    assert!(tests.contains(":android:testDebugUnitTest :libs:jvm:test"));
+    let publish = fs::read_to_string(workflows.join("publish-library.yml")).unwrap();
+    assert!(publish.contains("case \"$RELEASE_MODULE\" in"));
+    assert!(publish.contains("jvm) checks=(\"$MODULE_PATH:test\" \"$MODULE_PATH:build\")"));
+    let verify = fs::read_to_string(workflows.join("verify-release-tooling-jvm.yml")).unwrap();
+    assert!(verify.contains(":libs:jvm:test :libs:jvm:build"));
+    assert!(!verify.contains("lintRelease"));
+    assert!(
+        fs::read_to_string(workflows.join("verify-release-tooling-android.yml"))
+            .unwrap()
+            .contains(":android:lintRelease")
+    );
+}

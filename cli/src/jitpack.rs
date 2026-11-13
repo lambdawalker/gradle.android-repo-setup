@@ -46,7 +46,7 @@ pub(crate) fn build(root: &Path) -> Result<()> {
     };
     let selected = crate::discovery::module(root, module)?;
     ensure!(
-        selected.selected && selected.kind == crate::discovery::Kind::Library,
+        selected.selected && selected.kind.is_library(),
         "Module is not a selected library"
     );
     crate::assets::prepare(root, module, Some(source))?;

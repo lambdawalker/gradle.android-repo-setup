@@ -127,6 +127,8 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
     } else {
         serde_yaml_ng::from_value(config["fingerprint_excluded_properties"][module].clone())?
     };
+    let root_jvm =
+        config["android_modules"][module]["kind"] == "jvm-library" && matches!(directory, "." | "");
     let local = [
         "src/main",
         "build.gradle.kts",
@@ -135,7 +137,10 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         "consumer-rules.pro",
         "proguard-rules.pro",
     ]
-    .map(|path| format!("{}/{path}", directory.trim_end_matches('/')));
+    .into_iter()
+    .filter(|path| !root_jvm || *path != "docs")
+    .map(|path| format!("{}/{path}", directory.trim_end_matches('/')))
+    .collect::<Vec<_>>();
     let mut args = vec!["ls-tree", "-r", source, "--"];
     args.extend(local.iter().map(String::as_str));
     args.extend([
@@ -149,13 +154,15 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
         "scripts",
         "publishing",
         "docs/agents",
-        "docs/releases.md",
         ".project/setup/config.yaml",
         ".project/verification",
         ".project/setup/repositories.yml",
         ".github/workflows/publish-library.yml",
         ".github/workflows/publish-jitpack.yml",
     ]);
+    if !root_jvm {
+        args.push("docs/releases.md");
+    }
     let groovy = format!("{}/build.gradle", directory.trim_end_matches('/'));
     if !config["android_modules"].is_null() {
         args.extend([
@@ -197,6 +204,41 @@ pub(crate) fn fingerprint(root: &Path, module: &str, source: &str) -> Result<Str
 #[cfg(test)]
 mod module_tests {
     use super::*;
+    #[test]
+    fn root_jvm_release_identity_excludes_generated_documentation() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let root = project.path();
+        std::fs::create_dir_all(root.join(".project/setup"))?;
+        std::fs::create_dir_all(root.join("src/main"))?;
+        std::fs::write(
+            root.join(".project/setup/config.yaml"),
+            "android_modules:\n  coordinates: {path: ':', directory: '.', kind: jvm-library}\n",
+        )?;
+        std::fs::write(root.join("src/main/Point.kt"), "class Point")?;
+        std::fs::write(root.join("gradle.properties"), "GROUP=com.example\n")?;
+        git_text(root, &["init", "-b", "main"])?;
+        git_text(root, &["config", "user.name", "Test"])?;
+        git_text(root, &["config", "user.email", "test@example.invalid"])?;
+        let commit = || -> Result<String> {
+            git_text(root, &["add", "."])?;
+            git_text(
+                root,
+                &["-c", "commit.gpgSign=false", "commit", "-m", "fixture"],
+            )?;
+            git_text(root, &["rev-parse", "HEAD"])
+        };
+        let original = fingerprint(root, "coordinates", &commit()?)?;
+        std::fs::create_dir_all(root.join("docs/releases"))?;
+        std::fs::create_dir_all(root.join("docs/es"))?;
+        std::fs::write(root.join("docs/releases/coordinates.json"), "confirmation")?;
+        std::fs::write(root.join("docs/es/index.md"), "translation")?;
+        std::fs::write(root.join("IMPORT.md"), "installation")?;
+        assert_eq!(original, fingerprint(root, "coordinates", &commit()?)?);
+        std::fs::write(root.join("src/main/Point.kt"), "class ChangedPoint")?;
+        assert_ne!(original, fingerprint(root, "coordinates", &commit()?)?);
+        Ok(())
+    }
+
     #[test]
     fn fingerprints_follow_remapped_sources_and_ignore_only_configured_properties() -> Result<()> {
         let temp = tempfile::tempdir()?;
