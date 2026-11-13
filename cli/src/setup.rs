@@ -99,11 +99,15 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
                     .into_iter()
                     .filter(|step| operations.contains(step))
                     .collect::<Vec<_>>();
-                if !signing.is_empty() && !sign_with_config(root, &config, &signing)? {
+                if (!signing.is_empty() || operations.contains(&"local"))
+                    && !sign_with_config(
+                        root,
+                        &config,
+                        &signing,
+                        operations.contains(&"local"),
+                    )?
+                {
                     return Ok(());
-                }
-                if operations.contains(&"local") {
-                    local_signing_with_config(root, &config)?;
                 }
                 return Ok(());
             }
@@ -118,16 +122,21 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
     }
 }
 
-fn sign_with_config(root: &Path, config: &vault::SetupConfig, operations: &[&str]) -> Result<bool> {
+fn sign_with_config(
+    root: &Path,
+    config: &vault::SetupConfig,
+    operations: &[&str],
+    local_gradle: bool,
+) -> Result<bool> {
     let _lock = vault::lock(config, true)?;
     let mut vault = vault::unlock_interactive(config, false)?;
-    signing::run(root, config, &mut vault, operations)
-}
-
-fn local_signing_with_config(root: &Path, config: &vault::SetupConfig) -> Result<bool> {
-    let _lock = vault::lock(config, true)?;
-    let vault = vault::unlock_interactive(config, false)?;
-    signing::configure_local_gradle_signing(root, &vault)
+    if !operations.is_empty() && !signing::run(root, config, &mut vault, operations)? {
+        return Ok(false);
+    }
+    if local_gradle && !signing::configure_local_gradle_signing(root, &vault)? {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn update_workflows(root: &Path) -> Result<()> {
@@ -190,10 +199,14 @@ pub(crate) fn run(root: &Path) -> Result<()> {
             .into_iter()
             .filter(|step| operations.contains(step))
             .collect::<Vec<_>>();
-        if !signing.is_empty() && !sign_with_config(root, &config, &signing)? {
-            return Ok(());
-        }
-        if operations.contains(&"local") && !local_signing_with_config(root, &config)? {
+        if (!signing.is_empty() || operations.contains(&"local"))
+            && !sign_with_config(
+                root,
+                &config,
+                &signing,
+                operations.contains(&"local"),
+            )?
+        {
             return Ok(());
         }
         if operations.contains(&"publishing") {
