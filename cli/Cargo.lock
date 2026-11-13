@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "android-repo-docs"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "clap",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "android-repo-setup"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "android-repo-docs",
  "anyhow",
