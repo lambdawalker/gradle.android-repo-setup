@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.apexfission"
-version = "0.1.21"
+version = "0.1.22"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
