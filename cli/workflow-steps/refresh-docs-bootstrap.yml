@@ -1,0 +1,24 @@
+      - name: Refresh adopted documentation bootstrap
+        run: |
+          if [[ -f .project/docs/bootstrap.ps1 ]]; then
+            pin=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          pattern = r"^(?:tooling_ref|'tooling_ref'|\"tooling_ref\")[ \t]*:[ \t]*([a-z0-9.]+|'[a-z0-9.]+'|\"[a-z0-9.]+\")(?:[ \t]+#.*|[ \t]*)$"
+          pins = re.findall(pattern, Path('.project/docs/config.yaml').read_text(), flags=re.M)
+          if len(pins) != 1:
+              raise SystemExit('Expected exactly one documentation tooling_ref')
+          print(pins[0].strip("'\""))
+          PY
+            )
+            if [[ "$pin" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              ref=(--tag "$pin")
+            elif [[ "$pin" =~ ^[0-9a-f]{40}$ ]]; then
+              ref=(--rev "$pin")
+            else
+              echo "Expected a documentation release tag or full commit SHA" >&2
+              exit 1
+            fi
+            cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git "${ref[@]}" android-repo-docs
+            android-repo-docs bootstrap generate --overwrite
+          fi

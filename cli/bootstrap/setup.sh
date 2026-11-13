@@ -49,4 +49,6 @@ if [ ! -x "$exe" ]; then
 fi
 version=$("$exe" --version)
 case "$pin" in v*) [ "$version" = "android-repo-setup ${pin#v}" ] || { echo 'Cached CLI version mismatch' >&2; exit 1; };; esac
+PATH="$(dirname -- "$exe"):$PATH"
+export PATH
 exec "$exe" --project "$root" "$@"

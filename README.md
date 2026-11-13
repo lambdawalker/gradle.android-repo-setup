@@ -2,7 +2,7 @@
 
 Module discovery and multi-library setup are available in the **0.1.11 source release**: [module selection, independent publishing, and migration guide](docs/module-discovery.md). Run `android-repo-setup` for a first menu of detected libraries/apps, or `android-repo-setup discover` to inspect them without saving.
 
-Gradle builds and publishes Android artifacts. The companion Rust CLI configures the project, manages release reservations, verifies public artifacts, and generates documentation.
+Gradle builds and publishes Android artifacts. The companion `android-repo-setup` CLI configures the project, manages release reservations, and verifies public artifacts. The independent `android-repo-docs` executable maintains documentation, examples, reviewed media, and local sites. See the [standalone documentation guide](docs/standalone-docs.md).
 
 ## Use a published release
 
@@ -478,7 +478,7 @@ Install Zola 0.23.6 on PATH for local builds. Generated Documentation and releas
 
 Canonical English guides live recursively in `docs/agents/`. Reviewed Spanish counterparts live in `docs/es/`; `docs/es/translations.json` maps relative guide names to the SHA-256 of exact English source. Missing or stale translations visibly fall back to English at the selected documentation revision. Release archives and optional translation trees are read as data; historical scripts are never run.
 
-The bundled theme in `cli/site-theme/` provides light/dark modes, scoped search, responsive sidebar and on-page contents, version/language selection, source/documentation provenance, raw Markdown and screenshot galleries. Override templates in `sites/templates/` and assets in `sites/static/`. `versions.json` describes the generated scopes; old renderer links and root integration Markdown remain available. Demo Common is the reference integration.
+The bundled theme in `cli/docs/site-theme/` provides light/dark modes, scoped search, responsive sidebar and on-page contents, version/language selection, source/documentation provenance, raw Markdown and screenshot galleries. Override templates in `sites/templates/` and assets in `sites/static/`. `versions.json` describes the generated scopes; old renderer links and root integration Markdown remain available. Demo Common is the reference integration.
 
 
 #### Start a Zola site

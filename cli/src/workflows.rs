@@ -369,6 +369,7 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         }).into_owned();
         ensure!(!rendered.contains("<<@"), "Unresolved placeholder in {name}");
         let mut rendered = crate::publishing::render_workflow(root, template_name, &rendered)?;
+        rendered = documentation_tool_workflow(root, template_name, &rendered)?;
         if config.android_modules.is_some() {
             if template_name == "publish-demo-common.yml" { rendered = rendered.replacen("name: Publish\n", &format!("name: Publish {module}\n"),1); }
             if template_name == "build-signed-demo-apk.yml" { rendered = rendered.replacen("name: Build signed APK", &format!("name: Build signed {app} APK"),1); }
@@ -602,4 +603,70 @@ fn replace(path: &Path, content: &str) -> Result<()> {
 
 fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// Opted-in repositories can use documentation without installing setup in site jobs.
+fn documentation_tool_workflow(root: &Path, template: &str, rendered: &str) -> Result<String> {
+    let path = root.join(".project/docs/config.yaml");
+    if !path.is_file() {
+        return Ok(rendered.to_owned());
+    }
+    let config: serde_yaml_ng::Value = serde_yaml_ng::from_slice(&fs::read(path)?)?;
+    let pin = config["tooling_ref"]
+        .as_str()
+        .context("Missing documentation tooling_ref")?;
+    ensure!(
+        Regex::new(r"\A(?:v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})\z")?.is_match(pin),
+        "Invalid documentation tooling_ref"
+    );
+    let flag = if pin.starts_with('v') {
+        "--tag"
+    } else {
+        "--rev"
+    };
+    let install = format!("cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git {flag} {pin} android-repo-docs");
+    let mut output = rendered.to_owned();
+    if template == "documentation.yml" {
+        let start = output
+            .find("      - name: Install pinned Rust tooling")
+            .context("Missing documentation install step")?;
+        let old_end = "      - run: android-repo-setup module_release verify\n";
+        let end = output
+            .find(old_end)
+            .context("Missing documentation verification step")?
+            + old_end.len();
+        output.replace_range(start..end, &format!("      - name: Install pinned documentation tooling\n        run: {install}\n      - run: android-repo-docs check\n"));
+        output = output.replace("android-repo-setup build_docs", "android-repo-docs build");
+        output = output.replace(
+            "          fetch-depth: 0\n",
+            "          fetch-depth: 0\n          lfs: true\n",
+        );
+    } else if ["publish-library.yml", "publish-jitpack.yml"].contains(&template) {
+        let setup_install = "          cargo install --locked --git https://github.com/lambdawalker/gradle.android-repo-setup.git \"${ref[@]}\" android-repo-setup\n";
+        output = output.replace(
+            setup_install,
+            &format!("{setup_install}          {install}\n"),
+        );
+    } else if template == "update-workflows.yml" {
+        output = output.replacen("permissions:\n", &format!("      docs_version:\n        description: Documentation tool tag or full commit SHA (blank preserves current pin)\n        required: false\n        default: '{pin}'\npermissions:\n"), 1);
+        let generation = "      - env:\n          TOOLING_REF: ${{ inputs.version }}\n";
+        output = output.replacen(
+            generation,
+            &format!(
+                "{}{generation}",
+                include_str!("../workflow-steps/update-docs-pin.yml")
+            ),
+            1,
+        );
+        let refresh = "      - name: Create review patch\n";
+        output = output.replace(
+            refresh,
+            &format!(
+                "{}{refresh}",
+                include_str!("../workflow-steps/refresh-docs-bootstrap.yml")
+            ),
+        );
+        output = output.replace("          git diff --cached --binary > workflow-update.patch", "          git add .project/docs/config.yaml\n          if [[ -f .project/docs/bootstrap.ps1 ]]; then\n            git add docs.sh docs.bat .project/docs/bootstrap.ps1 .gitignore\n          fi\n          git diff --cached --binary > workflow-update.patch");
+    }
+    Ok(output)
 }

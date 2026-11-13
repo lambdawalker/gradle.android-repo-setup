@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) const HISTORY: &str = "docs/releases/history";
+pub const HISTORY: &str = "docs/releases/history";
 
 fn confirmed_record<'a>(config: &Config, record: &'a Value) -> Result<&'a str> {
     ensure!(
@@ -89,7 +89,7 @@ fn validate(config: &Config, entry: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_archive(root: &Path, entry: &Value) -> Result<()> {
+pub fn validate_archive(root: &Path, entry: &Value) -> Result<()> {
     validate(&Config::load(root)?, entry)
 }
 
@@ -97,7 +97,7 @@ pub(super) fn route_version(entry: &Value) -> Result<String> {
     archive_name(destinations(entry)?.values().next().unwrap())
 }
 
-pub(crate) fn archive_record(root: &Path, record: &Value) -> Result<PathBuf> {
+pub fn archive_record(root: &Path, record: &Value) -> Result<PathBuf> {
     archive(root, &Config::load(root)?, record)
 }
 
@@ -155,7 +155,7 @@ fn latest_records(root: &Path) -> Result<Vec<Value>> {
     Ok(records)
 }
 
-pub(crate) fn seed(root: &Path) -> Result<()> {
+pub fn seed(root: &Path) -> Result<()> {
     seed_archive(root, &Config::load(root)?)
 }
 
@@ -207,7 +207,7 @@ pub(super) fn verify(root: &Path, config: &Config, catalog: &[Value]) -> Result<
         let entry = entries.get(&(string(&record, "module")?, archive_name(&record)?));
         ensure!(
             entry.and_then(|entry| entry["destinations"].get(target)) == Some(&record),
-            "Latest confirmation missing from archive; run android-repo-setup documentation_history seed"
+            "Latest confirmation missing from archive; run android-repo-docs history seed (legacy: android-repo-setup documentation_history seed)"
         );
     }
     Ok(())
@@ -252,12 +252,24 @@ pub(super) fn installation(entry: &Value, lang: &str) -> Result<String> {
     for (target, record) in destinations(entry)? {
         let mut examples = examples(module, record)?;
         if spanish {
+            let jar =
+                record["sha256"].get(".jar").is_some() && record["sha256"].get(".aar").is_none();
             for (original, replacement) in SPANISH_REPLACEMENTS {
+                let original = if jar {
+                    original.replace("app's", "project's")
+                } else {
+                    (*original).to_owned()
+                };
+                let replacement = if jar {
+                    replacement.replace("de la aplicación", "del proyecto")
+                } else {
+                    (*replacement).to_owned()
+                };
                 ensure!(
-                    examples.contains(original),
+                    examples.contains(&original),
                     "Missing Spanish translation source phrase: {original:?}"
                 );
-                examples = examples.replace(original, replacement);
+                examples = examples.replace(&original, &replacement);
             }
         }
         text.push_str(&format!("\n## {target}\n\n{examples}\n"));
@@ -265,7 +277,7 @@ pub(super) fn installation(entry: &Value, lang: &str) -> Result<String> {
     Ok(text)
 }
 
-pub(crate) fn history(root: &Path, command: &str) -> Result<()> {
+pub fn history(root: &Path, command: &str) -> Result<()> {
     let config = Config::load(root)?;
     if command == "seed" {
         seed_archive(root, &config)?;
@@ -286,5 +298,20 @@ pub(crate) fn history(root: &Path, command: &str) -> Result<()> {
             Ok(())
         }
         _ => bail!("Unknown documentation history operation"),
+    }
+}
+
+#[cfg(test)]
+mod jar_history_tests {
+    use super::*;
+    #[test]
+    fn spanish_jar_history_export_translates_project_instructions() {
+        let entry = json!({"module":"math","version":"1.0.0","destinations":{"maven-central":{"group":"com.example","artifact":"math","version":"1.0.0","sha256":{".jar":"hash"}}}});
+        let text = installation(&entry, "es").unwrap();
+        assert!(text.contains("del proyecto"));
+        assert!(!text.contains("app's"));
+        assert!(!text.contains("project's"));
+        assert!(!text.contains("<type>aar</type>"));
+        assert!(!text.contains("google()"));
     }
 }

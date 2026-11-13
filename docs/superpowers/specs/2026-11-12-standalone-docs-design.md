@@ -1,0 +1,17 @@
+# Standalone Android repository documentation
+
+Approved direction: the user requested a standalone documentation executable and migration of all Android repositories using the setup CLI. Keep packages together in the existing Rust workspace initially.
+
+Create `android-repo-docs` as its own package/library/executable under `cli/docs/`. It must run without the setup executable or signing/environment dependencies. Move site generation, installation guides, archive rendering/validation and theme ownership out of setup. Setup delegates compatibility commands and release finalization through the docs library, retaining publication authority; no duplicate rendering implementation.
+
+Add declarative Kotlin source excerpts, full-source drift hashes, examples and Markdown sections. Keep repository prose in Markdown and mappings in `.project/docs/config.yaml` (schema 1). Checks are read-only; updates are explicit and deterministic. Discover saved selected library roots for init; support Java/Kotlin directories/custom source roots. Parse Kotlin syntax rather than expanding a regular expression; fail on invalid/unsupported syntax rather than silently dropping declarations. This is documentation, not ABI validation.
+
+Move documentation media verification/frame rendering and screenshot-manifest/pixel comparison/provenance to the docs tool. Generic requirements and paths live in config; no Card Detector/Permissions identifiers in engine code. Explicit acceptance is distinct from check/render. Source hashes must catch added/deleted/untracked files, and reviewed accepted images/provenance must not be overwritten by normal checks.
+
+The config includes repository/title/modules metadata so docs can run independently, plus optional source/media/site settings. Existing setup metadata is an allowed fallback for legacy callers. Site builders remain Zola 0.23.6 and repository-owned Astro layouts via a configured argv command; never execute archived scripts. Support `init`, `check`, `update`, `build`, `serve`, plus `imports`, `history`, `sources`, `media` and `screenshots` focused commands.
+
+Generate docs.sh/docs.bat plus a managed PowerShell runtime. Pin docs independently in its config; tagged installs verify checksums/version and source pins build exact commits. Set up tools explicitly in workflows; no implicit PATH reliance. Build/package/test both executables on Linux/Windows/macOS. Existing Gradle plugin pins remain unchanged.
+
+Migrate Carddetector, Demo Common, Permissions (current CLI consumers), plus Auth, YOLO and Coordinates as standalone docs consumers. Signature main has only a README and no source/tooling to migrate. Update open cleanup PRs; create a new tooling PR on v0.1.15 main. Card Detector retains its Astro site design; its root scripts can be eliminated. Permissions removes duplicated example/screenshot mechanics while retaining its actual Android tests. Demo Common gains source documentation checks. Preserve release records, API behavior, translations' manual review semantics and immutable history. The three additional docs consumers keep their existing publishing configuration.
+
+Alternatives considered: second binary in the setup package (still coupled dependency graph); independent repository immediately (unnecessary contract duplication); separate package in existing workspace (chosen). Source documentation is lightweight source analysis; full Dokka output remains a future separate feature.

@@ -565,27 +565,27 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
     for (path, content) in [
         (
             "templates/base.html",
-            include_str!("../../site-theme/templates/base.html"),
+            include_str!("../site-theme/templates/base.html"),
         ),
         (
             "templates/index.html",
-            include_str!("../../site-theme/templates/index.html"),
+            include_str!("../site-theme/templates/index.html"),
         ),
         (
             "templates/page.html",
-            include_str!("../../site-theme/templates/page.html"),
+            include_str!("../site-theme/templates/page.html"),
         ),
         (
             "templates/section.html",
-            include_str!("../../site-theme/templates/section.html"),
+            include_str!("../site-theme/templates/section.html"),
         ),
         (
             "static/docs.css",
-            include_str!("../../site-theme/static/docs.css"),
+            include_str!("../site-theme/static/docs.css"),
         ),
         (
             "static/docs.js",
-            include_str!("../../site-theme/static/docs.js"),
+            include_str!("../site-theme/static/docs.js"),
         ),
     ] {
         write(stage, path, content)?;
@@ -593,7 +593,7 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
     write(
         stage,
         "static/favicon.svg",
-        include_str!("../../site-theme/static/favicon.svg"),
+        include_str!("../site-theme/static/favicon.svg"),
     )?;
     copy_tree(&root.join("sites/templates"), &stage.join("templates"))?;
     copy_tree(&root.join("sites/static"), &stage.join("static"))?;

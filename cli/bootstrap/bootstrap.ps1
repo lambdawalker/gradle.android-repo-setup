@@ -41,5 +41,6 @@ if (!(Test-Path -LiteralPath $exe)) {
 }
 $version = & $exe --version
 if ($LASTEXITCODE -ne 0 -or ($pin.StartsWith('v') -and $version -cne "android-repo-setup $($pin.Substring(1))")) { throw 'Cached CLI version mismatch' }
+$env:PATH = (Split-Path -Parent $exe) + [IO.Path]::PathSeparator + $env:PATH
 & $exe --project $root @args
 exit $LASTEXITCODE

@@ -1,8 +1,9 @@
 //! Declarative project checks replacing consumer-owned validation scripts.
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -14,6 +15,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Config {
     #[serde(default)]
+    #[allow(dead_code)]
     screenshots: BTreeMap<String, Screenshots>,
     #[serde(default)]
     junit: BTreeMap<String, Junit>,
@@ -22,6 +24,7 @@ struct Config {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct Screenshots {
     directory: String,
     scenarios: Vec<String>,
@@ -81,102 +84,12 @@ fn files(root: &Path, extension: &str, output: &mut Vec<PathBuf>) -> Result<()> 
     output.sort();
     Ok(())
 }
+#[cfg(test)]
 fn image_record(directory: &Path, scenarios: &[String]) -> Result<Value> {
-    ensure!(
-        !scenarios.is_empty() && scenarios.iter().collect::<BTreeSet<_>>().len() == scenarios.len(),
-        "Empty or duplicate screenshot scenarios"
-    );
-    let mut images = Vec::new();
-    files(directory, "png", &mut images)?;
-    let mut names = BTreeMap::new();
-    let mut hashes = BTreeMap::new();
-    let mut dimensions = BTreeMap::new();
-    for scenario in scenarios {
-        ensure!(!scenario.is_empty(), "Empty scenario name");
-        let matches: Vec<_> = images
-            .iter()
-            .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .contains(&format!("_{scenario}_"))
-            })
-            .collect();
-        ensure!(
-            matches.len() == 1,
-            "Expected exactly one screenshot for {scenario}, found {}",
-            matches.len()
-        );
-        names.insert(
-            scenario.clone(),
-            matches[0]
-                .strip_prefix(directory)?
-                .to_string_lossy()
-                .replace('\\', "/"),
-        );
-    }
-    ensure!(
-        names.values().collect::<BTreeSet<_>>().len() == images.len()
-            && names.len() == images.len(),
-        "Unexpected or ambiguous screenshot files"
-    );
-    for image in images {
-        let bytes = fs::read(&image)?;
-        ensure!(
-            bytes.len() >= 33 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" && &bytes[12..16] == b"IHDR",
-            "Invalid PNG: {}",
-            image.display()
-        );
-        let width = u32::from_be_bytes(bytes[16..20].try_into()?);
-        let height = u32::from_be_bytes(bytes[20..24].try_into()?);
-        ensure!(width > 0 && height > 0, "Invalid PNG dimensions");
-        let name = image
-            .strip_prefix(directory)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        hashes.insert(name.clone(), format!("{:x}", Sha256::digest(&bytes)));
-        dimensions.insert(name, json!({"width":width,"height":height}));
-    }
-    Ok(json!({"scenarios":names,"images":hashes,"dimensions":dimensions}))
+    android_repo_docs::media::inventory::image_record(directory, scenarios)
 }
 pub(crate) fn screenshots(root: &Path, module: &str) -> Result<()> {
-    let config = config(root)?;
-    let spec = config
-        .screenshots
-        .get(module)
-        .context("No screenshot contract for module")?;
-    let directory = path(root, &spec.directory)?;
-    let mut record = image_record(&directory, &spec.scenarios)?;
-    for (key, value) in &spec.metadata {
-        ensure!(
-            ![
-                "schema",
-                "source",
-                "module",
-                "scenarios",
-                "images",
-                "dimensions"
-            ]
-            .contains(&key.as_str()),
-            "Reserved screenshot metadata key: {key}"
-        );
-        record[key] = value.clone();
-    }
-    let source = crate::release::git(root, &["rev-parse", "HEAD"])?;
-    ensure!(source.status.success(), "Cannot resolve source");
-    record["schema"] = json!(1);
-    record["source"] = json!(String::from_utf8(source.stdout)?.trim());
-    record["module"] = json!(module);
-    let output = path(root, &format!("{}/render-manifest.json", spec.directory))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&directory)?;
-    use std::io::Write;
-    writeln!(tmp, "{}", serde_json::to_string_pretty(&record)?)?;
-    tmp.persist(output)?;
-    println!(
-        "Validated {} screenshots for {module}",
-        spec.scenarios.len()
-    );
-    Ok(())
+    android_repo_docs::media::inventory::generate(root, module)
 }
 fn junit_check(directory: &Path, required: &[[String; 2]]) -> Result<()> {
     let expected: BTreeSet<_> = required.iter().cloned().collect();

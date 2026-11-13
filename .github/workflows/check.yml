@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-      - run: node --test cli/site-theme/tests/*.test.mjs
+      - run: node --test cli/docs/site-theme/tests/*.test.mjs
   cli:
     name: Rust CLI (${{ matrix.os }})
     strategy:
@@ -84,7 +84,7 @@ jobs:
             tar -xzf "$archive" -C "$directory"
           fi
           echo "$directory" >> "$GITHUB_PATH"
-      - run: cargo test --locked --manifest-path cli/Cargo.toml
+      - run: cargo test --locked --workspace --manifest-path cli/Cargo.toml
       - name: Verify evaluated Gradle module discovery
         if: runner.os == 'Linux'
         shell: bash
