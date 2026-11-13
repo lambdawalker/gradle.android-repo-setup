@@ -379,11 +379,23 @@ android-repo-setup module_release reconcile-failed-jitpack --module demo-common 
 ```
 
 Each attempt must have an annotated, valid pending journal and an unchanged
-canonical source tag. JitPack must report `Error` or `failed` for that exact
+source tag. Historical module tags such as `demo-common/v0.1.0` retain their
+original JitPack consumer version; reconciliation does not rename them or create
+replacement canonical tags. JitPack must report `Error` or `failed` for that exact
 source commit, both before and after all publication artifact URLs return 404.
 Confirmed versions, upload markers, public artifacts, unavailable or ambiguous
 status, mismatched sources, and concurrent journal changes are preserved and
 reported as `needs-review`. Other eligible failures can still be archived.
+
+Automatic preparation uses the same reconciliation checks for a single older
+attempt. A newer confirmed release does not prevent archiving a proven older
+failure, but confirmation of the attempted version in either current metadata
+or historical records always prevents it. `tagNotFound` without a source commit
+is uncertain, not proof of failure. Keep its pending journal. To intentionally
+publish a separate release, enter a version newer than all module history and
+enable `bypass_version_verification` in the publish action, or pass
+`--version X.Y.Z --allow-pending-jitpack` to `module_release prepare`. The override
+preserves prior attempts and continues to reject upload-started markers.
 
 Applying archives the **original annotated Git object** under
 `release-failed/jitpack/<module>/<version>` and deletes its pending reference in
