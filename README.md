@@ -560,6 +560,27 @@ Use `--base <absolute-preview-url>` when previewing on another host, or `--base 
 
 ### Windows IDE terminal mouse input
 
+On Windows, terminals identified by `TERMINAL_EMULATOR=JetBrains-JediTerm`
+(or another `JetBrains` prefix) use keyboard navigation. Some IDE terminal / Windows
+console combinations lose the Escape prefix of mouse reports before the CLI can
+decode them, causing text such as `[MC…` to appear in fields. Startup disables both
+native console and ANSI mouse tracking, including tracking left by an interrupted
+run. Use Tab / Shift+Tab to change focus and Enter to activate a control.
+
+For a terminal that is not automatically identified, opt into keyboard mode before
+launching the wizard from PowerShell:
+
+```powershell
+$env:ANDROID_REPO_SETUP_NO_MOUSE = '1'
+.\setup.bat
+```
+
+This setting requires a CLI build containing this fix; it has no effect in v0.1.21.
+Until an updated build is installed, run setup in a separate PowerShell window.
+Mouse support remains enabled in other Windows terminals. The decoder below is
+still used there; keyboard mode avoids interpreting ambiguous report fragments as
+text without filtering legitimate characters from passwords or paths.
+
 The wizard normalizes legacy X10 and SGR mouse reports that some Windows IDE terminals, including IntelliJ IDEA, deliver as character events. Pointer movement does not alter text or password fields; clicks, dragging and vertical scrolling remain mouse actions. Native console events pass through unchanged. The compatibility layer applies on Windows only, before input reaches the views, and preserves ordinary text and keyboard shortcuts.
 
 The input compatibility fix is included in CLI v0.1.8. The iocraft interface described above requires a release containing this migration, or a build from this branch.
