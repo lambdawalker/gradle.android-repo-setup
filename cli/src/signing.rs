@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tempfile::{Builder, TempPath};
+use tempfile::{Builder, NamedTempFile, TempPath};
 
 const SECRET_NAMES: [&str; 4] = [
     "ANDROID_KEYSTORE_PASSWORD",
@@ -508,6 +508,197 @@ fn prepare_signing_files(
     let bytes = read_regular_file(&certificate, 1024 * 1024)?
         .context("keytool did not export the signing certificate.")?;
     associations::write(&output, &application_ids, &bytes)
+}
+
+const LOCAL_PROPERTIES_BEGIN: &str = "# BEGIN ANDROID REPO SETUP SIGNING";
+const LOCAL_PROPERTIES_END: &str = "# END ANDROID REPO SETUP SIGNING";
+const LOCAL_PROPERTIES_KEYS: [&str; 4] = [
+    "ANDROID_KEYSTORE_PATH",
+    "ANDROID_KEYSTORE_PASSWORD",
+    "ANDROID_KEY_ALIAS",
+    "ANDROID_KEY_PASSWORD",
+];
+
+fn signing_property_line(line: &str) -> bool {
+    let line = line.trim_start();
+    LOCAL_PROPERTIES_KEYS.iter().any(|key| {
+        line.strip_prefix(key).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_some_and(|ch| ch == '=' || ch == ':' || ch.is_whitespace())
+        })
+    })
+}
+
+fn escape_property_value(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            ' ' | '=' | ':' | '#' | '!' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn local_properties_content(existing: &str, passwords: &SigningPasswords) -> Result<String> {
+    let key = passwords.key.as_deref().context("Missing key password.")?;
+    let normalized = existing.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = Vec::new();
+    let mut managed = false;
+    for line in normalized.lines() {
+        if line == LOCAL_PROPERTIES_BEGIN {
+            ensure!(!managed, "local.properties contains nested managed signing blocks.");
+            managed = true;
+            continue;
+        }
+        if line == LOCAL_PROPERTIES_END {
+            ensure!(managed, "local.properties contains an unmatched managed signing block end.");
+            managed = false;
+            continue;
+        }
+        if !managed && !signing_property_line(line) {
+            lines.push(line.to_owned());
+        }
+    }
+    ensure!(
+        !managed,
+        "local.properties contains an incomplete managed signing block."
+    );
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push(LOCAL_PROPERTIES_BEGIN.into());
+    lines.push(format!(
+        "ANDROID_KEYSTORE_PATH={}",
+        escape_property_value(&passwords.keystore)
+    ));
+    lines.push(format!(
+        "ANDROID_KEYSTORE_PASSWORD={}",
+        escape_property_value(&passwords.store)
+    ));
+    lines.push(format!(
+        "ANDROID_KEY_ALIAS={}",
+        escape_property_value(&passwords.alias)
+    ));
+    if key != passwords.store {
+        lines.push(format!(
+            "ANDROID_KEY_PASSWORD={}",
+            escape_property_value(key)
+        ));
+    }
+    lines.push(LOCAL_PROPERTIES_END.into());
+    Ok(lines.join("\n") + "\n")
+}
+
+fn ensure_local_properties_ignored(root: &Path) -> Result<()> {
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", "local.properties"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Git is required to verify local.properties safety.")?;
+    ensure!(
+        !tracked.success(),
+        "Refusing to write signing passwords to tracked local.properties."
+    );
+    ensure!(
+        tracked.code() == Some(1),
+        "Could not determine whether local.properties is tracked."
+    );
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "--", "local.properties"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Git is required to verify local.properties safety.")?;
+    ensure!(
+        ignored.success(),
+        "Add local.properties to .gitignore before storing signing passwords there."
+    );
+    Ok(())
+}
+
+fn write_local_properties(path: &Path, content: &str) -> Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) => ensure!(
+            metadata.is_file(),
+            "local.properties must be a regular file, not a directory or symlink."
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(content.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .context("Could not replace local.properties.")?;
+    Ok(())
+}
+
+pub fn configure_local_gradle_signing(root: &Path, vault: &SetupVault) -> Result<bool> {
+    let passwords = vault
+        .state
+        .signing_passwords
+        .as_ref()
+        .context("No saved APK signing identity. Run APK signing key setup first.")?;
+    ensure!(
+        passwords.key.as_deref().is_some_and(|key| !key.is_empty()),
+        "No saved key password. Run APK signing key setup first."
+    );
+    ensure!(
+        regular_file_exists(Path::new(&passwords.keystore))?,
+        "The saved APK signing keystore no longer exists. Run APK signing key setup again."
+    );
+    ensure_local_properties_ignored(root)?;
+    let path = root.join("local.properties");
+    let existing = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let content = local_properties_content(&existing, passwords)?;
+    setup_message!(
+        "Local Gradle signing will store the keystore path and signing passwords in plaintext at {}.",
+        path.display()
+    );
+    setup_message!("Existing non-signing local.properties entries will be preserved.");
+    if !confirm("Write Android signing credentials to ignored local.properties?")? {
+        return Ok(false);
+    }
+    write_local_properties(&path, &content)?;
+    setup_message!("Local Gradle signing configured in {}.", path.display());
+    Ok(true)
 }
 
 fn choose_application_ids(root: &Path, saved: &[String]) -> Result<Vec<String>> {
