@@ -135,7 +135,7 @@ internal fun Project.configureEndpointConventions(
         environmentFile?.let { path ->
             val config = rootProject.file(path)
             require(config.isFile) { "Android configuration file not found: $path" }
-            config.reader(Charsets.UTF_8).use(::load)
+            config.reader(Charsets.UTF_8).use { load(it) }
         }
     }
     val resolver = EndpointResolver(this, bindings, fileProperties)
