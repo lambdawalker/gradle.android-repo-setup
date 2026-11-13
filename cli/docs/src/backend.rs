@@ -15,7 +15,6 @@ pub enum SiteBackend {
 
 const ACTIVE: &str = "ANDROID_REPO_DOCS_SITE_ACTIVE";
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Site {
     #[serde(default)]
     backend: Option<SiteBackend>,
@@ -152,4 +151,28 @@ fn windows_command_shim(root: &Path, program: &str) -> Option<std::path::PathBuf
         }
     }
     None
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn built_in_backend_accepts_renderer_specific_site_metadata() -> Result<()> {
+        let site = json!({
+            "backend": "astro",
+            "base_url": "https://example.com/docs/",
+            "pages": {"README.md": "project"},
+            "translation_manifest": "translations.json",
+            "translation_paths": {"README.md": "docs/es/README.md"},
+            "aliases": [{"source": "README.md", "html": "{language}/main/README.html"}]
+        });
+        assert_eq!(
+            select(Path::new("."), Some(&site))?,
+            SiteBackend::Astro
+        );
+        Ok(())
+    }
 }
