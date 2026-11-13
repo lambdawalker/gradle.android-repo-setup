@@ -197,7 +197,7 @@ internal fun inspectSigningKey(
     }
 }
 
-private fun certificateFingerprint(certificate: java.security.cert.Certificate): String =
+internal fun certificateFingerprint(certificate: java.security.cert.Certificate): String =
     MessageDigest.getInstance("SHA-256")
         .digest(certificate.encoded)
         .joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xff) }
