@@ -789,3 +789,62 @@ fn updater_validates_pin_serialization_before_writing_and_blank_preserves_pin() 
         assert_eq!(fs::read_to_string(&config).unwrap(), text);
     }
 }
+
+#[test]
+fn publishing_captures_receipts_and_reconciles_failures_under_the_release_lock() {
+    let root = fixture();
+    let result = run(root.path(), &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for name in ["publish-library.yml", "publish-jitpack.yml"] {
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &fs::read_to_string(root.path().join(".github/workflows").join(name)).unwrap(),
+        )
+        .unwrap();
+        let job = &document["jobs"]["publish"];
+        assert_eq!(
+            job["concurrency"]["cancel-in-progress"].as_bool(),
+            Some(false)
+        );
+        let steps = job["steps"].as_sequence().unwrap();
+        let cleanup = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Reconcile unsuccessful release attempt"))
+            .expect("failed runs need provider reconciliation");
+        assert!(cleanup["if"].as_str().unwrap().contains("failure()"));
+        assert!(cleanup["if"]
+            .as_str()
+            .unwrap()
+            .contains("steps.reserve.outcome == 'success'"));
+        let command = cleanup["run"].as_str().unwrap();
+        assert!(
+            command.contains("module_release reconcile")
+                && command.contains("--apply")
+                && command.contains("--version")
+        );
+        assert!(!command.contains("publishAndRelease"));
+        if name == "publish-library.yml" {
+            let prepare = steps
+                .iter()
+                .find(|s| s["id"].as_str() == Some("release"))
+                .unwrap();
+            assert!(prepare["env"]["MAVEN_CENTRAL_USERNAME"].is_string());
+            let upload = steps
+                .iter()
+                .find(|s| s["id"].as_str() == Some("upload"))
+                .unwrap()["run"]
+                .as_str()
+                .unwrap();
+            assert!(upload.contains("set -euo pipefail"));
+            assert!(upload.contains("| tee \"$RUNNER_TEMP/repository-publish.log\" |"));
+            assert!(upload.contains("module_release track-central-upload"));
+            assert_eq!(
+                document["jobs"]["propagation-delay"]["environment"].as_str(),
+                Some("delayed-docs")
+            );
+        }
+    }
+}

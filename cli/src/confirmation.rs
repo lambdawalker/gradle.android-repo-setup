@@ -272,6 +272,30 @@ fn verify_public(
     Ok(Value::Object(hashes))
 }
 
+pub(crate) fn confirmed_record(
+    root: &Path,
+    record: &Value,
+    fetch: &dyn Fn(&str, bool) -> Result<Option<Vec<u8>>>,
+) -> Result<Value> {
+    let destination = record["repository"].as_str().unwrap_or("maven-central");
+    let url = match destination {
+        "maven-central" => crate::release::CENTRAL,
+        "jitpack" => crate::release::JITPACK,
+        _ => bail!("Unknown release repository"),
+    };
+    let contract = crate::release::reserved_verification(root, record)?;
+    let mut confirmed = record.clone();
+    confirmed["sha256"] = verify_public(
+        record,
+        destination,
+        url,
+        &|url, optional| fetch(url, optional),
+        &contract,
+    )?;
+    confirmed["phase"] = json!("confirmed-public");
+    Ok(confirmed)
+}
+
 fn registry_error(error: ureq::Error) -> anyhow::Error {
     if matches!(
         error,
@@ -346,7 +370,7 @@ pub(crate) fn confirm(
         record["source"] == expected_source,
         "Confirmation source differs from reservation"
     );
-    let contract = crate::release::verification_config(root, &expected_source, module)?;
+    let contract = crate::release::reserved_verification(root, &record)?;
     let fetch = registry_fetch(repository_url);
     let started = Instant::now();
     loop {

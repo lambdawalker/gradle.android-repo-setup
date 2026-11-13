@@ -1,9 +1,11 @@
+mod reconcile;
 use crate::confirmation::{
     git_text, read_reservation, registry_fetch, validate_record, validate_record_at,
 };
 use crate::release::{check_local, coordinates, git, CENTRAL, JITPACK, SUFFIXES};
 use crate::release_identity::{self, fingerprint, Identity};
 use anyhow::{ensure, Context, Result};
+pub(super) use reconcile::{reconcile, track_central_upload};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
@@ -245,7 +247,6 @@ fn select(
     tags: &BTreeMap<String, String>,
     requested: Option<&str>,
 ) -> Result<(String, String)> {
-    let _ = destination;
     let mut versions = BTreeSet::new();
     for name in tags.keys() {
         for provider in ["maven-central", "jitpack"] {
@@ -318,6 +319,10 @@ fn select(
     }
     if let Some(requested) = requested {
         version_key(requested)?;
+        ensure!(
+            !tags.contains_key(&attempt("failed", module, requested, destination)),
+            "Version was archived as failed at this destination; choose a newer version"
+        );
         if let Some(identity) = identities.get(requested) {
             ensure!(
                 identity.fingerprint == selected_fingerprint,
@@ -337,7 +342,9 @@ fn select(
     };
     if let Some(identity) = identities.get(latest) {
         ancestor(root, &identity.source, source)?;
-        if identity.fingerprint == selected_fingerprint {
+        if identity.fingerprint == selected_fingerprint
+            && !tags.contains_key(&attempt("failed", module, latest, destination))
+        {
             return Ok((latest.clone(), identity.source.clone()));
         }
     }
@@ -512,6 +519,7 @@ fn verify_failed_jitpack(record: &Value, fetch: &Fetch<'_>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn recover_failed_jitpack(
     root: &Path,
     module: &str,
@@ -741,6 +749,9 @@ pub(super) fn prepare(
         destination,
         true,
     )?;
+    if !allow_pending_jitpack {
+        reconcile(root, module, destination, &[], true)?;
+    }
     fetch_tags(root)?;
     let tags = remote_tags(root)?;
     if destination == "maven-central" {
@@ -757,14 +768,6 @@ pub(super) fn prepare(
             );
             ensure_available(root, module, destination, &tags, Some((&version, &source)))?;
         } else {
-            recover_failed_jitpack(
-                root,
-                module,
-                &tags,
-                &version,
-                &source,
-                &registry_fetch(JITPACK),
-            )?;
             ensure_available(root, module, destination, &remote_tags(root)?, None)?;
         }
     }
@@ -1180,12 +1183,21 @@ pub(super) fn finalize(
             "docs/templates/MODULE_IMPORT.md.template",
         ],
     )?;
-    if let Some(current) = current(root, module, destination)? {
-        ensure!(
-            compare(field(&current, "version")?, version)?.is_lt(),
-            "Refusing to replace same/newer module metadata"
-        );
-    }
+    let update_latest = if let Some(current) = current(root, module, destination)? {
+        match compare(field(&current, "version")?, version)? {
+            Ordering::Less => true,
+            Ordering::Equal => {
+                ensure!(
+                    current == record,
+                    "Existing confirmation differs from the reserved publication"
+                );
+                false
+            }
+            Ordering::Greater => false,
+        }
+    } else {
+        true
+    };
     let stable = stable_name(root, &journal)?;
     let stable_oid = remote_oid(root, &stable)?;
     if let Some(oid) = &stable_oid {
@@ -1197,10 +1209,7 @@ pub(super) fn finalize(
         ensure!(peel(root, oid)? == source, "Upload marker source mismatch");
     }
 
-    git_text(
-        root,
-        &["switch", "-C", &format!("finalize-{module}"), "origin/main"],
-    )?;
+    git_text(root, &["checkout", "--detach", "origin/main"])?;
     crate::docs::seed(root)?;
     crate::docs::archive_record(root, &record)?;
     let metadata = metadata(module, destination);
@@ -1209,26 +1218,33 @@ pub(super) fn finalize(
         path.parent()
             .context("Missing release metadata directory")?,
     )?;
-    fs::write(
-        path,
-        format!("{}\n", serde_json::to_string_pretty(&record)?),
-    )?;
+    if update_latest {
+        fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&record)?),
+        )?;
+    }
     crate::docs::documentation(root, false)?;
     git_text(root, &["add", &metadata, "IMPORT.md", crate::docs::HISTORY])?;
-    git_text(
-        root,
-        &[
-            "-c",
-            "user.name=github-actions[bot]",
-            "-c",
-            "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-            "-c",
-            "commit.gpgSign=false",
-            "commit",
-            "-m",
-            &format!("docs: confirm {module} {version}"),
-        ],
-    )?;
+    if !git(root, &["diff", "--cached", "--quiet"])?
+        .status
+        .success()
+    {
+        git_text(
+            root,
+            &[
+                "-c",
+                "user.name=github-actions[bot]",
+                "-c",
+                "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-m",
+                &format!("docs: confirm {module} {version}"),
+            ],
+        )?;
+    }
 
     let pending = refname(&attempt("pending", module, version, destination));
     let stable_ref = refname(&stable);
@@ -1285,47 +1301,7 @@ pub(super) fn abort_unconfirmed(
         destination == "maven-central",
         "abort-unconfirmed supports Maven Central only"
     );
-    let coords = coordinates(root, module, version, destination, true)?;
-    fetch_tags(root)?;
-    if let Some(current) = current(root, module, destination)? {
-        ensure!(
-            current["version"] != version,
-            "Version already finalized at destination; cannot abort"
-        );
-    }
-    let pending = attempt("pending", module, version, destination);
-    let marker = attempt("uploading", module, version, destination);
-    let pending_oid = remote_oid(root, &pending)?;
-    let marker_oid = remote_oid(root, &marker)?;
-    let mut refs = Vec::new();
-    if let Some(oid) = &pending_oid {
-        let (record, checked_oid) =
-            read_reservation(root, module, version, destination, scope(destination))?;
-        ensure!(*oid == checked_oid, "Remote reservation differs");
-        if let Some(marker_oid) = &marker_oid {
-            ensure!(
-                peel(root, marker_oid)? == field(&record, "source")?,
-                "Upload marker source differs from reservation"
-            );
-        }
-        refs.push((pending.as_str(), oid.as_str()));
-    }
-    if let Some(oid) = &marker_oid {
-        refs.push((marker.as_str(), oid.as_str()));
-    }
-    ensure!(
-        !refs.is_empty(),
-        "No unconfirmed release attempt found for this version"
-    );
-    let published = central_versions(&coords.group, &coords.artifact, &registry_fetch(CENTRAL))?;
-    ensure!(
-        !published.iter().any(|published| published == version),
-        "Version is published on Maven Central; run finalize instead of aborting"
-    );
-    let archive = attempt("failed", module, version, destination);
-    archive_attempt(root, &archive, &refs)?;
-    println!("Archived unconfirmed {module} {version} to {archive}");
-    Ok(())
+    reconcile(root, module, destination, &[version.to_owned()], true)
 }
 
 #[cfg(test)]
@@ -1886,7 +1862,8 @@ mod tests {
         Ok(())
     }
 
-    fn failed_attempt_fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, String)> {
+    pub(super) fn failed_attempt_fixture() -> Result<(tempfile::TempDir, std::path::PathBuf, String)>
+    {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("checkout");
         fs::create_dir(&root)?;
@@ -1915,7 +1892,7 @@ mod tests {
         Ok((temp, root, source))
     }
 
-    fn add_failed_attempt(root: &Path, version: &str, source: &str) -> Result<String> {
+    pub(super) fn add_failed_attempt(root: &Path, version: &str, source: &str) -> Result<String> {
         add_jitpack_attempt(root, version, source, false)
     }
 
@@ -1952,7 +1929,7 @@ mod tests {
         git_text(root, &["rev-parse", &refname(&pending)])
     }
 
-    fn failed_response(url: &str, source: &str) -> Result<Option<Vec<u8>>> {
+    pub(super) fn failed_response(url: &str, source: &str) -> Result<Option<Vec<u8>>> {
         if url.contains("/api/builds/") {
             Ok(Some(serde_json::to_vec(
                 &json!({"status":"Error", "commit":source}),
