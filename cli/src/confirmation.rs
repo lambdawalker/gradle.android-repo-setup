@@ -1,4 +1,6 @@
-use crate::release::{coordinates_for_record, git, verify, SUFFIXES};
+#[cfg(test)]
+use crate::release::SUFFIXES;
+use crate::release::{coordinates_for_record, git, verify};
 use anyhow::{bail, ensure, Context, Result};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -64,6 +66,53 @@ pub(super) fn read_reservation(
     validate_record(root, module, version, destination, &record)?;
     crate::release_identity::validate_record(root, &record)?;
     Ok((record, local))
+}
+
+/// Legacy journals identify their artifact format through the complete recorded
+/// hash set. New reservations additionally bind it to their immutable contract.
+pub(super) fn publication_suffixes(root: &Path, record: &Value) -> Result<[&'static str; 5]> {
+    let hashes = record["sha256"]
+        .as_object()
+        .context("Missing publication hashes")?;
+    let jar = hashes.contains_key(".jar");
+    ensure!(
+        jar != hashes.contains_key(".aar"),
+        "Publication must contain exactly one primary artifact"
+    );
+    let suffixes = [
+        ".pom",
+        if jar { ".jar" } else { ".aar" },
+        "-sources.jar",
+        "-javadoc.jar",
+        ".module",
+    ];
+    if record.get("verification_schema").is_some() || record.get("verification").is_some() {
+        ensure!(
+            record.get("verification_schema").is_some(),
+            "Verification snapshot lacks schema"
+        );
+        let contract = crate::release::reserved_verification(root, record)?;
+        ensure!(
+            contract.suffixes() == suffixes,
+            "Journal hashes differ from reserved verification packaging"
+        );
+        if jar {
+            let digest = Regex::new(r"\A[0-9a-f]{64}\z")?;
+            for suffix in ["-sources.jar", "-javadoc.jar"] {
+                let contents = record["content_sha256"][suffix]
+                    .as_object()
+                    .context("Missing JAR archive content hashes")?;
+                ensure!(
+                    !contents.is_empty()
+                        && contents
+                            .values()
+                            .all(|hash| hash.as_str().is_some_and(|hash| digest.is_match(hash))),
+                    "Invalid JAR archive content hashes"
+                );
+            }
+        }
+    }
+    Ok(suffixes)
 }
 
 pub(super) fn validate_record(
@@ -175,12 +224,13 @@ pub(super) fn validate_record_at(
         .as_object()
         .context("Missing publication hashes")?;
     let digest = Regex::new(r"\A[0-9a-f]{64}\z")?;
+    let suffixes = publication_suffixes(root, record)?;
     ensure!(
-        SUFFIXES.iter().all(|suffix| hashes.contains_key(*suffix)
+        suffixes.iter().all(|suffix| hashes.contains_key(*suffix)
             || (destination == "jitpack" && *suffix == ".module"))
             && hashes
                 .iter()
-                .all(|(suffix, value)| SUFFIXES.contains(&suffix.as_str())
+                .all(|(suffix, value)| suffixes.contains(&suffix.as_str())
                     && value.as_str().is_some_and(|value| digest.is_match(value))),
         "Incomplete publication hashes"
     );
@@ -240,7 +290,7 @@ fn verify_public(
         }
     }
     let mut hashes = serde_json::Map::new();
-    for suffix in SUFFIXES {
+    for suffix in contract.suffixes() {
         let url = format!("{base}{suffix}");
         let data = if jitpack && suffix == ".module" {
             let Some(data) = fetch(&url, true)? else {
@@ -267,6 +317,14 @@ fn verify_public(
                 "Missing signature: {suffix}"
             );
         }
+        if jitpack && matches!(suffix, "-sources.jar" | "-javadoc.jar") {
+            if let Some(expected) = record.get("content_sha256").and_then(|v| v.get(suffix)) {
+                ensure!(
+                    serde_json::to_value(crate::release::jar_contents(&data)?)? == *expected,
+                    "Public archive content differs from reservation: {suffix}"
+                );
+            }
+        }
         hashes.insert(suffix.into(), Value::String(hash));
     }
     Ok(Value::Object(hashes))
@@ -284,6 +342,10 @@ pub(crate) fn confirmed_record(
         _ => bail!("Unknown release repository"),
     };
     let contract = crate::release::reserved_verification(root, record)?;
+    ensure!(
+        contract.suffixes() == publication_suffixes(root, record)?,
+        "Journal hashes differ from immutable source verification packaging"
+    );
     let mut confirmed = record.clone();
     confirmed["sha256"] = verify_public(
         record,
@@ -371,6 +433,10 @@ pub(crate) fn confirm(
         "Confirmation source differs from reservation"
     );
     let contract = crate::release::reserved_verification(root, &record)?;
+    ensure!(
+        contract.suffixes() == publication_suffixes(root, &record)?,
+        "Journal hashes differ from immutable source verification packaging"
+    );
     let fetch = registry_fetch(repository_url);
     let started = Instant::now();
     loop {
@@ -613,3 +679,7 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "confirmation/jvm_tests.rs"]
+mod jvm_tests;

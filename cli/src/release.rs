@@ -21,9 +21,36 @@ struct ProjectConfig {
     modules: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Packaging {
+    #[default]
+    Aar,
+    Jar,
+}
+impl Packaging {
+    fn is_default(&self) -> bool {
+        *self == Self::Aar
+    }
+    fn extension(&self) -> &'static str {
+        match self {
+            Self::Aar => ".aar",
+            Self::Jar => ".jar",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct VerificationConfig {
+    #[serde(skip_serializing_if = "Packaging::is_default")]
+    pub packaging: Packaging,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jvm_version: Option<u16>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub require_kotlin_stdlib: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_dependency_group_prefixes: Vec<String>,
     pub class_prefix: String,
     pub required_api_artifacts: Vec<String>,
     pub bytecode_major: u16,
@@ -42,6 +69,10 @@ pub(crate) struct VerificationConfig {
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
+            packaging: Packaging::Aar,
+            jvm_version: None,
+            require_kotlin_stdlib: false,
+            forbidden_dependency_group_prefixes: Vec::new(),
             class_prefix: "com/apexfission/android/democommon/".into(),
             required_api_artifacts: vec!["foundation".into(), "ui".into()],
             bytecode_major: 61,
@@ -57,6 +88,16 @@ impl Default for VerificationConfig {
 }
 
 impl VerificationConfig {
+    pub(crate) fn suffixes(&self) -> [&'static str; 5] {
+        [
+            ".pom",
+            self.packaging.extension(),
+            "-sources.jar",
+            "-javadoc.jar",
+            ".module",
+        ]
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             Regex::new(r"\A(?:[A-Za-z_$][A-Za-z0-9_$]*/)+\z")?.is_match(&self.class_prefix),
@@ -71,6 +112,16 @@ impl VerificationConfig {
                 .iter()
                 .all(|id| !id.trim().is_empty()),
             "verification.required_api_artifacts must contain nonempty artifact IDs"
+        );
+        ensure!(
+            self.jvm_version.is_none_or(|version| version > 0),
+            "Invalid verification.jvm_version"
+        );
+        ensure!(
+            self.forbidden_dependency_group_prefixes
+                .iter()
+                .all(|prefix| !prefix.trim().is_empty()),
+            "Forbidden dependency group prefixes must be nonempty"
         );
         validate_contract(self)?;
         Ok(())
@@ -108,6 +159,13 @@ pub(crate) fn verification_config(
         .find(|(id, _)| id == module)
         .map(|(_, value)| value)
         .unwrap_or(config.verification);
+    let source_config: serde_yaml_ng::Value = serde_yaml_ng::from_slice(&output.stdout)?;
+    if source_config["android_modules"][module]["kind"] == "jvm-library" {
+        ensure!(
+            contract.packaging == Packaging::Jar,
+            "JVM library requires an explicit verification.packaging: jar contract"
+        );
+    }
     resolve_contract(root, source, &mut contract)?;
     contract.validate()?;
     Ok(contract)
@@ -207,6 +265,8 @@ pub(crate) struct Record<'a> {
     group: String,
     artifact: String,
     sha256: BTreeMap<&'static str, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    content_sha256: BTreeMap<&'static str, BTreeMap<String, String>>,
     verification: VerificationConfig,
     verification_schema: u32,
     upload_protocol: &'static str,
@@ -262,12 +322,17 @@ pub(crate) fn check_local<'a>(
         .join(&artifact)
         .join(consumer);
     let mut sha256 = BTreeMap::new();
-    for suffix in SUFFIXES {
+    let mut content_sha256 = BTreeMap::new();
+    for suffix in contract.suffixes() {
         let path = directory.join(format!("{artifact}-{consumer}{suffix}"));
         let data = fs::read(&path).with_context(|| format!("Could not read {}", path.display()))?;
         verify(&data, suffix, &group, &artifact, consumer, true, &contract)
             .with_context(|| format!("Invalid artifact {}", path.display()))?;
         sha256.insert(suffix, format!("{:x}", Sha256::digest(&data)));
+        if contract.packaging == Packaging::Jar && matches!(suffix, "-sources.jar" | "-javadoc.jar")
+        {
+            content_sha256.insert(suffix, jar_contents(&data)?);
+        }
     }
     Ok(Record {
         release_identity: crate::release_identity::Identity::new(root, module, version, source)?,
@@ -277,6 +342,7 @@ pub(crate) fn check_local<'a>(
         group,
         artifact,
         sha256,
+        content_sha256,
         verification: contract,
         verification_schema: 1,
         upload_protocol: "guard-v1",
@@ -345,7 +411,7 @@ pub(super) fn coordinates_for_record(
                 .get(module)
                 .context("Unknown configured Android module")?;
             ensure!(
-                selected.selected && selected.kind == crate::discovery::Kind::Library,
+                selected.selected && selected.kind.is_library(),
                 "Release module is not a selected library"
             );
             let expected = crate::discovery::inventory(root, &modules)?;
@@ -396,6 +462,47 @@ pub(super) fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
         .context("Could not run Git")
 }
 
+// zip stores entries by name internally, so duplicate central-directory records
+// can disappear before by_index() iteration. Count raw records as well.
+fn verify_zip_directory(data: &[u8], archive: &ZipArchive<Cursor<&[u8]>>) -> Result<()> {
+    let mut offset = usize::try_from(archive.central_directory_start())?;
+    let mut count = 0;
+    while data.get(offset..offset + 4) == Some(b"PK\x01\x02") {
+        let header = data
+            .get(offset..offset + 46)
+            .context("Truncated ZIP directory")?;
+        let length = |at| usize::from(u16::from_le_bytes([header[at], header[at + 1]]));
+        offset = offset
+            .checked_add(46 + length(28) + length(30) + length(32))
+            .context("ZIP directory overflow")?;
+        ensure!(offset <= data.len(), "Truncated ZIP directory entry");
+        count += 1;
+    }
+    ensure!(count == archive.len(), "Duplicate archive entries");
+    Ok(())
+}
+
+pub(super) fn jar_contents(data: &[u8]) -> Result<BTreeMap<String, String>> {
+    let mut archive = ZipArchive::new(Cursor::new(data))?;
+    verify_zip_directory(data, &archive)?;
+    let mut names = HashSet::new();
+    let mut contents = BTreeMap::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let name = entry.name().to_owned();
+        ensure!(
+            names.insert(name.clone()),
+            "Duplicate archive entry: {name}"
+        );
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        if !entry.is_dir() && name != "META-INF/MANIFEST.MF" {
+            contents.insert(name, format!("{:x}", Sha256::digest(&bytes)));
+        }
+    }
+    Ok(contents)
+}
+
 pub(super) fn verify(
     data: &[u8],
     suffix: &str,
@@ -405,6 +512,10 @@ pub(super) fn verify(
     local: bool,
     contract: &VerificationConfig,
 ) -> Result<()> {
+    ensure!(
+        contract.suffixes().contains(&suffix),
+        "Artifact suffix does not match verification packaging: {suffix}"
+    );
     if suffix == ".pom" {
         return verify_pom(data, group, artifact, version, contract);
     }
@@ -421,6 +532,7 @@ pub(super) fn verify(
     }
 
     let mut archive = ZipArchive::new(Cursor::new(data))?;
+    verify_zip_directory(data, &archive)?;
     let mut names = HashSet::new();
     let mut classes = Vec::new();
     for index in 0..archive.len() {
@@ -442,6 +554,21 @@ pub(super) fn verify(
             entry.read_to_end(&mut bytes)?;
             crate::assets::verify_archive_entry(contract, &name, &bytes)?;
         }
+        if suffix == ".jar" && name.ends_with(".class") && name.starts_with(&contract.class_prefix)
+        {
+            ensure!(
+                !name.contains("DemoPreviews"),
+                "Debug fixture must not be included"
+            );
+            let mut header = [0; 8];
+            entry.read_exact(&mut header)?;
+            ensure!(
+                header[..4] == [0xca, 0xfe, 0xba, 0xbe]
+                    && u16::from_be_bytes([header[6], header[7]]) == contract.bytecode_major,
+                "Unexpected JVM bytecode target"
+            );
+            classes.push(1);
+        }
         if suffix == ".aar" && name == "classes.jar" {
             entry.read_to_end(&mut classes)?;
         } else {
@@ -450,12 +577,14 @@ pub(super) fn verify(
         if local && suffix == "-javadoc.jar" && !entry.is_dir() {
             ensure!(
                 name.ends_with(".md")
+                    || (contract.packaging == Packaging::Jar && name.ends_with(".html"))
                     || matches!(name.as_str(), "LICENSE" | "META-INF/MANIFEST.MF"),
                 "Unexpected documentation archive content: {name}"
             );
         }
     }
     match suffix {
+        ".jar" => ensure!(!classes.is_empty(), "Missing library classes"),
         ".aar" => {
             if let Some(assets) = &contract.required_assets {
                 ensure!(
@@ -498,13 +627,13 @@ pub(super) fn verify(
             ensure!(found, "Missing library classes");
         }
         "-sources.jar" => ensure!(
-            names.iter().any(|name| name.ends_with(".kt")),
-            "Sources JAR has no Kotlin source"
+            names.iter().any(|name| name.ends_with(".kt")
+                || (contract.packaging == Packaging::Jar && name.ends_with(".java"))),
+            "Sources JAR has no supported library source"
         ),
         "-javadoc.jar" => ensure!(
-            names
-                .iter()
-                .any(|name| name.ends_with(".md") || (!local && name.ends_with(".html"))),
+            names.iter().any(|name| name.ends_with(".md")
+                || ((!local || contract.packaging == Packaging::Jar) && name.ends_with(".html"))),
             "Documentation JAR has no documentation"
         ),
         _ => unreachable!(),
@@ -540,8 +669,8 @@ fn verify_pom(
         "POM coordinates/version mismatch"
     );
     ensure!(
-        value("packaging") == Some("aar"),
-        "Publication must be an Android AAR"
+        value("packaging").unwrap_or("jar") == &contract.packaging.extension()[1..],
+        "POM packaging does not match verification contract"
     );
     for path in [
         "name",

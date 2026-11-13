@@ -4,6 +4,8 @@ Module discovery and multi-library setup are available in the **0.1.11 source re
 
 Gradle builds and publishes Android artifacts. The companion `android-repo-setup` CLI configures the project, manages release reservations, and verifies public artifacts. The independent `android-repo-docs` executable maintains documentation, examples, reviewed media, and local sites. See the [standalone documentation guide](docs/standalone-docs.md).
 
+JVM library support on the feature branch reuses the same release engine for Kotlin/JVM and Java JAR publications. See [JVM configuration, verification and migration](docs/jvm-libraries.md). The existing Android Gradle publication plugin is unchanged.
+
 ## Use a published release
 
 The current release is [v0.1.7](https://github.com/lambdawalker/gradle.android-repo-setup/releases/tag/v0.1.7). It includes the Rust CLI binaries and the Gradle plugins published through JitPack. The CLI and Gradle plugins are separate installations; a CLI download does not install a Gradle plugin.

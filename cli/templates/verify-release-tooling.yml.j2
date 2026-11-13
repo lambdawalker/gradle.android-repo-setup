@@ -40,6 +40,6 @@ jobs:
           if [[ "$RELEASE_REPOSITORY" == jitpack ]]; then
             flags+=(-PjitpackBuild=true -PjitpackScopedTag=true)
           fi
-          ./gradlew verifyImportDocs <<@ workflows.module_path @>>:lintRelease <<@ workflows.module_path @>>:publishAllPublicationsToVerificationRepository \
+          ./gradlew <<@ workflows.verification_tasks @>> <<@ workflows.module_path @>>:publishAllPublicationsToVerificationRepository \
             -PreleaseModule=<<@ workflows.module @>> -PreleaseVersion=9.8.7 "${flags[@]}" --no-daemon
           android-repo-setup module_release check-local --module <<@ workflows.module @>> --version 9.8.7 --source "$(git rev-parse HEAD)"

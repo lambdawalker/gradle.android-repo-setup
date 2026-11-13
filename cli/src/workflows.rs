@@ -210,6 +210,10 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
     let docs_runtime = documentation_runtime(root, false)?;
     let release_runtime = documentation_runtime(root, true)?;
     let placeholders = Regex::new(r"<<@\s*([a-z_.]+)\s*@>>")?;
+    let has_android = config
+        .android_modules
+        .as_ref()
+        .is_none_or(|modules| modules.values().any(|m| m.selected && !m.kind.is_jvm()));
     // One shared release engine, dedicated entry points, per-app APK workflows.
     let mut plans: Vec<RenderTarget> = Vec::new();
     let legacy_module = &config.workflows.module;
@@ -217,7 +221,7 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
     if let Some(modules) = &config.android_modules {
         let libraries = modules
             .iter()
-            .filter(|(_, m)| m.selected && m.kind == crate::discovery::Kind::Library)
+            .filter(|(_, m)| m.selected && m.kind.is_library())
             .collect::<Vec<_>>();
         let apps = modules
             .iter()
@@ -225,9 +229,12 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
             .collect::<Vec<_>>();
         ensure!(
             !libraries.is_empty() || !apps.is_empty(),
-            "Select at least one Android module"
+            "Select at least one module"
         );
         for &(template, _) in TEMPLATES {
+            if template == "verify-localization.yml" && !has_android {
+                continue;
+            }
             let targets: Vec<(&String, &crate::discovery::Module)> = match template {
                 "publish-demo-common.yml"
                 | "verify-release-tooling.yml"
@@ -237,7 +244,7 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
                     .iter()
                     .chain(apps.iter())
                     .copied()
-                    .filter(|(_, m)| m.screenshots)
+                    .filter(|(_, m)| !m.kind.is_jvm() && m.screenshots)
                     .collect(),
                 _ => {
                     if libraries.is_empty()
@@ -307,7 +314,7 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
     let module_options = if let Some(modules) = &config.android_modules {
         modules
             .iter()
-            .filter(|(_, m)| m.kind == crate::discovery::Kind::Library && m.selected)
+            .filter(|(_, m)| m.kind.is_library() && m.selected)
             .map(|(id, _)| serde_json::to_string(id).unwrap())
             .collect::<Vec<_>>()
             .join(", ")
@@ -319,7 +326,7 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         release_workflow_names.extend(
             modules
                 .iter()
-                .filter(|(_, m)| m.selected && m.kind == crate::discovery::Kind::Library)
+                .filter(|(_, m)| m.selected && m.kind.is_library())
                 .map(|(id, _)| format!("Publish {id}")),
         );
     } else {
@@ -330,10 +337,43 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         modules
             .values()
             .filter(|m| m.selected)
-            .map(|m| format!("{}:testDebugUnitTest", m.path.trim_end_matches(':')))
+            .map(|m| {
+                format!(
+                    "{}:{}",
+                    m.path.trim_end_matches(':'),
+                    if m.kind.is_jvm() {
+                        "test"
+                    } else {
+                        "testDebugUnitTest"
+                    }
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ")
     });
+    let jvm_modules = config
+        .android_modules
+        .as_ref()
+        .map(|modules| {
+            modules
+                .iter()
+                .filter(|(_, m)| m.selected && m.kind.is_jvm())
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let publication_checks = if jvm_modules.is_empty() {
+        "checks=(verifyImportDocs \"$MODULE_PATH:lintRelease\" \"$MODULE_PATH:assembleRelease\")"
+            .to_owned()
+    } else if !has_android {
+        "checks=(\"$MODULE_PATH:test\" \"$MODULE_PATH:build\")".to_owned()
+    } else {
+        format!("case \"$RELEASE_MODULE\" in\n            {}) checks=(\"$MODULE_PATH:test\" \"$MODULE_PATH:build\") ;;\n            *) checks=(verifyImportDocs \"$MODULE_PATH:lintRelease\" \"$MODULE_PATH:assembleRelease\") ;;\n          esac", jvm_modules.join("|"))
+    };
+    let jitpack_checks = publication_checks.replace(
+        "checks=(verifyImportDocs \"$MODULE_PATH:lintRelease\" \"$MODULE_PATH:assembleRelease\")",
+        "checks=(\"$MODULE_PATH:testDebugUnitTest\")",
+    );
     plans.into_iter().map(|RenderTarget { name, template_name, module, module_path, module_dir, app, app_path, app_dir }| {
         let screenshot_assertion = if config.android_modules.is_some() { "test -f screenshot-manifest/images.sha256".to_string() } else { format!("test \"$(wc -l < screenshot-manifest/images.sha256)\" -eq {screenshot_count}") };
         let module_dir_shell = shell_path(&module_dir);
@@ -341,6 +381,8 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         let template = TEMPLATES.iter().find(|(n,_)| *n == template_name).unwrap().1;
         let app_checks = if config.android_modules.is_none() { format!("{app_path}:assembleDebug {app_path}:lintDebug") } else { String::new() };
         let concurrency = if config.android_modules.is_some() { "android-repository-release".to_owned() } else { format!("{legacy_module}-release") };
+        let is_jvm = config.android_modules.as_ref().and_then(|all| all.get(&module)).is_some_and(|m| m.kind.is_jvm());
+        let verification_tasks = if is_jvm { format!("{module_path}:test {module_path}:build") } else { format!("verifyImportDocs {module_path}:lintRelease") };
         let rendered = placeholders.replace_all(template, |captures: &Captures<'_>| match &captures[1] {
             "tooling_ref" => config.tooling_ref.as_str(),
             "workflows.module" => module.as_str(),
@@ -355,6 +397,9 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
             "workflows.app_directory" => app_dir.as_str(),
             "workflows.app_directory_shell" => app_dir_shell.as_str(),
             "workflows.app_checks" => app_checks.as_str(),
+            "workflows.jitpack_checks" => jitpack_checks.as_str(),
+            "workflows.publication_checks" => publication_checks.as_str(),
+            "workflows.verification_tasks" => verification_tasks.as_str(),
             "workflows.test_tasks" => selected_tests.as_deref().unwrap_or("test"),
             "workflows.title" => title.as_str(),
             "workflows.screenshot_count" => screenshot_count.as_str(),

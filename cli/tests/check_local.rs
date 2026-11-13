@@ -407,3 +407,61 @@ fn configured_api_dependency_must_be_exported_at_compile_scope() {
     assert!(String::from_utf8_lossy(&result.stderr)
         .contains("Required API artifact must be exported: permissions"));
 }
+
+#[test]
+fn jvm_jar_candidates_use_existing_cli_journals_for_both_destinations() {
+    for destination in ["maven-central", "jitpack"] {
+        let candidate = Candidate::with_contract(destination == "jitpack",
+            "\nverification:\n  packaging: jar\n  class_prefix: com/example/math/\n  bytecode_major: 55\n  jvm_version: 11\n  required_api_artifacts: []\n  require_kotlin_stdlib: true\n  forbidden_dependency_group_prefixes: [androidx.compose]\n",
+            "com/example/math/Point.class", &[], 55);
+        let base = &candidate.artifact_base;
+        let file = |suffix: &str| {
+            base.with_file_name(format!(
+                "{}{suffix}",
+                base.file_name().unwrap().to_str().unwrap()
+            ))
+        };
+        let mut aar = zip::ZipArchive::new(Cursor::new(fs::read(file(".aar")).unwrap())).unwrap();
+        let mut classes = Vec::new();
+        std::io::Read::read_to_end(&mut aar.by_name("classes.jar").unwrap(), &mut classes).unwrap();
+        fs::write(file(".jar"), &classes).unwrap();
+        fs::remove_file(file(".aar")).unwrap();
+        fs::write(
+            file("-sources.jar"),
+            archive(&[("Point.kt", b"class Point")]),
+        )
+        .unwrap();
+        let pom = fs::read_to_string(file(".pom")).unwrap().replace("<packaging>aar</packaging>","<packaging>jar</packaging>").replace("<dependencies>","<dependencies><dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency>");
+        fs::write(file(".pom"), pom).unwrap();
+        let mut metadata: Value =
+            serde_json::from_slice(&fs::read(file(".module")).unwrap()).unwrap();
+        metadata["variants"] = json!(["java-api","java-runtime"].map(|usage|json!({"attributes":{"org.gradle.category":"library","org.gradle.usage":usage,"org.gradle.jvm.version":11,"org.jetbrains.kotlin.platform.type":"jvm"},"dependencies":[{"group":"org.jetbrains.kotlin","module":"kotlin-stdlib"}]})));
+        fs::write(file(".module"), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let output = candidate.run(destination, &candidate.source);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let record: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(record["sha256"].get(".jar").is_some());
+        assert!(record["sha256"].get(".aar").is_none());
+        assert_eq!(record["verification"]["packaging"], "jar");
+        assert!(record["content_sha256"]["-sources.jar"]
+            .get("Point.kt")
+            .is_some());
+        assert_eq!(record["phase"], "reserved-before-upload");
+        fs::write(
+            file(".jar"),
+            archive(&[(
+                "com/example/math/Point.class",
+                &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61],
+            )]),
+        )
+        .unwrap();
+        assert!(!candidate
+            .run(destination, &candidate.source)
+            .status
+            .success());
+    }
+}

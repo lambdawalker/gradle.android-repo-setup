@@ -132,9 +132,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
     let has_apps = modules
         .values()
         .any(|m| m.selected && m.kind == crate::discovery::Kind::Application);
-    let has_libraries = modules
-        .values()
-        .any(|m| m.selected && m.kind == crate::discovery::Kind::Library);
+    let has_libraries = modules.values().any(|m| m.selected && m.kind.is_library());
     let available = OPERATIONS
         .iter()
         .copied()

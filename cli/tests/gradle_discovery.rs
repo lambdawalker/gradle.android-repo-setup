@@ -18,11 +18,11 @@ fn discovers_evaluated_plugins_nested_paths_remapped_directories_and_app_ids() {
         "settings.gradle",
         r#"
 rootProject.name = 'discovery-fixture'
-include ':libs:core', ':other:core', ':app', ':plain'
+include ':libs:core', ':other:core', ':app', ':plain', ':jvmapp'
 project(':libs:core').projectDir = file('custom/implementation')
 "#,
     );
-    write(root, "build.gradle", "");
+    write(root, "build.gradle", "plugins { id 'java-library' }");
     write(root, "libs/build.gradle", "");
     write(
         root,
@@ -123,9 +123,14 @@ public class ApplicationPlugin implements Plugin<Project> {
     write(
         root,
         "app/build.gradle",
-        "plugins { id 'com.android.application' }",
+        "plugins { id 'com.android.application'; id 'java-library' }",
     );
     write(root, "plain/build.gradle", "");
+    write(
+        root,
+        "jvmapp/build.gradle",
+        "plugins { id 'application'; id 'java-library' }",
+    );
     let report = root.join("report.json");
     let output = Command::new(std::env::var_os("GRADLE_BIN").expect("set GRADLE_BIN"))
         .current_dir(root)
@@ -162,4 +167,7 @@ public class ApplicationPlugin implements Plugin<Project> {
         serde_json::json!(["fixture.app", "fixture.app.debug"])
     );
     assert_eq!(module(":plain")["kind"], "other");
+    assert_eq!(module(":jvmapp")["kind"], "other");
+    assert_eq!(module(":")["kind"], "jvm-library");
+    assert!(module(":")["namespace"].is_null());
 }

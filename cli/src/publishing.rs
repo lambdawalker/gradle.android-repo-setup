@@ -142,7 +142,7 @@ pub(crate) fn generate(root: &Path, check: bool) -> Result<()> {
     let names: Vec<String> = if let Some(modules) = crate::discovery::load(root)? {
         let mut names = modules
             .iter()
-            .filter(|(_, m)| m.selected && m.kind == crate::discovery::Kind::Library)
+            .filter(|(_, m)| m.selected && m.kind.is_library())
             .map(|(id, _)| format!("publish-{id}.yml"))
             .collect::<Vec<_>>();
         if !names.is_empty() {
