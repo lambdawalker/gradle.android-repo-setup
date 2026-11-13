@@ -614,7 +614,24 @@ fn opted_in_documentation_uses_independent_tool_and_pin() {
     );
     assert!(updater.contains("git add .project/docs/config.yaml"));
     assert!(updater.contains("git add docs.sh docs.bat .project/docs/bootstrap.ps1 .gitignore"));
-    assert!(run(root.path(), &["--check"]).status.success());
+    let check = run(root.path(), &["--check"]);
+    assert!(
+        check.status.success(),
+        "generated workflows must immediately pass --check:\n{}\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    // Embedded fragments may have CRLF after a Windows checkout. All generated
+    // workflows must use the same LF representation as comparison and hashes.
+    for entry in fs::read_dir(folder).unwrap() {
+        let entry = entry.unwrap();
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        assert!(
+            !contents.contains('\r'),
+            "{} contains noncanonical line endings",
+            entry.path().display()
+        );
+    }
 }
 
 #[cfg(unix)]

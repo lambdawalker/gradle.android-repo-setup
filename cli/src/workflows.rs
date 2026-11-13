@@ -374,6 +374,9 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
             if template_name == "publish-demo-common.yml" { rendered = rendered.replacen("name: Publish\n", &format!("name: Publish {module}\n"),1); }
             if template_name == "build-signed-demo-apk.yml" { rendered = rendered.replacen("name: Build signed APK", &format!("name: Build signed {app} APK"),1); }
         }
+        // Embedded fragments can acquire CRLF at checkout. Canonicalize the
+        // complete output before validation, comparison, hashing, and writes.
+        let rendered = rendered.replace("\r\n", "\n").replace('\r', "\n");
         let _: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered).with_context(|| format!("Rendered workflow {name} is invalid YAML"))?;
         Ok((name, rendered))
     }).collect()
