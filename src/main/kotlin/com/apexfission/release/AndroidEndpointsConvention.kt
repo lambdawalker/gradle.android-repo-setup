@@ -12,9 +12,9 @@ enum class EndpointValidation {
     ENVIRONMENT,
 }
 
-private enum class EndpointType { STRING, BOOLEAN }
+internal enum class EndpointType { STRING, BOOLEAN }
 
-private data class EndpointBinding(
+internal data class EndpointBinding(
     val propertyName: String,
     val type: EndpointType,
     val buildConfigName: String?,
