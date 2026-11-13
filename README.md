@@ -17,6 +17,7 @@ pluginManagement {
             if (requested.id.id in setOf(
                     "com.apexfission.android-repo-setup.root",
                     "com.apexfission.android-repo-setup",
+                    "com.apexfission.android-repo-setup.application",
                 )) {
                 requested.version?.let { version ->
                     useModule("com.github.lambdawalker:gradle.android-repo-setup:$version")
