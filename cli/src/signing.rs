@@ -893,6 +893,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_properties_preserve_other_values_and_replace_signing_entries() -> Result<()> {
+        let passwords = SigningPasswords {
+            keystore: r"C:\Users\David\.projects\demo\secrets\release key.jks".into(),
+            alias: "release:key".into(),
+            store: "store pass:=#!".into(),
+            key: Some("different key".into()),
+        };
+        let existing = "sdk.dir=C:\\\\Android\\Sdk\nANDROID_KEYSTORE_PATH=old.jks\ncustom=value\n";
+        let rendered = local_properties_content(existing, &passwords)?;
+        assert!(rendered.contains("sdk.dir=C:\\\\Android\\Sdk\n"));
+        assert!(rendered.contains("custom=value\n"));
+        assert!(!rendered.contains("ANDROID_KEYSTORE_PATH=old.jks"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C\\:\\\\Users\\\\David\\\\.projects\\\\demo\\\\secrets\\\\release\\ key.jks"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PASSWORD=store\\ pass\\:\\=\\#\\!"));
+        assert!(rendered.contains("ANDROID_KEY_ALIAS=release\\:key"));
+        assert!(rendered.contains("ANDROID_KEY_PASSWORD=different\\ key"));
+        assert_eq!(rendered.matches(LOCAL_PROPERTIES_BEGIN).count(), 1);
+        assert_eq!(rendered.matches(LOCAL_PROPERTIES_END).count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn local_properties_omit_redundant_key_password_and_replace_managed_block() -> Result<()> {
+        let passwords = SigningPasswords {
+            keystore: "/tmp/release.jks".into(),
+            alias: "release".into(),
+            store: "same-password".into(),
+            key: Some("same-password".into()),
+        };
+        let existing = format!(
+            "sdk.dir=/sdk\n{LOCAL_PROPERTIES_BEGIN}\nANDROID_KEYSTORE_PATH=old\nANDROID_KEYSTORE_PASSWORD=old\nANDROID_KEY_ALIAS=old\nANDROID_KEY_PASSWORD=old\n{LOCAL_PROPERTIES_END}\n"
+        );
+        let rendered = local_properties_content(&existing, &passwords)?;
+        assert!(rendered.starts_with("sdk.dir=/sdk\n\n"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=/tmp/release.jks"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PASSWORD=same-password"));
+        assert!(rendered.contains("ANDROID_KEY_ALIAS=release"));
+        assert!(!rendered.contains("ANDROID_KEY_PASSWORD="));
+        assert_eq!(rendered.matches(LOCAL_PROPERTIES_BEGIN).count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn local_properties_reject_incomplete_managed_block() {
+        let passwords = SigningPasswords {
+            keystore: "/tmp/release.jks".into(),
+            alias: "release".into(),
+            store: "password".into(),
+            key: Some("password".into()),
+        };
+        assert!(local_properties_content(
+            &format!("{LOCAL_PROPERTIES_BEGIN}\nANDROID_KEYSTORE_PATH=old\n"),
+            &passwords,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn signing_rejects_export_keystore_collision_before_mutation() -> Result<()> {
         let keytool = find_keytool()?;
         let scratch = tempfile::tempdir()?;
