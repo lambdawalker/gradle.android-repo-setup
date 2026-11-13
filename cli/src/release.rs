@@ -88,7 +88,11 @@ pub(crate) fn verification_config(
     )?;
     ensure!(
         output.status.success(),
-        "Could not read verification configuration at source"
+        "Could not read .project/setup/config.yaml at immutable source {source}. \
+         If this release predates the CLI, verify its reserved artifacts with the original release tooling \
+         at that source, then use the current finalizer with the verified confirmation record. \
+         Preserve pending/uploading markers and never re-upload the version. \
+         Do not substitute the current checkout's verification contract."
     );
     #[derive(Deserialize)]
     struct Config {
@@ -593,6 +597,46 @@ fn verify_pom(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_source_without_contract_reports_recovery_and_rejects_current_contract() -> Result<()>
+    {
+        let project = tempfile::tempdir()?;
+        let root = project.path();
+        for args in [
+            vec!["init"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "legacy source",
+            ],
+        ] {
+            ensure!(
+                git(root, &args)?.status.success(),
+                "Fixture Git command failed"
+            );
+        }
+        let source = crate::confirmation::git_text(root, &["rev-parse", "HEAD"])?;
+        fs::create_dir_all(root.join(".project/setup"))?;
+        fs::write(
+            root.join(".project/setup/config.yaml"),
+            "verification:\n  class_prefix: com/example/current/\n  required_api_artifacts: []\n",
+        )?;
+        let error = verification_config(root, &source, "demo")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&source), "{error}");
+        assert!(error.contains("original release tooling"), "{error}");
+        assert!(error.contains("never re-upload"), "{error}");
+        Ok(())
+    }
 
     #[test]
     fn verification_contract_is_read_from_the_immutable_source() -> Result<()> {
