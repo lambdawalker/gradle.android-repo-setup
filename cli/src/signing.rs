@@ -545,7 +545,7 @@ fn local_properties_path(value: &str) -> String {
     if windows_path {
         value.replace('\\', "/")
     } else {
-        value
+        escape_property_value(&value)
     }
 }
 
