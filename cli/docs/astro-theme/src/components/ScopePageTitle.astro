@@ -1,4 +1,5 @@
 ---
+import { slug } from 'github-slugger';
 import Default from '@astrojs/starlight/components/PageTitle.astro';
 import pages from '../../pages.json';
 import site from '../../site.json';
@@ -6,7 +7,11 @@ import { currentPage } from '../../scripts/navigation.mjs';
 import scopes from '../../scopes.json';
 const page = currentPage(pages, Astro.url.pathname, (site.prefix || '').replace(/\/$/, ''));
 const scope = page && scopes[page.scope_index];
+const naturalTitle = page?.title ? slug(page.title) : undefined;
 ---
 {scope && <><span hidden data-pagefind-filter={`language:${scope.language}`}></span><span hidden data-pagefind-filter={`module:${scope.module}`}></span><span hidden data-pagefind-filter={`version:${scope.version}`}></span></>}
 {page?.title_anchor && page.title_anchor !== '_top' && <span id={page.title_anchor} aria-hidden="true"></span>}
+{naturalTitle && naturalTitle !== page?.title_anchor && naturalTitle !== '_top' && <span id={naturalTitle} aria-hidden="true"></span>}
+<aside id="guide-unavailable" data-doc-guide-unavailable data-pagefind-ignore role="status">{scope?.language === 'es' ? 'La guía seleccionada no está disponible en este ámbito. Se muestra su página de resumen.' : 'The selected guide is not available in this scope. Showing its overview.'}</aside>
 <Default><slot /></Default>
+<style is:global>#guide-unavailable{display:none}#guide-unavailable:target,#guide-unavailable[data-visible]{display:block;padding:1rem;border:1px solid var(--sl-color-orange);border-radius:.5rem;margin-block:1rem;background:var(--sl-color-orange-low)}</style>

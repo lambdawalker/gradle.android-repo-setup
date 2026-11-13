@@ -16,7 +16,7 @@ test('selectors preserve guides and supplied URLs, falling back to scope home',(
  const current=scope('2.0.0'),translated=scope('2.0.0','es'),older=scope('1.0.0','en',{pages:[{slug:'overview',title:'Overview',href:'/repo/en/core/1.0.0/start/'}]});
  const groups=selectorGroups([current,translated,older],current,'quickstart');
  assert.equal(groups.Language[1].href,'/repo/es/core/2.0.0/quickstart/');
- assert.equal(groups.Version.find(v=>v.label==='1.0.0').href,'/repo/en/core/1.0.0/start/');
+ assert.equal(groups.Version.find(v=>v.label==='1.0.0').href,'/repo/en/core/1.0.0/start/?guide-unavailable=quickstart#guide-unavailable');
  assert.equal(destination(current,'quickstart'),current.pages[1].href);
 });
 test('page lookup handles deployment roots and exact routes',()=>{
@@ -51,4 +51,22 @@ test('confirmed provider routes compare numeric release then canonical, Central,
 });
 test('search always filters all three scope dimensions',()=>{
  assert.deepEqual(searchFilters(scope('1.2.0','es')),{language:'es',module:'core',version:'1.2.0'});
+});
+
+test('missing guide navigation carries a visible localized fallback reason', async()=>{
+ const { fallbackNotice }=await import('../navigation.mjs');
+ const older=scope('1.0.0','en',{pages:[{slug:'',title:'Overview',href:'/repo/en/core/1.0.0/'}]});
+ assert.equal(destination(older,'new-api'),'/repo/en/core/1.0.0/?guide-unavailable=new-api#guide-unavailable');
+ assert.equal(destination(older),'/repo/en/core/1.0.0/');
+ assert.match(fallbackNotice('?guide-unavailable=new-api','en'),/new-api.*not available.*overview/i);
+ assert.match(fallbackNotice('?guide-unavailable=new-api','es'),/new-api.*no est.*disponible/i);
+ assert.equal(fallbackNotice('?other=value','en'),undefined);
+});
+
+test('translated authored heading fragments remain alongside stable English anchors',()=>{
+ const processor=unified().use(remarkParse).use(historicalMarkdown);
+ const tree=processor.runSync(processor.parse('## Capturar ambos lados {#capture-both-sides}\n\n## Capturar ambos lados {#second-capture}\n'));
+ assert.equal(tree.children[0].data.hProperties.id,'capture-both-sides');
+ assert.ok(tree.children[0].children.some(n=>n.data?.hProperties?.id==='capturar-ambos-lados'));
+ assert.ok(tree.children[1].children.some(n=>n.data?.hProperties?.id==='capturar-ambos-lados-1'));
 });

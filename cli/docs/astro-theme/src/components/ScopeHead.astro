@@ -5,3 +5,18 @@ const missing = Astro.locals.starlightRoute.id === '404' || /\/404\/?$/.test(Ast
 const tags = missing ? head.filter(item => !(item.tag === 'link' && ['canonical', 'alternate'].includes(item.attrs?.rel))) : head;
 ---
 {tags.map(({ tag: Tag, attrs, content }) => <Tag {...attrs} set:html={content} />)}
+
+<script>
+import { fallbackNotice } from '../../scripts/navigation.mjs';
+function showGuideFallback() {
+  const element = document.querySelector<HTMLElement>('[data-doc-guide-unavailable]');
+  if (!element) return;
+  const message = fallbackNotice(location.search, document.documentElement.lang, location.hash);
+  element.hidden = !message;
+  if (message) { element.dataset.visible = 'true'; element.textContent = message; }
+  else delete element.dataset.visible;
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showGuideFallback, {once:true});
+else showGuideFallback();
+document.addEventListener('astro:page-load', showGuideFallback);
+</script>

@@ -319,3 +319,38 @@ fn cached_launcher_exposes_docs_on_child_path() {
         format!("android-repo-docs {}", env!("CARGO_PKG_VERSION"))
     );
 }
+
+#[test]
+fn bootstrap_ignores_astro_app_dependencies_and_transactional_builds() {
+    let root = fixture("v0.1.21");
+    assert!(run(root.path(), &["generate"]).status.success());
+    assert!(Command::new("git")
+        .current_dir(root.path())
+        .arg("init")
+        .output()
+        .unwrap()
+        .status
+        .success());
+    for path in [
+        "sites/.astro-app-fixture/node_modules/dependency/index.js",
+        "sites/.astro-build-fixture/dist/index.html",
+    ] {
+        let file = root.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "temporary").unwrap();
+        let output = Command::new("git")
+            .current_dir(root.path())
+            .args(["check-ignore", path])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Temporary Astro path was not ignored: {path}"
+        );
+    }
+    let before = fs::read(root.path().join(".gitignore")).unwrap();
+    assert!(run(root.path(), &["generate", "--overwrite"])
+        .status
+        .success());
+    assert_eq!(before, fs::read(root.path().join(".gitignore")).unwrap());
+}

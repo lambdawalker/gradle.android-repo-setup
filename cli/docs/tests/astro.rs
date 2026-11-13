@@ -158,3 +158,81 @@ fn real_shared_astro_cli_renders_history_scopes_raw_routes_and_prefix_links() {
         .iter()
         .any(|scope| scope["version"] == "1.2.3" && scope["source"] == source));
 }
+
+#[cfg(unix)]
+fn inspect_staged_build(inspect: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, ".project/docs/config.yaml", "schema: 1\nrepository: example/library\ntitle: Reference\ntooling_ref: v0.1.21\nmodules:\n  api: API\n");
+    write(root, "docs/agents/index.md", "# Overview\n");
+    write(root, "docs/releases.md", "# Releases\n");
+    write(root, "IMPORT.md", "# Installation\n");
+    write(root, "sites/static/legacy.svg", "<svg/>");
+    write(root, "bin/node", "#!/bin/sh\necho v24.22.1\n");
+    write(root, "bin/npm", &format!("#!/bin/sh\nif [ \"$1\" = ci ]; then\n{inspect}\nfi\nif [ \"$1\" = run ]; then echo '<html>Built</html>' > \"$ANDROID_REPO_DOCS_OUTPUT/index.html\"; fi\necho 11.0.0\n"));
+    for file in ["bin/node", "bin/npm"] {
+        fs::set_permissions(root.join(file), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_android-repo-docs"))
+        .arg("--project")
+        .arg(root)
+        .arg("build")
+        .env("PATH", root.join("bin"))
+        .env("EXPECTED_SITES", root.join("sites"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[cfg(unix)]
+#[test]
+fn astro_app_and_output_share_the_repository_filesystem() {
+    inspect_staged_build("case \"$PWD\" in \"$EXPECTED_SITES\"/*) ;; *) echo staging-outside-sites >&2; exit 35;; esac");
+}
+#[cfg(unix)]
+#[test]
+fn astro_preserves_current_legacy_public_assets() {
+    inspect_staged_build(
+        "if [ ! -f public/legacy.svg ]; then echo missing-legacy-public >&2; exit 36; fi",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn current_prepare_hook_receives_stage_and_failure_preserves_output() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root,".project/docs/config.yaml","schema: 1\nrepository: example/library\ntitle: Hook\ntooling_ref: v0.1.21\nmodules:\n  api: API\nsite:\n  backend: astro\n  prepare: ['./prepare hook', 'literal ; argument']\n");
+    write(root, "docs/agents/index.md", "# Overview\n");
+    write(root, "IMPORT.md", "# Installation\n");
+    write(root, "docs/releases.md", "# Releases\n");
+    write(root, "sites/dist/index.html", "last good build");
+    write(root, "bin/node", "#!/bin/sh\necho v24.22.1\n");
+    write(root, "bin/npm", "#!/bin/sh\necho 11.0.0\n");
+    write(root,"prepare hook","#!/bin/sh\n[ \"$1\" = 'literal ; argument' ] || exit 41\n[ \"$ANDROID_REPO_DOCS_PREPARE_ACTIVE\" = 1 ] || exit 42\n[ -f \"$ANDROID_REPO_DOCS_STAGE/pages.json\" ] || exit 43\necho hook-received-stage >&2\nexit 17\n");
+    for file in ["bin/node", "bin/npm", "prepare hook"] {
+        fs::set_permissions(root.join(file), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_android-repo-docs"))
+        .arg("--project")
+        .arg(root)
+        .arg("build")
+        .env("PATH", root.join("bin"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("hook-received-stage"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("sites/dist/index.html")).unwrap(),
+        "last good build"
+    );
+}

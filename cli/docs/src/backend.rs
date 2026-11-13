@@ -25,6 +25,18 @@ struct Site {
     build: Option<Vec<String>>,
     #[serde(default)]
     serve: Option<Vec<String>>,
+    #[serde(default, rename = "pages")]
+    _pages: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "current_pages")]
+    _current_pages: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    prepare: Option<Vec<String>>,
+    #[serde(default, rename = "translation_manifest")]
+    _translation_manifest: Option<String>,
+    #[serde(default, rename = "translation_paths")]
+    _translation_paths: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "aliases")]
+    _aliases: Vec<crate::content::Alias>,
 }
 
 fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
@@ -32,6 +44,10 @@ fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
         let site: Site = serde_json::from_value(value.clone())
             .context("Invalid site config; backend must be astro, zola, external or legacy, and commands must be argv arrays")?;
         let commands = site.build.is_some() || site.serve.is_some();
+        if let Some(argv)=&site.prepare {
+            ensure!(!argv.is_empty() && !argv[0].is_empty(),"site.prepare must be a nonempty argv array");
+            ensure!(!commands && site.backend.is_none_or(|backend| backend==SiteBackend::Astro),"site.prepare is supported only by built-in Astro");
+        }
         ensure!(!commands || site.backend.is_none() || site.backend == Some(SiteBackend::External),
             "Built-in site.backend cannot be combined with site.build or site.serve; use backend: external for custom commands");
         ensure!(site.backend != Some(SiteBackend::External) || commands,
@@ -46,15 +62,32 @@ fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
 
 pub(crate) fn validate(config: &Config) -> Result<()> {
     settings(config.site.as_ref())?;
+    crate::content::Settings::load(config)?;
     Ok(())
 }
 
 pub(crate) fn selected(root: &Path, config: &Config) -> Result<SiteBackend> {
-    select(root, config.site.as_ref())
+    let backend = select(root, config.site.as_ref())?;
+    ensure!(
+        backend == SiteBackend::Astro
+            || config
+                .site
+                .as_ref()
+                .and_then(|v| v.get("prepare"))
+                .is_none(),
+        "site.prepare is supported only by built-in Astro"
+    );
+    Ok(backend)
 }
 
 pub(crate) fn select(root: &Path, value: Option<&serde_json::Value>) -> Result<SiteBackend> {
     if let Some(site) = settings(value)? {
+        ensure!(
+            site.prepare.is_none()
+                || site.backend == Some(SiteBackend::Astro)
+                || !root.join("sites/zola.toml").is_file(),
+            "site.prepare is supported only by built-in Astro"
+        );
         if let Some(backend) = site.backend {
             return Ok(backend);
         }

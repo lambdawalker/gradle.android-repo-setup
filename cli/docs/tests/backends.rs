@@ -114,3 +114,26 @@ fn fresh_docs_only_repository_builds_with_inferred_module_at_domain_root() {
         .is_file());
     assert!(!root.path().join(".project/setup").exists());
 }
+
+#[test]
+fn prepare_hook_is_an_astro_extension_not_an_external_backend() {
+    let root = project("site:\n  backend: astro\n  prepare: [node, sites/prepare.mjs]\n");
+    assert_eq!(site_backend(root.path()).unwrap(), SiteBackend::Astro);
+    for site in [
+        "site:\n  backend: zola\n  prepare: [node, sites/prepare.mjs]\n",
+        "site:\n  backend: legacy\n  prepare: [node, sites/prepare.mjs]\n",
+        "site:\n  prepare: []\n",
+        "site:\n  backend: astro\n  prepare: node sites/prepare.mjs\n",
+        "site:\n  prepare: [node, sites/prepare.mjs]\n  build: [npm, run, build]\n",
+    ] {
+        assert!(site_backend(project(site).path()).is_err(), "{site}");
+    }
+    let implicit_zola = project("site:\n  prepare: [node, sites/prepare.mjs]\n");
+    fs::create_dir_all(implicit_zola.path().join("sites")).unwrap();
+    fs::write(
+        implicit_zola.path().join("sites/zola.toml"),
+        "base_url='https://example.com/'",
+    )
+    .unwrap();
+    assert!(site_backend(implicit_zola.path()).is_err());
+}

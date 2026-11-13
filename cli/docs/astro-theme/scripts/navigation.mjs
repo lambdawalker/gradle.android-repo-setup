@@ -35,9 +35,19 @@ export function versionScopes(scopes, current) {
     .sort((a, b) => Number(isDevelopment(a)) - Number(isDevelopment(b)) || compareVersions(b, a));
 }
 export function destination(scope, guide = '') {
-  return scope.pages.find(p => p.slug === guide)?.href
-    ?? scope.pages.find(p => ['', 'index', 'overview'].includes(p.slug))?.href
-    ?? scope.pages[0]?.href ?? scope.root;
+  const exact = scope.pages.find(p => p.slug === guide)?.href;
+  if (exact) return exact;
+  const fallback = scope.pages.find(p => ['', 'index', 'overview'].includes(p.slug))?.href ?? scope.pages[0]?.href ?? scope.root;
+  if (!guide) return fallback;
+  const [path] = fallback.split('#');
+  return `${path}${path.includes('?') ? '&' : '?'}guide-unavailable=${encodeURIComponent(guide)}#guide-unavailable`;
+}
+export function fallbackNotice(search, language = 'en', hash = '') {
+  const guide = new URLSearchParams(search).get('guide-unavailable')?.slice(0, 200);
+  if (!guide && hash !== '#guide-unavailable') return undefined;
+  return language.startsWith('es')
+    ? `La guía ${guide || 'seleccionada'} no está disponible en este ámbito. Se muestra su página de resumen.`
+    : `The guide ${guide || 'you selected'} is not available in this scope. Showing its overview.`;
 }
 export function currentPage(pages, pathname, prefix = '') {
   const clean = value => decodeURI(value).replace(/\/+$/, '');

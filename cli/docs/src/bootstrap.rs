@@ -38,11 +38,18 @@ pub fn expected(root: &Path) -> Result<BTreeMap<&'static str, String>> {
     let mut ignore = fs::read_to_string(root.join(".gitignore"))
         .unwrap_or_default()
         .replace("\r\n", "\n");
-    if !ignore.lines().any(|s| s == "/.project/docs/cache/") {
-        if !ignore.is_empty() && !ignore.ends_with('\n') {
+    for pattern in [
+        "/.project/docs/cache/",
+        "/sites/.astro-app-*/",
+        "/sites/.astro-build-*/",
+    ] {
+        if !ignore.lines().any(|line| line == pattern) {
+            if !ignore.is_empty() && !ignore.ends_with('\n') {
+                ignore.push('\n');
+            }
+            ignore.push_str(pattern);
             ignore.push('\n');
         }
-        ignore.push_str("/.project/docs/cache/\n");
     }
     files.insert(".gitignore", ignore);
     for text in files.values_mut() {

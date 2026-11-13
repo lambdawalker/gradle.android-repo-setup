@@ -95,10 +95,15 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
         .as_ref()
         .and_then(|site| site.get("base_url"))
         .and_then(serde_json::Value::as_str);
-    let temporary = tempfile::tempdir()?;
+    let sites = std::path::absolute(root.join("sites"))?;
+    std::fs::create_dir_all(&sites)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".astro-app-")
+        .tempdir_in(&sites)?;
     let stage = temporary.path();
     bundle(stage)?;
     let prepared = content::prepare(root, stage, &config, base, base_url)?;
+    content::copy_tree(&root.join("sites/static"), &stage.join("public"))?;
     for (from, to) in [
         ("components", "src/components"),
         ("styles", "src/styles"),
@@ -107,6 +112,7 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
         content::copy_tree(&root.join("sites/astro").join(from), &stage.join(to))?;
     }
     content::copy_tree(&stage.join("static"), &stage.join("public"))?;
+    prepare_hook(root, &config, stage)?;
     let installed = npm(
         stage,
         &["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
@@ -118,8 +124,6 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
         String::from_utf8_lossy(&installed.stdout),
         String::from_utf8_lossy(&installed.stderr)
     );
-    let sites = std::path::absolute(root.join("sites"))?;
-    std::fs::create_dir_all(&sites)?;
     let output = tempfile::Builder::new()
         .prefix(".astro-build-")
         .tempdir_in(&sites)?;
@@ -156,5 +160,41 @@ pub(super) fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> 
         return Err(error)
             .context("Could not replace documentation output; previous build restored");
     }
+    Ok(())
+}
+
+fn prepare_hook(root: &Path, config: &Config, stage: &Path) -> Result<()> {
+    let Some(value) = config.site.as_ref().and_then(|site| site.get("prepare")) else {
+        return Ok(());
+    };
+    let argv: Vec<String> =
+        serde_json::from_value(value.clone()).context("site.prepare must be an argv array")?;
+    ensure!(
+        !argv.is_empty() && !argv[0].is_empty(),
+        "site.prepare must contain an executable"
+    );
+    ensure!(
+        std::env::var_os("ANDROID_REPO_DOCS_PREPARE_ACTIVE").is_none(),
+        "Recursive documentation site.prepare command rejected"
+    );
+    let program = if Path::new(&argv[0]).components().count() > 1 {
+        root.join(&argv[0])
+    } else {
+        argv[0].clone().into()
+    };
+    let output = Command::new(program)
+        .args(&argv[1..])
+        .current_dir(root)
+        .env("ANDROID_REPO_DOCS_STAGE", stage)
+        .env("ANDROID_REPO_DOCS_PREPARE_ACTIVE", "1")
+        .output()
+        .with_context(|| format!("Could not execute site.prepare: {}", argv[0]))?;
+    ensure!(
+        output.status.success(),
+        "site.prepare failed ({}):\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }

@@ -73,6 +73,35 @@ A built-in backend cannot also define external command arrays. Unknown backend v
 
 The frontend and theme ship in `cli/docs/astro-theme/`. Trusted current-checkout overrides may be placed in `sites/astro/components/`, `sites/astro/styles/` and `sites/astro/public/`, mapped to the bundled application's `src/components/`, `src/styles/` and `public/`. Replacing the provided component/style filenames customizes the shared layout; unused new files are not automatically imported. Canonical prepared metadata and immutable assets take precedence over public overrides. Tera templates in `sites/templates/` are Zola-specific and must be ported explicitly.
 
+Additional source pages, reviewed translations, and legacy routes can be configured without a custom renderer:
+
+```yaml
+site:
+  backend: astro
+  pages:
+    README.md: project/overview
+    docs/operations.md: operations
+  current_pages:
+    docs/maintenance.md: project/development
+  translation_manifest: sites/translations.json
+  translation_paths:
+    README.md: docs/es/README.md
+  aliases:
+    - source: README.md
+      html: '{language}/main/README.html'
+      raw: 'raw/{language}/main/README.md'
+```
+
+`pages` adds canonical repository Markdown files or changes their guide slugs. It retains the discovered `docs/agents/` pages, `IMPORT.md`, and `docs/releases.md`; map a default source explicitly to change its slug. An empty slug selects the scope overview. Sources and slugs must be safe relative paths, and every guide route must be unique. Historical pages come from their immutable `documentation_ref`. `current_pages` uses the current working-tree source, translation and assets for every selected scope instead. Both its human page and raw Markdown identify it as a current shared project resource, and page metadata records the current source/documentation revision. It does not change publication records.
+
+The translation manifest can contain simple SHA-256 values keyed by guide-relative or canonical source paths, or reviewed records such as `{"README.md":{"path":"docs/es/README.md","source_sha256":"…","provenance":"Reviewed Spanish prose"}}`. The source hash must match normalized canonical Markdown. Missing or stale translations fall back to the same source revision; fresh translations with changed fenced code fail the build. `translation_paths` takes precedence over a record's `path`. Relative links and images resolve from the actual translated file location; canonical and mapped translated page paths lead to the same scoped guide. Existing default translation locations remain supported.
+
+Each alias names a configured or discovered canonical source. `html` writes a redirect to its prepared human page; `raw` copies its exact prepared raw Markdown, including provenance. Output paths expand `{language}`, `{module}`, and `{version}`. Paths are relative to the site root, must be unique after expansion, and cannot replace canonical pages, raw guides, metadata or generated assets. Include `{version}` when aliases apply to several immutable versions, or use a development-only project without historical scopes. Repository traversal and unknown source pages fail validation.
+
+Current `sites/static/` assets are copied into the shared public directory for compatibility. `sites/astro/public/` can override them, followed by prepared canonical raw guides, metadata and immutable assets. No historical build script is executed. The temporary Astro app and transactional output both live under `sites/`, keeping Vite's asset renames on the destination filesystem. Root `agents/*.md` and `IMPORT.md` remain current Development inputs; historical raw guides retain their own scoped paths. Source-file links prefer the immutable publication source when the file exists there, and use `documentation_ref` for examples added by a documentation correction.
+
+A project that needs a small domain-specific content projection may set `site.prepare: [node, sites/prepare.mjs]` with the built-in Astro backend. The command runs from the trusted current project checkout after content staging and public asset copies, before dependency installation/build. Arguments remain literal; `ANDROID_REPO_DOCS_STAGE` points to the temporary app containing `pages.json`, `scopes.json`, `site.json`, and `public/`. Immutable release catalog entries are available as each released scope's `release` object; `destinations` remains the compatible list of provider names. The hook may project these prepared files without rewriting source archives. A nonzero exit or recursive prepare invocation fails the build and preserves `sites/dist/`. `ANDROID_REPO_DOCS_PREPARE_ACTIVE=1` marks the child invocation. This hook does not select the external backend and cannot be combined with `site.build`/`site.serve` or a different built-in backend.
+
 Existing project site designs can continue using literal command arrays:
 
 ```yaml
