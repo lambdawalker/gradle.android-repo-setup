@@ -19,7 +19,7 @@ pub(super) struct WindowsTerminal {
 }
 
 pub(super) fn new() -> io::Result<WindowsTerminal> {
-    Ok(WindowsTerminal {
+    let mut backend = WindowsTerminal {
         output: Box::new(io::stdout()),
         size: terminal::size().ok(),
         fullscreen: false,
@@ -27,7 +27,20 @@ pub(super) fn new() -> io::Result<WindowsTerminal> {
         paste: false,
         raw: false,
         input_started: false,
-    })
+    };
+    if !mouse_capture_requested(
+        true,
+        std::env::var("TERMINAL_EMULATOR").ok().as_deref(),
+        std::env::var("ANDROID_REPO_SETUP_NO_MOUSE").ok().as_deref(),
+    ) {
+        // Clear both console and terminal-emulator tracking left by a previous
+        // run. On Windows QueueableCommand uses WinAPI for this command, so
+        // explicitly send the ANSI reset as well.
+        backend.output.queue(event::DisableMouseCapture)?;
+        write_mouse_reset(&mut backend.output)?;
+        backend.output.flush()?;
+    }
+    Ok(backend)
 }
 
 impl TerminalBackend for WindowsTerminal {
@@ -58,6 +71,11 @@ impl TerminalBackend for WindowsTerminal {
         Ok(())
     }
     fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        let enabled = mouse_capture_requested(
+            enabled,
+            std::env::var("TERMINAL_EMULATOR").ok().as_deref(),
+            std::env::var("ANDROID_REPO_SETUP_NO_MOUSE").ok().as_deref(),
+        );
         if self.mouse != enabled {
             // Remember enabling before writing so Drop also restores partial writes.
             if enabled {
@@ -169,6 +187,18 @@ impl TerminalBackend for WindowsTerminal {
     }
 }
 
+// Keep environment access outside the policy so tests do not mutate process state.
+fn mouse_capture_requested(enabled: bool, terminal: Option<&str>, no_mouse: Option<&str>) -> bool {
+    enabled
+        && no_mouse != Some("1")
+        && !terminal.is_some_and(|name| name.to_ascii_lowercase().starts_with("jetbrains"))
+}
+
+fn write_mouse_reset(output: &mut impl Write) -> io::Result<()> {
+    // Explicit ANSI is required: QueueableCommand uses WinAPI on Windows.
+    output.write_all(b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
+}
+
 fn write_frame(output: &mut impl Write, canvas: &Canvas) -> io::Result<()> {
     // Public Canvas serialization includes a final newline. Remove it so a
     // canvas filling the viewport does not scroll its first row off screen.
@@ -186,6 +216,31 @@ fn write_frame(output: &mut impl Write, canvas: &Canvas) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyboard_mode_resets_all_terminal_mouse_protocols() {
+        let mut bytes = Vec::new();
+        write_mouse_reset(&mut bytes).unwrap();
+        assert_eq!(
+            bytes,
+            b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
+    }
+    #[test]
+    fn jetbrains_and_explicit_keyboard_mode_do_not_enable_mouse_reports() {
+        assert!(!mouse_capture_requested(
+            true,
+            Some("JetBrains-JediTerm"),
+            None
+        ));
+        assert!(!mouse_capture_requested(true, None, Some("1")));
+        assert!(mouse_capture_requested(true, None, None));
+        assert!(mouse_capture_requested(
+            true,
+            Some("Windows Terminal"),
+            Some("0")
+        ));
+        assert!(!mouse_capture_requested(false, None, None));
+    }
     #[test]
     fn fullscreen_frame_clears_before_paint_and_omits_final_newline() {
         let canvas = Canvas::new(80, 24);
