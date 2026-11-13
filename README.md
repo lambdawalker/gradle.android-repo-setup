@@ -123,7 +123,7 @@ publication locally and download it as a workflow artifact. Leave **source_tag**
 blank to build `main`, or enter an existing project tag to build that commit.
 
 Use **Actions → Publish Gradle plugins to JitPack** to build, trigger JitPack,
-and verify the tagged commit and both plugin descriptors. For older tags,
+and verify the tagged commit and all plugin descriptors. For older tags,
 run from `main` and enter the tag in **source_tag**. For tags that already
 contain the current workflow, selecting the tag in **Use workflow from**
 also works.
