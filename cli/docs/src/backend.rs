@@ -25,6 +25,14 @@ struct Site {
     build: Option<Vec<String>>,
     #[serde(default)]
     serve: Option<Vec<String>>,
+    #[serde(default)]
+    _pages: Option<serde_json::Value>,
+    #[serde(default)]
+    _translation_manifest: Option<serde_json::Value>,
+    #[serde(default)]
+    _translation_paths: Option<serde_json::Value>,
+    #[serde(default)]
+    _aliases: Option<serde_json::Value>,
 }
 
 fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
@@ -152,4 +160,28 @@ fn windows_command_shim(root: &Path, program: &str) -> Option<std::path::PathBuf
         }
     }
     None
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn built_in_backend_accepts_renderer_specific_site_metadata() -> Result<()> {
+        let site = json!({
+            "backend": "astro",
+            "base_url": "https://example.com/docs/",
+            "pages": {"README.md": "project"},
+            "translation_manifest": "translations.json",
+            "translation_paths": {"README.md": "docs/es/README.md"},
+            "aliases": [{"source": "README.md", "html": "{language}/main/README.html"}]
+        });
+        assert_eq!(
+            select(Path::new("."), Some(&site))?,
+            SiteBackend::Astro
+        );
+        Ok(())
+    }
 }
