@@ -46,6 +46,19 @@ gradlePlugin {
                 }
             }
         }
+        register("androidRepoSetupApplication") {
+            id = "com.apexfission.android-repo-setup.application"
+            implementationClass = "com.apexfission.release.AndroidRepoSetupApplicationPlugin"
+            displayName = "Android Repository Setup Application Conventions"
+            description = "Configures reusable Android application signing and runtime endpoint bindings."
+            tags.set(listOf("android", "application", "signing", "configuration"))
+            compatibility {
+                features {
+                    configurationCache.set(false)
+                    isolatedProjects.set(false)
+                }
+            }
+        }
         register("androidRepoSetup") {
             id = "com.apexfission.android-repo-setup"
             implementationClass = "com.apexfission.release.AndroidRepoSetupPlugin"
