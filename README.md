@@ -17,6 +17,7 @@ pluginManagement {
             if (requested.id.id in setOf(
                     "com.apexfission.android-repo-setup.root",
                     "com.apexfission.android-repo-setup",
+                    "com.apexfission.android-repo-setup.application",
                 )) {
                 requested.version?.let { version ->
                     useModule("com.github.lambdawalker:gradle.android-repo-setup:$version")
@@ -74,6 +75,8 @@ Remove the module's existing Vanniktech plugin declaration and its release confi
 
 The library plugin configures the release AAR, sources and documentation jars, reproducible jar settings, and the local `verification` Maven repository. Existing workflows can continue to use `-PreleaseModule`, `-PreleaseVersion`, `-PjitpackBuild=true`, and `-PjitpackScopedTag=true`. Maven Central uploads require the configured credentials and a valid release reservation.
 
+Runnable application modules can use the shared `com.apexfission.android-repo-setup.application` plugin from a source checkout, or from a published release that contains it. It centralizes generic APK signing inputs plus public runtime/endpoint bindings while leaving encrypted-vault access in the CLI. See [Android application conventions](docs/application-conventions.md).
+
 Generic model and binary asset preparation is documented in [Release assets](docs/release-assets.md) (next CLI release).
 
 ## JitPack
@@ -121,7 +124,7 @@ publication locally and download it as a workflow artifact. Leave **source_tag**
 blank to build `main`, or enter an existing project tag to build that commit.
 
 Use **Actions → Publish Gradle plugins to JitPack** to build, trigger JitPack,
-and verify the tagged commit and both plugin descriptors. For older tags,
+and verify the tagged commit and all plugin descriptors. For older tags,
 run from `main` and enter the tag in **source_tag**. For tags that already
 contain the current workflow, selecting the tag in **Use workflow from**
 also works.

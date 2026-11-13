@@ -96,7 +96,7 @@ jobs:
             sleep "$((remaining < 10 ? remaining : 10))"
           done
           unzip -Z1 "$RUNNER_TEMP/plugin.jar" > "$RUNNER_TEMP/plugin-entries"
-          for id in com.apexfission.android-repo-setup com.apexfission.android-repo-setup.root; do
+          for id in com.apexfission.android-repo-setup com.apexfission.android-repo-setup.root com.apexfission.android-repo-setup.application; do
             grep -Fx "META-INF/gradle-plugins/$id.properties" "$RUNNER_TEMP/plugin-entries"
           done
           printf 'Verified `com.github.lambdawalker:%s:%s` from `%s`.\n\n[Build log](%s/build.log)\n' \

@@ -18,13 +18,14 @@ kotlin {
 }
 
 repositories {
-    mavenCentral()
     google()
+    mavenCentral()
     gradlePluginPortal()
 }
 
 dependencies {
     implementation("com.vanniktech:gradle-maven-publish-plugin:0.37.0")
+    compileOnly("com.android.tools.build:gradle-api:9.4.1")
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -39,6 +40,19 @@ gradlePlugin {
             displayName = "Android Repository Setup Root Conventions"
             description = "Adds release documentation tasks backed by the Android Repository Setup CLI."
             tags.set(listOf("android", "documentation", "release"))
+            compatibility {
+                features {
+                    configurationCache.set(false)
+                    isolatedProjects.set(false)
+                }
+            }
+        }
+        register("androidRepoSetupApplication") {
+            id = "com.apexfission.android-repo-setup.application"
+            implementationClass = "com.apexfission.release.AndroidRepoSetupApplicationPlugin"
+            displayName = "Android Repository Setup Application Conventions"
+            description = "Configures reusable Android application signing and runtime endpoint bindings."
+            tags.set(listOf("android", "application", "signing", "configuration"))
             compatibility {
                 features {
                     configurationCache.set(false)
