@@ -90,16 +90,14 @@ open class AndroidEndpointsConvention {
     internal fun configuredBindings(): List<EndpointBinding> = bindings.toList()
 }
 
-private class EndpointResolver(
-    private val project: Project,
+internal class EndpointResolver(
     private val bindings: List<EndpointBinding>,
-    private val fileProperties: Properties,
+    private val rawValue: (String) -> String?,
 ) {
     private val byName = bindings.associateBy { it.propertyName }
     private val resolved = mutableMapOf<String, String>()
 
-    fun raw(name: String): String? =
-        project.providers.gradleProperty(name).orNull ?: fileProperties.getProperty(name)
+    fun raw(name: String): String? = rawValue(name)
 
     fun resolve(binding: EndpointBinding): String = resolveName(binding.propertyName, linkedSetOf())
 
@@ -138,7 +136,9 @@ internal fun Project.configureEndpointConventions(
             config.reader(Charsets.UTF_8).use { load(it) }
         }
     }
-    val resolver = EndpointResolver(this, bindings, fileProperties)
+    val resolver = EndpointResolver(bindings) { name ->
+        providers.gradleProperty(name).orNull ?: fileProperties.getProperty(name)
+    }
 
     if (environmentFile != null) {
         bindings.filter { it.requiredInConfig }.forEach { binding ->
@@ -168,7 +168,7 @@ internal fun Project.configureEndpointConventions(
     }
 }
 
-private fun validateEndpoint(binding: EndpointBinding, value: String) {
+internal fun validateEndpoint(binding: EndpointBinding, value: String) {
     if (value.isBlank()) {
         require(binding.allowBlank) { "${binding.propertyName} must not be blank" }
         return
