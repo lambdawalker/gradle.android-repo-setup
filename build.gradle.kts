@@ -18,8 +18,8 @@ kotlin {
 }
 
 repositories {
-    mavenCentral()
     google()
+    mavenCentral()
     gradlePluginPortal()
 }
 
