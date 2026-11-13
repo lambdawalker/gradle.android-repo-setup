@@ -209,7 +209,7 @@ fn installation_and_archive_use_confirmed_destination_coordinates() {
 }
 
 #[test]
-fn site_build_links_version_routes_and_loads_their_sources_from_git() {
+fn legacy_site_build_links_version_routes_and_loads_their_sources_from_git() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     let git = |args: &[&str]| {
@@ -272,6 +272,9 @@ fn site_build_links_version_routes_and_loads_their_sources_from_git() {
     );
 
     success(root, &["documentation_history", "seed"]);
+    // This test exercises the original renderer's legacy routes/HTML. New sites
+    // now select Astro; opt into the legacy contract explicitly.
+    write(root, ".project/docs/config.yaml", "schema: 1\nrepository: lambdawalker/android.apexfission.demo-common\ntitle: Demo Common\ntooling_ref: v0.1.20\nmodules:\n  demo-common: Demo Common\nsite:\n  backend: legacy\n");
     success(root, &["build_docs", "--base", "/reference/", "--check"]);
     let dist = root.join("sites/dist");
     let index = fs::read_to_string(dist.join("index.html")).unwrap();

@@ -1,0 +1,12 @@
+---
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+import pages from '../../pages.json';
+import site from '../../site.json';
+import { currentPage } from '../../scripts/navigation.mjs';
+import scopes from '../../scopes.json';
+const page = currentPage(pages, Astro.url.pathname, (site.prefix || '').replace(/\/$/, ''));
+const scope = page && scopes[page.scope_index];
+---
+{scope && <><span hidden data-pagefind-filter={`language:${scope.language}`}></span><span hidden data-pagefind-filter={`module:${scope.module}`}></span><span hidden data-pagefind-filter={`version:${scope.version}`}></span></>}
+{page?.title_anchor && page.title_anchor !== '_top' && <span id={page.title_anchor} aria-hidden="true"></span>}
+<Default><slot /></Default>

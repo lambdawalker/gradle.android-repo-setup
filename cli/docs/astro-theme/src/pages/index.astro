@@ -1,0 +1,12 @@
+---
+import scopes from '../../scopes.json';
+import site from '../../site.json';
+import { homeTargets, isDevelopment } from '../../scripts/navigation.mjs';
+const targets = homeTargets(scopes);
+const redirect = targets.length === 1 ? targets[0].href : undefined;
+---
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width" /><title>{site.title}</title>
+{redirect && <meta http-equiv="refresh" content={`0; url=${redirect}`} />}
+</head><body><main><h1>{site.title}</h1><p>Choose a module to read its latest released documentation.</p><ul>{targets.map(target => <li><a href={target.href}>{target.module} · {isDevelopment(target.scope) ? 'Development' : target.scope.version}</a></li>)}</ul></main></body></html>
+<style>body{font:1rem/1.6 system-ui,sans-serif;max-width:60rem;margin:4rem auto;padding:0 1.5rem;color:#1e293b;background:#f8fafc}a{color:#1d4ed8}li{margin:.75rem 0}</style>

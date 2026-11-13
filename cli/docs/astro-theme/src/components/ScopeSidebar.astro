@@ -1,0 +1,13 @@
+---
+import pages from '../../pages.json';
+import scopes from '../../scopes.json';
+import site from '../../site.json';
+import { currentPage } from '../../scripts/navigation.mjs';
+const page = currentPage(pages, Astro.url.pathname, (site.prefix || '').replace(/\/$/, ''));
+const scope = page && scopes[page.scope_index];
+const es = scope?.language === 'es';
+---
+<nav aria-label={es ? "Guías del módulo" : "Module guides"} class="scope-sidebar">
+<a href={`${(site.prefix || '').replace(/\/$/, '')}/`}>{es ? 'Todos los módulos' : 'All modules'}</a>
+{scope && <><h2>{scope.label} · {scope.version === 'development' ? (es ? 'Desarrollo' : 'Development') : scope.version}</h2><ul>{scope.pages.map(guide => <li><a href={guide.href} aria-current={guide.href.replace(/\/$/, '') === Astro.url.pathname.replace(/\/$/, '') ? 'page' : undefined}>{guide.title}</a></li>)}</ul></>}
+</nav>

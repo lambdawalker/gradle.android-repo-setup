@@ -1,3 +1,5 @@
+mod astro;
+mod content;
 mod history;
 pub mod media;
 mod site;
@@ -9,7 +11,26 @@ pub mod bootstrap;
 mod config;
 mod server;
 
+pub use backend::SiteBackend;
 use config::Config;
+
+/// Resolve the configured renderer without executing a site command or changing files.
+pub fn site_backend(root: &Path) -> Result<SiteBackend> {
+    backend::selected(root, &Config::load(root)?)
+}
+
+/// Resolve only site settings for workflow generation, which also supports
+/// repositories that have adopted the documentation pin before full metadata.
+pub fn site_backend_for_workflow(root: &Path) -> Result<SiteBackend> {
+    let path = root.join(".project/docs/config.yaml");
+    if !path.is_file() {
+        return backend::select(root, None);
+    }
+    let config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&read(path)?)?;
+    let site = config.get("site").map(serde_json::to_value).transpose()?;
+    backend::select(root, site.as_ref())
+}
+
 pub use history::{archive_record, history, seed, validate_archive, HISTORY};
 
 /// Render the repository-owned site. This never performs a publication.
@@ -17,10 +38,13 @@ pub fn build(root: &Path, base: Option<&str>, check: bool) -> Result<()> {
     let config = Config::load(root)?;
     if backend::run(root, &config, "build", base, None, check)? {
         Ok(())
-    } else if root.join("sites/zola.toml").is_file() {
-        zola::build(root, base, check)
     } else {
-        site::build(root, base)
+        match backend::selected(root, &config)? {
+            SiteBackend::Astro => astro::build(root, base, check),
+            SiteBackend::Zola => zola::build(root, base, check),
+            SiteBackend::Legacy => site::build(root, base),
+            SiteBackend::External => unreachable!("External backend already handled"),
+        }
     }
 }
 
@@ -30,10 +54,6 @@ pub fn serve(root: &Path, base: Option<&str>, port: u16) -> Result<()> {
     if backend::run(root, &config, "serve", base, Some(port), false)? {
         return Ok(());
     }
-    ensure!(
-        config.site.is_none(),
-        "Configure site.serve for the external site backend"
-    );
     let base = base.unwrap_or("/");
     ensure!(
         base.starts_with('/')

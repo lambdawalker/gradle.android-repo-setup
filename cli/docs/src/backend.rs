@@ -3,14 +3,70 @@ use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use std::{path::Path, process::Command};
 
+/// Documentation renderer selection shared by builds and generated CI workflows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteBackend {
+    Astro,
+    Zola,
+    External,
+    Legacy,
+}
+
 const ACTIVE: &str = "ANDROID_REPO_DOCS_SITE_ACTIVE";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Site {
     #[serde(default)]
+    backend: Option<SiteBackend>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
     build: Option<Vec<String>>,
     #[serde(default)]
     serve: Option<Vec<String>>,
+}
+
+fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
+    value.map(|value| {
+        let site: Site = serde_json::from_value(value.clone())
+            .context("Invalid site config; backend must be astro, zola, external or legacy, and commands must be argv arrays")?;
+        let commands = site.build.is_some() || site.serve.is_some();
+        ensure!(!commands || site.backend.is_none() || site.backend == Some(SiteBackend::External),
+            "Built-in site.backend cannot be combined with site.build or site.serve; use backend: external for custom commands");
+        ensure!(site.backend != Some(SiteBackend::External) || commands,
+            "External site backend requires site.build or site.serve");
+        if let Some(url) = &site.base_url {
+            ensure!((url.starts_with("https://") || url.starts_with("http://")) && !url.contains(['\\', '\0', '\n', '\r', '?', '#']),
+                "site.base_url must be an absolute HTTP(S) URL without query or fragment");
+        }
+        Ok(site)
+    }).transpose()
+}
+
+pub(crate) fn validate(config: &Config) -> Result<()> {
+    settings(config.site.as_ref())?;
+    Ok(())
+}
+
+pub(crate) fn selected(root: &Path, config: &Config) -> Result<SiteBackend> {
+    select(root, config.site.as_ref())
+}
+
+pub(crate) fn select(root: &Path, value: Option<&serde_json::Value>) -> Result<SiteBackend> {
+    if let Some(site) = settings(value)? {
+        if let Some(backend) = site.backend {
+            return Ok(backend);
+        }
+        if site.build.is_some() || site.serve.is_some() {
+            return Ok(SiteBackend::External);
+        }
+    }
+    Ok(if root.join("sites/zola.toml").is_file() {
+        SiteBackend::Zola
+    } else {
+        SiteBackend::Astro
+    })
 }
 
 pub fn run(
@@ -21,11 +77,11 @@ pub fn run(
     port: Option<u16>,
     check: bool,
 ) -> Result<bool> {
-    let Some(value) = &config.site else {
+    if selected(root, config)? != SiteBackend::External {
         return Ok(false);
-    };
-    let site: Site = serde_json::from_value(value.clone())
-        .context("Invalid site config; commands must be argv arrays")?;
+    }
+    let site =
+        settings(config.site.as_ref())?.context("External site backend requires commands")?;
     let argv = if operation == "build" {
         site.build
     } else {

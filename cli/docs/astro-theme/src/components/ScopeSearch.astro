@@ -1,0 +1,62 @@
+---
+import pages from '../../pages.json';
+import scopes from '../../scopes.json';
+import site from '../../site.json';
+import { currentPage, searchFilters } from '../../scripts/navigation.mjs';
+const page = currentPage(pages, Astro.url.pathname, (site.prefix || '').replace(/\/$/, ''));
+const scope = page && scopes[page.scope_index];
+const es = scope?.language === 'es';
+---
+{scope && <scope-search data-filters={JSON.stringify(searchFilters(scope))}>
+  <details><summary>{es ? 'Buscar' : 'Search'}</summary><div class="search-panel">
+    <form role="search"><label>{es ? 'Buscar en esta versión' : 'Search this version'}<input type="search" autocomplete="off" /></label><button type="submit">{es ? 'Buscar' : 'Search'}</button></form>
+    <p class="scope-label">{scope.module} · {scope.version} · {scope.language}</p>
+    <p role="status" aria-live="polite"></p><ul class="results"></ul>
+  </div></details>
+</scope-search>}
+<script>
+class ScopeSearch extends HTMLElement {
+  connectedCallback() {
+    const form = this.querySelector('form')!;
+    const input = this.querySelector('input')!;
+    const status = this.querySelector<HTMLElement>('[role=status]')!;
+    const results = this.querySelector('ul')!;
+    const spanish = document.documentElement.lang === 'es';
+    let sequence = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    let engine: Promise<any> | undefined;
+    const search = async () => {
+      const query = input.value.trim();
+      const request = ++sequence;
+      results.replaceChildren();
+      if (!query) { status.textContent = ''; return; }
+      status.textContent = spanish ? 'Buscando…' : 'Searching…';
+      try {
+        engine ??= import(/* @vite-ignore */ `${import.meta.env.BASE_URL.replace(/\/$/, '')}/pagefind/pagefind.js`);
+        const pagefind = await engine;
+        await pagefind.options({ baseUrl: import.meta.env.BASE_URL });
+        const response = await pagefind.search(query, { filters: JSON.parse(this.dataset.filters!) });
+        const matches = await Promise.all(response.results.slice(0, 20).map((match: any) => match.data()));
+        if (request !== sequence) return;
+        status.textContent = spanish ? `${response.results.length} resultados` : `${response.results.length} results`;
+        for (const match of matches) {
+          const li = document.createElement('li');
+          const link = document.createElement('a');
+          link.href = match.url;
+          link.textContent = match.meta.title || match.url;
+          li.append(link);
+          results.append(li);
+        }
+      } catch {
+        if (request === sequence) status.textContent = spanish ? 'La búsqueda no está disponible.' : 'Search is unavailable.';
+      }
+    };
+    form.addEventListener('submit', event => { event.preventDefault(); clearTimeout(timer); void search(); });
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 180); });
+  }
+}
+if (!customElements.get('scope-search')) customElements.define('scope-search', ScopeSearch);
+</script>
+<style>
+scope-search{position:relative;display:block;font-size:.875rem}summary{cursor:pointer;padding:.5rem 1rem;border:1px solid var(--sl-color-gray-4);border-radius:.4rem}.search-panel{position:absolute;z-index:20;top:3rem;left:0;width:min(32rem,85vw);max-height:70vh;overflow:auto;padding:1rem;background:var(--sl-color-bg);border:1px solid var(--sl-color-gray-4);border-radius:.5rem;box-shadow:0 8px 30px #0003}form{display:flex;gap:.5rem;align-items:end}label{display:grid;gap:.4rem;flex:1}input,button{padding:.5rem;border-radius:.3rem;border:1px solid var(--sl-color-gray-4);background:var(--sl-color-bg);color:var(--sl-color-text);font:inherit}input{width:100%}.scope-label{font-size:.75rem;color:var(--sl-color-gray-3)}ul{padding-left:1.2rem}li{margin:.5rem 0}
+</style>
