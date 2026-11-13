@@ -23,7 +23,7 @@ open class AndroidSigningConvention {
 
 private fun Project.signingProperties(): Properties = Properties().apply {
     val contents = providers.fileContents(rootProject.layout.projectDirectory.file("local.properties")).asText.orNull
-    contents?.reader()?.use(::load)
+    contents?.reader()?.use { load(it) }
 }
 
 private fun Project.signingSetting(properties: Properties, name: String): String? =
