@@ -38,7 +38,7 @@ Do not delete Auth's verifier or weaken these checks merely to complete migratio
 ### Remaining Auth development tools
 
 - Screenshot suite separates coverage, candidates, reviewer acceptance, baseline restoration and documentation freshness. Shared manifest checks do not replace that full lifecycle. Add equivalent reviewed-media operations or keep this project-specific engine until a separately tested replacement exists. Never auto-accept stale captures.
-- `sites/build.py`/`test_build.py` remain the actual site renderer behind `android-repo-docs`; migrate to the shared Zola backend with route/history/language/screenshot parity before deleting them.
+- `sites/build.py`/`test_build.py` remain the actual site renderer behind `android-repo-docs`; migrate to the shared Astro backend with route/history/language/screenshot parity before deleting them. The renderer decision and per-library requirements are recorded in [the Astro migration audit](astro-migration-audit.md).
 - Geography catalogue generation/tests are domain tooling, not publishing infrastructure. Port separately if zero Python in the entire repository is required.
 - Signing/environment scripts and their tests still need migration to the shared wizard and generated signing workflow, preserving app signing verification and existing environment semantics.
 

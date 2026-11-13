@@ -24,6 +24,12 @@ jobs:
         with:
           node-version: '24'
       - run: node --test cli/docs/site-theme/tests/*.test.mjs
+      - name: Verify bundled Astro frontend and real static builds
+        working-directory: cli/docs/astro-theme
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+          npm run test:build
   cli:
     name: Rust CLI (${{ matrix.os }})
     strategy:
@@ -85,6 +91,15 @@ jobs:
           fi
           echo "$directory" >> "$GITHUB_PATH"
       - run: cargo test --locked --workspace --manifest-path cli/Cargo.toml
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
+        with:
+          node-version: '24'
+      - name: Verify installed Astro backend end to end
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked --manifest-path cli/Cargo.toml -p android-repo-docs --test astro -- --ignored
+          cargo test --locked --manifest-path cli/Cargo.toml -p android-repo-docs --test backends -- --ignored
       - name: Verify evaluated Gradle module discovery
         if: runner.os == 'Linux'
         shell: bash

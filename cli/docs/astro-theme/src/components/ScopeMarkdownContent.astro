@@ -1,0 +1,12 @@
+---
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+import pages from '../../pages.json';
+import scopes from '../../scopes.json';
+import site from '../../site.json';
+import { currentPage } from '../../scripts/navigation.mjs';
+const page = currentPage(pages, Astro.url.pathname, (site.prefix || '').replace(/\/$/, ''));
+const scope = page && scopes[page.scope_index];
+const images = ['', 'index', 'overview'].includes(page?.guide) ? scope?.images || [] : [];
+---
+<Default><slot />{images.length > 0 && <section aria-label={scope.language === "es" ? "Capturas del módulo" : "Module screenshots"} class="scope-images">{images.map(image => <figure><img src={image.src} alt={image.alt} loading="lazy" /><figcaption>{image.alt}</figcaption></figure>)}</section>}</Default>
+<style>.scope-images{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(16rem,100%),1fr));gap:1rem}.scope-images figure{margin:0}.scope-images img{display:block;max-width:100%;height:auto;border-radius:.5rem}.scope-images figcaption{font-size:.85rem;color:var(--sl-color-gray-3);margin-top:.5rem}</style>

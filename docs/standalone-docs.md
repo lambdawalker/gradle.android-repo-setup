@@ -48,7 +48,32 @@ The tools accept a stable `vX.Y.Z` tag or a full lowercase commit SHA. Keep `too
 
 Source groups, example markers, and media scenarios belong in configuration. Project prose belongs in Markdown. See [source documentation](source-docs.md) and [documentation media](documentation-media.md) for those schemas.
 
-The built-in site renderer supports the shared Zola theme. Existing project site designs can use literal command arrays:
+## Shared Astro default and compatibility
+
+New sites use bundled **Astro 7.3.5 + Starlight 0.42.4**. The installed CLI embeds the frontend package and lockfile; a separate npm package publication is unnecessary. Install Node.js 24 with npm (minimum Node 22.12), then use `sh ./docs.sh build --check`. The CLI prepares immutable content in a temporary app, installs locked dependencies with `npm ci`, renders and validates a temporary output, and replaces `sites/dist/` only after success. A failed build preserves the last good output. npm package downloads require registry access unless npm already has the needed packages cached.
+
+```yaml
+site:
+  backend: astro
+  base_url: https://owner.github.io/android-library/
+```
+
+The optional `base_url` fixes the public URL; otherwise an existing `sites/zola.toml` base URL is retained, or the GitHub Pages project URL is inferred from `repository`. `--base /preview/` overrides the path for a local preview. Both `build` and loopback `serve` use the same selected backend. Consumer guides remain plain Markdown; historical build code and MDX are never executed. The shared content pipeline preserves scoped raw guides, release/source/documentation provenance, English/Spanish fallback, assets and release catalogs.
+
+| Configuration | Selected backend |
+| --- | --- |
+| `site.backend: astro` | Shared Astro, even if old Zola files still exist |
+| `site.backend: zola` | Shared Zola, requires `sites/zola.toml` and Zola 0.23.6 |
+| `site.backend: legacy` | Original minimal static renderer |
+| Existing `site.build` / `site.serve` arrays | External commands |
+| No explicit backend, existing `sites/zola.toml` | Zola compatibility |
+| No backend, no external commands, no Zola file | Shared Astro default |
+
+A built-in backend cannot also define external command arrays. Unknown backend values fail validation. `init` records the default in a new config and infers one module from the repository name if no module inventory exists; it never rewrites an existing config. Add canonical guides under `docs/agents/`, a `docs/releases.md` runbook and installation guidance before building. Adopting a new CLI release alone intentionally leaves existing Zola and external sites working; actual library migrations are separate changes. See [the consumer audit](astro-migration-audit.md) for requirements before switching each library.
+
+The frontend and theme ship in `cli/docs/astro-theme/`. Trusted current-checkout overrides may be placed in `sites/astro/components/`, `sites/astro/styles/` and `sites/astro/public/`, mapped to the bundled application's `src/components/`, `src/styles/` and `public/`. Replacing the provided component/style filenames customizes the shared layout; unused new files are not automatically imported. Canonical prepared metadata and immutable assets take precedence over public overrides. Tera templates in `sites/templates/` are Zola-specific and must be ported explicitly.
+
+Existing project site designs can continue using literal command arrays:
 
 ```yaml
 site:
@@ -71,4 +96,4 @@ The setup generator creates the docs launchers from the docs pin and preserves s
 
 CI should install or expose an executable explicitly when a later step invokes it directly. Running a launcher does not add its cache to the parent shell or subsequent Actions steps. For example, a direct Gradle task that invokes `android-repo-setup` requires that executable on its own PATH.
 
-Windows, Linux and macOS release artifacts are produced separately for each executable, with SHA-256 checksum files. Source-pinned launchers require Rust and Git. The built-in site backend retains Zola 0.23.6; Android screenshot generation retains each project's own Gradle tasks and toolchain requirements.
+Windows, Linux and macOS release artifacts are produced separately for each executable, with SHA-256 checksum files. Source-pinned launchers require Rust and Git. Astro jobs require Node/npm; explicit or detected Zola sites retain Zola 0.23.6. Android screenshot generation retains each project's own Gradle tasks and toolchain requirements.

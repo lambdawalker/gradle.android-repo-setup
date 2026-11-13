@@ -169,7 +169,7 @@ tar -xzf "$archive"
 # Expected: android-repo-setup 0.1.7
 ```
 
-Prebuilt binaries do not require Cargo. Building from source does. APK and Maven signing commands separately require `keytool` and GnuPG. Zola websites require Zola 0.23.6 on `PATH` in addition to the CLI; Zola is not bundled in the CLI archive.
+Prebuilt binaries do not require Cargo. Building from source does. APK and Maven signing commands separately require `keytool` and GnuPG. New shared documentation sites use bundled Astro/Starlight and require Node.js 24 with npm (minimum Node 22.12). Existing Zola sites require Zola 0.23.6 on `PATH`; the Zola executable is not bundled.
 
 Demo Common's `setup.bat` reads `tooling_ref`, downloads and verifies the matching Windows release, and caches it under `bin/<tag>/`. Its `setup.sh` validates the matching CLI on `PATH`. Full source SHA pins use a cached Cargo build instead.
 
@@ -449,7 +449,7 @@ workflows:
 The defaults are five screenshots, Java 21, `android-repo-setup build_docs`,
 `cd docs/screenshots && sha256sum -c images.sha256`, and `true` for release
 validation. Java 17 is also installed for projects that need it. Documentation
-and publication jobs install checksum-pinned Zola 0.23.6 for repositories with `sites/zola.toml`; other repositories retain Node 24 setup. Commands preserve shell punctuation and
+and publication jobs use the same backend selection as the documentation CLI: shared Astro and external sites receive Node 24; explicit or detected Zola sites receive checksum-pinned Zola 0.23.6. Commands preserve shell punctuation and
 may contain multiple lines. Release validation runs after checking out the
 immutable release source and before verifying the unsigned publication; it
 receives `SOURCE_SHA` and is skipped when the release is already complete.
@@ -489,9 +489,23 @@ version numbers that came from different commits. They are not retroactively
 declared equivalent. New shared versions advance beyond that historical module
 history; old pending attempts remain recoverable through finalization.
 
-### Zola documentation websites
+### Shared Astro documentation websites
 
-Repositories opt in to the shared Zola backend by checking in `sites/zola.toml`. `android-repo-setup build_docs --check` then prepares immutable release/development content and runs Zola 0.23.6; repositories without that file retain the existing renderer. Existing Astro documentation commands remain supported.
+Astro + Starlight is the default for new documentation sites. The Rust CLI bundles the frontend and locked npm dependencies, prepares immutable Markdown/release/translation data, and invokes the shared frontend. Each consumer keeps its guides, configuration and optional presentation overrides. There is no separate npm package release to coordinate with the CLI.
+
+In a repository with canonical guides under `docs/agents/`, a `docs/releases.md` runbook and installation guidance (`IMPORT.md`), install Node.js 24 with npm, initialize the documentation config, and build:
+
+```sh
+android-repo-docs init --repository owner/library --tooling-ref FULL_COMMIT_SHA
+android-repo-docs bootstrap generate
+sh ./docs.sh build --check
+```
+
+Use a published tag or immutable commit containing this backend as the tooling pin. Explicit `site.backend: astro` switches an existing built-in site; external command arrays must be removed intentionally when adopting the shared renderer. Existing Zola detection and external arrays retain their current backend until migration. See [configuration and compatibility](docs/standalone-docs.md#shared-astro-default-and-compatibility) and [the library migration audit](docs/astro-migration-audit.md).
+
+### Zola documentation compatibility
+
+Repositories opt in to the shared Zola backend by checking in `sites/zola.toml`. `android-repo-setup build_docs --check` then prepares immutable release/development content and runs Zola 0.23.6; new sites without that file use shared Astro. An explicit `site.backend` takes precedence over detection, and existing external documentation commands remain supported.
 
 Install Zola 0.23.6 on PATH for local builds. Generated Documentation and release-validation workflows install its verified binary for opted-in sites and omit Node setup. Native CLI integration tests use the real Zola binary; CI installs it on both Linux and Windows. Neither Python nor Node.js is needed by the Zola site build.
 

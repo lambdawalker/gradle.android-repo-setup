@@ -848,3 +848,26 @@ fn publishing_captures_receipts_and_reconciles_failures_under_the_release_lock()
         }
     }
 }
+
+#[test]
+fn explicit_shared_astro_uses_node_even_while_legacy_zola_files_remain() {
+    let root = fixture();
+    fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+    fs::write(root.path().join(".project/docs/config.yaml"), "schema: 1\nrepository: example/library\ntitle: Library\ntooling_ref: v0.1.20\nmodules: {}\nsite:\n  backend: astro\n").unwrap();
+    fs::create_dir_all(root.path().join("sites")).unwrap();
+    fs::write(
+        root.path().join("sites/zola.toml"),
+        "base_url = 'https://example.com/'",
+    )
+    .unwrap();
+    let output = run(root.path(), &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workflow =
+        fs::read_to_string(root.path().join(".github/workflows/documentation.yml")).unwrap();
+    assert!(workflow.contains("actions/setup-node@v7"));
+    assert!(!workflow.contains("Install pinned Zola"));
+}

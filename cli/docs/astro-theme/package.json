@@ -1,0 +1,28 @@
+{
+  "name": "android-repo-docs-astro",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "node scripts/prepare.mjs && astro build",
+    "test": "node --test scripts/tests/*.test.mjs",
+    "test:build": "node scripts/tests/build-fixture.mjs"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.8",
+    "@astrojs/starlight": "0.42.4",
+    "astro": "7.3.5"
+  },
+  "devDependencies": {
+    "github-slugger": "2.0.0",
+    "parse5": "8.1.1",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-stringify": "11.0.0",
+    "sharp": "0.35.5",
+    "unified": "11.0.5",
+    "unist-util-visit": "5.1.0"
+  }
+}

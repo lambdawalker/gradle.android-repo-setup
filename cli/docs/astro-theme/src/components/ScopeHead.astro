@@ -1,0 +1,7 @@
+---
+// Static hosts serve 404.html; there is no corresponding /404/ route to canonicalize.
+const { head } = Astro.locals.starlightRoute;
+const missing = Astro.locals.starlightRoute.id === '404' || /\/404\/?$/.test(Astro.url.pathname);
+const tags = missing ? head.filter(item => !(item.tag === 'link' && ['canonical', 'alternate'].includes(item.attrs?.rel))) : head;
+---
+{tags.map(({ tag: Tag, attrs, content }) => <Tag {...attrs} set:html={content} />)}

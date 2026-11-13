@@ -1,0 +1,7 @@
+node_modules/
+.astro/
+dist/
+pages.json
+scopes.json
+site.json
+src/content/docs/

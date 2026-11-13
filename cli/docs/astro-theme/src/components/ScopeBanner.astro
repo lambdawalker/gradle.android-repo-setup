@@ -1,0 +1,36 @@
+---
+import pages from '../../pages.json';
+import scopes from '../../scopes.json';
+import site from '../../site.json';
+import { currentPage, selectorGroups, isDevelopment, repositoryUrl } from '../../scripts/navigation.mjs';
+const prefix = (site.prefix || '').replace(/\/$/, '');
+const page = currentPage(pages, Astro.url.pathname, prefix);
+const scope = page && scopes[page.scope_index];
+const guide = typeof page?.guide === 'string' ? page.guide : scope?.pages.find(p => p.href.replace(/\/$/, '') === Astro.url.pathname.replace(/\/$/, ''))?.slug || '';
+const es = scope?.language === 'es';
+const names = { Module: es ? 'Módulo' : 'Module', Version: es ? 'Versión' : 'Version', Language: es ? 'Idioma' : 'Language' };
+const display = label => es && label === 'Development' ? 'Desarrollo' : label;
+const groups = scope ? selectorGroups(scopes, scope, guide) : {};
+const raw = scope?.pages.find(p => p.slug === guide)?.raw;
+const repository = repositoryUrl(site.repository);
+const sourceUrl = scope?.source && repository ? `${repository}/commit/${encodeURIComponent(scope.source)}` : undefined;
+---
+{scope && <aside aria-label={es ? "Ámbito de documentación" : "Documentation scope"} class="scope-banner">
+  <div class="selectors">{Object.entries(groups).map(([name, options]) => <label>{names[name]}<select data-doc-navigation aria-label={names[name]}>{options.map(option => <option value={option.href} selected={option.selected}>{display(option.label)}</option>)}</select></label>)}</div>
+  <p class="provenance"><strong>{scope.module} · {isDevelopment(scope) ? (es ? 'Desarrollo (sin publicar)' : 'Development (unreleased)') : scope.version}</strong>
+  {scope.source && <> · {es ? 'Código' : 'Source'} {sourceUrl ? <a href={sourceUrl}>{scope.source.slice(0, 12)}</a> : scope.source}</>}
+  {scope.documentation_ref && <> · {es ? 'Documentación' : 'Documentation'} {scope.documentation_ref}</>}
+  {raw && <> · <a href={raw}>{es ? 'Markdown original' : 'Raw Markdown'}</a></>}
+  </p>
+  {page.fallback && <p role="note" class="fallback">{es ? 'Traducción no disponible para esta guía. Se muestra la documentación original.' : 'Translation unavailable for this guide. Showing the source documentation.'}</p>}
+  <noscript><details><summary>{es ? 'Elegir documentación' : 'Choose documentation'}</summary>{Object.entries(groups).map(([name, options]) => <div><strong>{names[name]}</strong><ul>{options.map(option => <li><a href={option.href}>{display(option.label)}</a></li>)}</ul></div>)}</details></noscript>
+</aside>}
+<script>
+function bind() {
+  document.querySelectorAll<HTMLSelectElement>('select[data-doc-navigation]').forEach(select => {
+    select.onchange = () => window.location.assign(select.value);
+  });
+}
+bind();
+document.addEventListener('astro:page-load', bind);
+</script>

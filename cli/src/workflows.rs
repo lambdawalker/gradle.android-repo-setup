@@ -207,8 +207,8 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         "workflows.title must be one line without single quotes or GitHub expressions"
     );
 
-    let docs_runtime = documentation_runtime(root, false);
-    let release_runtime = documentation_runtime(root, true);
+    let docs_runtime = documentation_runtime(root, false)?;
+    let release_runtime = documentation_runtime(root, true)?;
     let placeholders = Regex::new(r"<<@\s*([a-z_.]+)\s*@>>")?;
     // One shared release engine, dedicated entry points, per-app APK workflows.
     let mut plans: Vec<RenderTarget> = Vec::new();
@@ -382,9 +382,11 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
     }).collect()
 }
 
-fn documentation_runtime(root: &Path, release: bool) -> String {
+fn documentation_runtime(root: &Path, release: bool) -> Result<String> {
+    use android_repo_docs::SiteBackend;
+    let backend = android_repo_docs::site_backend_for_workflow(root)?;
     let condition = "        if: steps.release.outputs.skip != 'true'\n";
-    if root.join("sites/zola.toml").is_file() {
+    Ok(if backend == SiteBackend::Zola {
         let step = include_str!("../workflow-steps/install-zola.yml").trim_end();
         if release {
             step.replacen(
@@ -395,9 +397,11 @@ fn documentation_runtime(root: &Path, release: bool) -> String {
         } else {
             step.to_owned()
         }
+    } else if backend == SiteBackend::Legacy {
+        String::new()
     } else {
         format!("      - uses: actions/setup-node@v7\n{}        with:\n          node-version: '24'\n          package-manager-cache: false", if release { condition } else { "" })
-    }
+    })
 }
 
 fn validate_tooling_ref(reference: &str) -> Result<()> {

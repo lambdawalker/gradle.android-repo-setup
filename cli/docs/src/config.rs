@@ -81,6 +81,7 @@ impl Config {
                 "Invalid documentation module configuration"
             );
         }
+        crate::backend::validate(&config)?;
         Ok(config)
     }
     pub fn modules(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -138,6 +139,11 @@ pub fn init_with(
             site: None,
         }
     };
+    // Existing configuration was returned above. Only a newly initialized site
+    // gets a declared backend; preserve legacy Zola sites during rollout.
+    config.site = Some(
+        serde_json::json!({"backend": if root.join("sites/zola.toml").is_file() { "zola" } else { "astro" }}),
+    );
     if let Some(v) = repository {
         config.repository = v.into();
     }
@@ -161,6 +167,14 @@ pub fn init_with(
         ),
         "tooling_ref must be a release tag or full commit SHA"
     );
+    if config.modules.is_empty() {
+        // A docs-only repository has no Gradle inventory to supply a module.
+        // Give its existing guides a stable scope instead of producing no pages.
+        let module = config.repository.split('/').next_back().unwrap().to_owned();
+        config
+            .modules
+            .insert(module.into(), config.title.clone().into());
+    }
     fs::create_dir_all(path.parent().unwrap())?;
     let mut file = fs::OpenOptions::new()
         .write(true)
