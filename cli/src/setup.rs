@@ -13,11 +13,16 @@ struct Config {
     key_alias: Option<String>,
 }
 
-const OPERATIONS: [(&str, &str, &str); 4] = [
+const OPERATIONS: [(&str, &str, &str); 5] = [
     (
         "key",
         "APK signing key",
         "Create or verify the local APK signing keystore.",
+    ),
+    (
+        "local",
+        "Local Gradle signing",
+        "Write the saved signing identity to ignored local.properties for local builds.",
     ),
     (
         "github",
@@ -84,13 +89,26 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
         key_alias,
     )?;
     loop {
-        match crate::ui::menu(&OPERATIONS[..2], !config.state_path().exists())? {
+        match crate::ui::menu(&OPERATIONS[..3], !config.state_path().exists())? {
             crate::ui::Menu::Setup(selected) => {
                 let operations = selected
                     .iter()
                     .map(|&index| OPERATIONS[index].0)
                     .collect::<Vec<_>>();
-                sign_with_config(root, &config, &operations)?;
+                let signing = ["key", "github"]
+                    .into_iter()
+                    .filter(|step| operations.contains(step))
+                    .collect::<Vec<_>>();
+                if (!signing.is_empty() || operations.contains(&"local"))
+                    && !sign_with_config(
+                        root,
+                        &config,
+                        &signing,
+                        operations.contains(&"local"),
+                    )?
+                {
+                    return Ok(());
+                }
                 return Ok(());
             }
             crate::ui::Menu::ViewVault => {
@@ -104,10 +122,21 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
     }
 }
 
-fn sign_with_config(root: &Path, config: &vault::SetupConfig, operations: &[&str]) -> Result<bool> {
+fn sign_with_config(
+    root: &Path,
+    config: &vault::SetupConfig,
+    operations: &[&str],
+    local_gradle: bool,
+) -> Result<bool> {
     let _lock = vault::lock(config, true)?;
     let mut vault = vault::unlock_interactive(config, false)?;
-    signing::run(root, config, &mut vault, operations)
+    if !operations.is_empty() && !signing::run(root, config, &mut vault, operations)? {
+        return Ok(false);
+    }
+    if local_gradle && !signing::configure_local_gradle_signing(root, &vault)? {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn update_workflows(root: &Path) -> Result<()> {
@@ -139,7 +168,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
         .iter()
         .copied()
         .filter(|(id, _, _)| match *id {
-            "key" | "github" => has_apps,
+            "key" | "local" | "github" => has_apps,
             "publishing" => has_libraries,
             _ => true,
         })
@@ -170,7 +199,14 @@ pub(crate) fn run(root: &Path) -> Result<()> {
             .into_iter()
             .filter(|step| operations.contains(step))
             .collect::<Vec<_>>();
-        if !signing.is_empty() && !sign_with_config(root, &config, &signing)? {
+        if (!signing.is_empty() || operations.contains(&"local"))
+            && !sign_with_config(
+                root,
+                &config,
+                &signing,
+                operations.contains(&"local"),
+            )?
+        {
             return Ok(());
         }
         if operations.contains(&"publishing") {

@@ -254,6 +254,29 @@ environment (default `demo-apk-release`) does not select a backend environment.
 For Google Play builds, use the Play app-signing certificate when it differs
 from the local/upload certificate.
 
+### Local Gradle signing
+
+Selecting **Local Gradle signing** writes the signing identity already saved in
+the encrypted setup vault into the repository-root `local.properties` using the
+shared application-plugin keys:
+
+```properties
+ANDROID_KEYSTORE_PATH=<absolute keystore path>
+ANDROID_KEYSTORE_PASSWORD=<store password>
+ANDROID_KEY_ALIAS=<alias>
+ANDROID_KEY_PASSWORD=<key password, only when different>
+```
+
+This is intended for Android Studio and local Gradle builds. The step preserves
+existing entries such as `sdk.dir` and replaces only Android signing entries.
+Because `local.properties` stores these passwords in plaintext, the CLI requires
+the file to be untracked and ignored by Git and asks for explicit confirmation
+before writing. The Gradle plugin still never opens the encrypted setup vault;
+the CLI owns vault access and performs this optional local handoff.
+
+Run **APK signing key** first when no signing identity has been saved. Selecting
+both steps in one setup run uses the same unlocked vault session.
+
 ### Wizard controls
 
 Use Tab and Shift+Tab to move between controls, Space to toggle a checkbox,
@@ -298,7 +321,7 @@ consumer still has a Python JitPack bootstrap, switch it to the Gradle
 image where the binary is installed.
 
 Run `android-repo-setup` with no subcommand to open the setup menu. It offers
-APK key generation, GitHub environment configuration, workflow updates, and
+APK key generation, local Gradle signing, GitHub environment configuration, workflow updates, and
 vault inspection and reset. APK key generation requires the JDK's `keytool`.
 Maven signing key selection and generation use `gpg`. On Windows, install
 Gpg4win for a native GnuPG keyring. Run
