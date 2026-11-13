@@ -74,6 +74,8 @@ Remove the module's existing Vanniktech plugin declaration and its release confi
 
 The library plugin configures the release AAR, sources and documentation jars, reproducible jar settings, and the local `verification` Maven repository. Existing workflows can continue to use `-PreleaseModule`, `-PreleaseVersion`, `-PjitpackBuild=true`, and `-PjitpackScopedTag=true`. Maven Central uploads require the configured credentials and a valid release reservation.
 
+Runnable application modules can use the shared `com.apexfission.android-repo-setup.application` plugin from a source checkout, or from a published release that contains it. It centralizes generic APK signing inputs plus public runtime/endpoint bindings while leaving encrypted-vault access in the CLI. See [Android application conventions](docs/application-conventions.md).
+
 Generic model and binary asset preparation is documented in [Release assets](docs/release-assets.md) (next CLI release).
 
 ## JitPack
