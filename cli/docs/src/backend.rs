@@ -15,6 +15,7 @@ pub enum SiteBackend {
 
 const ACTIVE: &str = "ANDROID_REPO_DOCS_SITE_ACTIVE";
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Site {
     #[serde(default)]
     backend: Option<SiteBackend>,
@@ -24,6 +25,14 @@ struct Site {
     build: Option<Vec<String>>,
     #[serde(default)]
     serve: Option<Vec<String>>,
+    #[serde(default)]
+    _pages: Option<serde_json::Value>,
+    #[serde(default)]
+    _translation_manifest: Option<serde_json::Value>,
+    #[serde(default)]
+    _translation_paths: Option<serde_json::Value>,
+    #[serde(default)]
+    _aliases: Option<serde_json::Value>,
 }
 
 fn settings(value: Option<&serde_json::Value>) -> Result<Option<Site>> {
