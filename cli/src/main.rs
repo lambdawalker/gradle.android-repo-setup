@@ -3,6 +3,7 @@ macro_rules! setup_message { ($($arg:tt)*) => { crate::ui::message(format!($($ar
 mod assets;
 mod associations;
 mod bootstrap;
+mod central;
 mod confirmation;
 mod discovery;
 mod docs;
@@ -245,6 +246,17 @@ enum ReleaseCommand {
         source: String,
     },
     AbortUnconfirmed(ReleaseTarget),
+    /// Reconcile all pending attempts for the selected destination (preview by default).
+    Reconcile {
+        #[arg(long)]
+        module: String,
+        #[arg(long = "version")]
+        versions: Vec<String>,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Stream a plain Gradle log and durably capture the Central upload receipt.
+    TrackCentralUpload(ReleaseTarget),
     /// Review failed JitPack journals and optionally archive proven failures.
     ReconcileFailedJitpack {
         #[arg(long)]
@@ -337,6 +349,18 @@ fn run_release(root: &Path, command: ReleaseCommand) -> Result<()> {
             versions,
             apply,
         } => journal::reconcile_failed_jitpack(root, &module, &versions, apply),
+        ReleaseCommand::Reconcile {
+            module,
+            versions,
+            apply,
+        } => journal::reconcile(root, &module, dest, &versions, apply),
+        ReleaseCommand::TrackCentralUpload(target) => {
+            anyhow::ensure!(
+                dest == "maven-central",
+                "Central receipt tracker requires Maven Central"
+            );
+            journal::track_central_upload(root, &target.module, &target.version)
+        }
         ReleaseCommand::AbortUnconfirmed(target) => {
             journal::abort_unconfirmed(root, &target.module, &target.version, dest)
         }

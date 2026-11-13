@@ -109,6 +109,91 @@ pub(crate) fn verification_config(
     Ok(contract)
 }
 
+pub(crate) fn reserved_verification(
+    root: &Path,
+    record: &serde_json::Value,
+) -> Result<VerificationConfig> {
+    let Some(schema) = record.get("verification_schema") else {
+        return verification_config(
+            root,
+            record["source"].as_str().context("Missing source")?,
+            record["module"].as_str().context("Missing module")?,
+        );
+    };
+    ensure!(
+        schema == 1,
+        "Unsupported reserved verification schema; preserve the journal"
+    );
+    let value = &record["verification"];
+    let fields = value
+        .as_object()
+        .context("Missing reserved verification snapshot")?;
+    let defaults = serde_json::to_value(VerificationConfig::default())?;
+    ensure!(
+        defaults
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|name| fields.contains_key(name)),
+        "Incomplete reserved verification snapshot"
+    );
+    let mut configured = value.clone();
+    for key in ["asset_sha256", "asset_sizes", "asset_rules"] {
+        configured.as_object_mut().unwrap().remove(key);
+    }
+    let mut contract: VerificationConfig = serde_json::from_value(configured)?;
+    // These derived maps must not be supplied by setup YAML, but are required
+    // when restoring the immutable resolved reservation, including model hashes.
+    contract.asset_sha256 = serde_json::from_value(value["asset_sha256"].clone())?;
+    contract.asset_sizes = serde_json::from_value(value["asset_sizes"].clone())?;
+    contract.asset_rules = serde_json::from_value(value["asset_rules"].clone())?;
+    ensure!(
+        contract
+            .required_api_dependencies
+            .iter()
+            .all(|pin| pin.group_property.is_none()
+                && pin.artifact_property.is_none()
+                && pin.version_property.is_none()),
+        "Reserved dependency pins must be resolved"
+    );
+    contract.validate()?;
+    Ok(contract)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn snapshot_retains_resolved_assets_without_source_config() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut original = VerificationConfig::default();
+        original
+            .asset_sha256
+            .insert("assets/model.bin".into(), "a".repeat(64));
+        original.asset_sizes.insert("assets/model.bin".into(), 42);
+        original.asset_rules.insert(
+            "assets/model.bin".into(),
+            crate::assets::AssetRules {
+                validator: crate::assets::Validator::default(),
+                allow_empty_files: false,
+            },
+        );
+        let record = serde_json::json!({"verification_schema":1,"verification":original,"source":"a".repeat(40),"module":"demo"});
+        let recovered = reserved_verification(root.path(), &record)?;
+        assert_eq!(serde_json::to_value(recovered)?, record["verification"]);
+        let mut unsupported = record.clone();
+        unsupported["verification_schema"] = serde_json::json!(2);
+        assert!(reserved_verification(root.path(), &unsupported).is_err());
+        let mut incomplete = record;
+        incomplete["verification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("asset_sha256");
+        assert!(reserved_verification(root.path(), &incomplete).is_err());
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct Record<'a> {
     release_identity: crate::release_identity::Identity,
@@ -119,6 +204,9 @@ pub(crate) struct Record<'a> {
     artifact: String,
     sha256: BTreeMap<&'static str, String>,
     verification: VerificationConfig,
+    verification_schema: u32,
+    upload_protocol: &'static str,
+    workflow_attempt: String,
     phase: &'static str,
     workflow_run: &'a str,
     repository: &'a str,
@@ -186,6 +274,9 @@ pub(crate) fn check_local<'a>(
         artifact,
         sha256,
         verification: contract,
+        verification_schema: 1,
+        upload_protocol: "guard-v1",
+        workflow_attempt: std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_else(|_| "local".into()),
         phase: "reserved-before-upload",
         workflow_run,
         repository: destination,

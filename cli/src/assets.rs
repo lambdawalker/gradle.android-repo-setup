@@ -47,7 +47,7 @@ pub(crate) struct AssetSet {
     #[serde(default = "archive_dir")]
     pub archive_directory: String,
 }
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 pub(crate) struct AssetRules {
     pub validator: Validator,
     pub allow_empty_files: bool,
