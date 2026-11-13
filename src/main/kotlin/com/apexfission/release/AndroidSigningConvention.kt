@@ -6,6 +6,9 @@ import java.security.PrivateKey
 import java.util.Properties
 import org.gradle.api.GradleException
 import org.gradle.api.Project
+import org.gradle.kotlin.dsl.configureEach
+import org.gradle.kotlin.dsl.create
+import org.gradle.kotlin.dsl.named
 
 open class AndroidSigningConvention {
     /** Environment/local.properties key containing the keystore path. */
