@@ -25,6 +25,7 @@ repositories {
 
 dependencies {
     implementation("com.vanniktech:gradle-maven-publish-plugin:0.37.0")
+    compileOnly("com.android.tools.build:gradle-api:9.4.1")
     testImplementation("junit:junit:4.13.2")
 }
 
