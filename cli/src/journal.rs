@@ -484,7 +484,8 @@ fn verify_failed_jitpack(record: &Value, fetch: &Fetch<'_>) -> Result<()> {
                     .as_deref(),
                 Some("error" | "failed")
             ),
-            "JitPack attempt is not a proven terminal failure; preserve pending journal"
+            "JitPack status {:?} is not a proven terminal failure; preserve pending journal",
+            status["status"].as_str().unwrap_or("missing")
         );
         ensure!(
             status["commit"] == field(record, "source")?,
@@ -538,19 +539,31 @@ fn recover_failed_jitpack(
     );
     ancestor(root, old_source, source)?;
     verify_stable(root, &record)?;
-    if let Some(current) = current(root, module, "jitpack")? {
-        ensure!(
-            compare(field(&current, "version")?, old_version)?.is_lt(),
-            "Confirmed JitPack history requires manual reconciliation"
-        );
-    }
-    verify_failed_jitpack(&record, fetch)?;
-    archive_attempt(
+    // Use the same exact-version history, phase, provenance and lease checks as
+    // explicit reconciliation. A newer confirmed release is not this attempt.
+    // Keep the object inspected above through reconciliation and the atomic
+    // archive lease; refreshing it would invalidate the ancestry checks.
+    let inspected = BTreeMap::from([(name.clone(), oid)]);
+    let report = reconcile_failed_jitpack_snapshot(
         root,
-        &attempt("failed", module, old_version, "jitpack"),
-        &[(name, &oid)],
+        module,
+        &[old_version.into()],
+        true,
+        fetch,
+        &inspected,
     )?;
-    println!("Archived failed JitPack {module} {old_version}; canonical tag retained; advancing to {version}");
+    ensure!(
+        report.len() == 1 && report[0].action == "archived",
+        "Cannot archive {name}; the attempt is preserved: {}. Investigate or finalize it first. \
+         For an intentional separate release, supply --version X.Y.Z newer than all module history \
+         and --allow-pending-jitpack (Actions: set version and bypass_version_verification=true); \
+         this retains the unresolved attempt",
+        report
+            .first()
+            .map(|entry| entry.detail.as_str())
+            .unwrap_or("pending journal changed; retry the review")
+    );
+    println!("Archived failed JitPack {module} {old_version}; source tag retained; advancing to {version}");
     Ok(())
 }
 
@@ -596,11 +609,22 @@ fn reconcile_failed_jitpack_with(
     apply: bool,
     fetch: &Fetch<'_>,
 ) -> Result<Vec<ReconciledAttempt>> {
+    let tags = remote_tags(root)?;
+    reconcile_failed_jitpack_snapshot(root, module, versions, apply, fetch, &tags)
+}
+
+fn reconcile_failed_jitpack_snapshot(
+    root: &Path,
+    module: &str,
+    versions: &[String],
+    apply: bool,
+    fetch: &Fetch<'_>,
+    tags: &BTreeMap<String, String>,
+) -> Result<Vec<ReconciledAttempt>> {
     coordinates(root, module, "0.1.0", "jitpack", true)?;
     for version in versions {
         version_key(version)?;
     }
-    let tags = remote_tags(root)?;
     let prefix = attempt("pending", module, "", "jitpack");
     let mut report = Vec::new();
     for (name, expected_oid) in tags.iter().filter(|(name, _)| name.starts_with(&prefix)) {
@@ -619,10 +643,8 @@ fn reconcile_failed_jitpack_with(
                 record["phase"] == "reserved-before-upload",
                 "Journal is already confirmed"
             );
-            ensure!(
-                record["source_tag"] == canonical(module, version, "jitpack"),
-                "A canonical destination source tag is required"
-            );
+            // Valid legacy journals use module/vX.Y.Z (and their original
+            // consumer version). Verify that tag instead of rewriting identity.
             verify_stable(root, &record)?;
             ensure_unconfirmed_jitpack(root, module, version)?;
             verify_failed_jitpack(&record, fetch)?;
@@ -1894,9 +1916,22 @@ mod tests {
     }
 
     fn add_failed_attempt(root: &Path, version: &str, source: &str) -> Result<String> {
-        let stable = canonical("demo", version, "jitpack");
+        add_jitpack_attempt(root, version, source, false)
+    }
+
+    fn add_jitpack_attempt(
+        root: &Path,
+        version: &str,
+        source: &str,
+        legacy: bool,
+    ) -> Result<String> {
+        let stable = if legacy {
+            format!("demo/v{version}")
+        } else {
+            canonical("demo", version, "jitpack")
+        };
         git_text(root, &["tag", &stable, source])?;
-        let record = json!({
+        let mut record = json!({
             "module": "demo", "version": version, "source": source,
             "group": "com.github.example", "artifact": "demo",
             "repository": "jitpack", "repository_url": JITPACK,
@@ -1904,6 +1939,10 @@ mod tests {
             "source_tag": stable, "phase": "reserved-before-upload",
             "sha256": SUFFIXES.into_iter().map(|suffix| (suffix, "a".repeat(64))).collect::<BTreeMap<_,_>>()
         });
+        if legacy {
+            record.as_object_mut().unwrap().remove("source_tag");
+            record["consumer_version"] = json!(format!("demo~v{version}"));
+        }
         let pending = attempt("pending", "demo", version, "jitpack");
         git_text(
             root,
@@ -1921,6 +1960,154 @@ mod tests {
         } else {
             Ok(None)
         }
+    }
+
+    #[test]
+    fn automatic_recovery_archives_older_legacy_failure_after_newer_confirmation() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        let pending_oid = add_jitpack_attempt(&root, "0.1.0", &source, true)?;
+        let (mut confirmed, _) = read_reservation(&root, "demo", "0.1.0", "jitpack", "jitpack/")?;
+        confirmed["version"] = json!("0.1.1");
+        confirmed["consumer_version"] = json!("demo~v0.1.1-jitpack");
+        confirmed["source_tag"] = json!("demo/v0.1.1-jitpack");
+        confirmed["phase"] = json!("confirmed-public");
+        fs::create_dir_all(root.join("docs/releases/jitpack"))?;
+        let metadata_path = root.join("docs/releases/jitpack/demo.json");
+        fs::write(&metadata_path, serde_json::to_vec_pretty(&confirmed)?)?;
+        git_text(&root, &["add", "docs"])?;
+        git_text(&root, &["commit", "-m", "newer confirmed release"])?;
+        git_text(&root, &["tag", "demo/v0.1.1-jitpack", &source])?;
+        git_text(&root, &["push", "origin", "main", "--tags"])?;
+        let corrected = git_text(&root, &["rev-parse", "HEAD"])?;
+        let before_metadata = fs::read(&metadata_path)?;
+        let before_tags = remote_tags(&root)?;
+        let fetch = |url: &str, _: bool| failed_response(url, &source);
+        recover_failed_jitpack(&root, "demo", &before_tags, "0.1.2", &corrected, &fetch)?;
+        let mut expected_tags = before_tags;
+        expected_tags.remove("release-pending/jitpack/demo/0.1.0");
+        expected_tags.insert("release-failed/jitpack/demo/0.1.0".into(), pending_oid);
+        assert_eq!(remote_tags(&root)?, expected_tags);
+        assert_eq!(fs::read(&metadata_path)?, before_metadata);
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_archives_legacy_tag_without_rewriting_release_identity() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        let oid = add_jitpack_attempt(&root, "0.1.0", &source, true)?;
+        let before = remote_tags(&root)?;
+        let fetch = |url: &str, _: bool| failed_response(url, &source);
+        let preview = reconcile_failed_jitpack_with(&root, "demo", &[], false, &fetch)?;
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].action, "eligible", "{}", preview[0].detail);
+        assert_eq!(remote_tags(&root)?, before);
+        let applied = reconcile_failed_jitpack_with(&root, "demo", &[], true, &fetch)?;
+        assert_eq!(applied[0].action, "archived", "{}", applied[0].detail);
+        let mut expected = before;
+        expected.remove("release-pending/jitpack/demo/0.1.0");
+        expected.insert("release-failed/jitpack/demo/0.1.0".into(), oid);
+        assert_eq!(remote_tags(&root)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_recovery_preserves_archived_confirmation_without_latest_record() -> Result<()> {
+        for filename in ["0.1.0-jitpack.json", "0.1.0.json"] {
+            let (_temp, root, source) = failed_attempt_fixture()?;
+            add_failed_attempt(&root, "0.1.0", &source)?;
+            let (mut confirmed, _) =
+                read_reservation(&root, "demo", "0.1.0", "jitpack", "jitpack/")?;
+            confirmed["phase"] = json!("confirmed-public");
+            fs::create_dir_all(root.join("docs/releases/history/demo"))?;
+            fs::write(
+                root.join("docs/releases/history/demo").join(filename),
+                serde_json::to_vec(&json!({
+                    "schema": 1, "module": "demo", "version": "0.1.0", "source": source,
+                    "documentation_ref": source, "destinations": {"jitpack": confirmed}
+                }))?,
+            )?;
+            git_text(&root, &["add", "docs"])?;
+            git_text(&root, &["commit", "-m", "archived confirmation"])?;
+            git_text(&root, &["push", "origin", "main"])?;
+            let corrected = git_text(&root, &["rev-parse", "HEAD"])?;
+            let before = remote_tags(&root)?;
+            let fetch = |url: &str, _: bool| failed_response(url, &source);
+            assert!(
+                recover_failed_jitpack(&root, "demo", &before, "0.1.1", &corrected, &fetch)
+                    .is_err()
+            );
+            assert_eq!(remote_tags(&root)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_recovery_reports_unknown_legacy_attempt_and_explicit_recovery() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        add_jitpack_attempt(&root, "0.1.0", &source, true)?;
+        git_text(
+            &root,
+            &["commit", "--allow-empty", "-m", "corrected source"],
+        )?;
+        git_text(&root, &["push", "origin", "main"])?;
+        let corrected = git_text(&root, &["rev-parse", "HEAD"])?;
+        let before = remote_tags(&root)?;
+        let fetch = |_: &str, _: bool| -> Result<Option<Vec<u8>>> {
+            Ok(Some(serde_json::to_vec(&json!({
+                "version": "demo~v0.1.0", "status": "tagNotFound", "message": "",
+                "commit": "", "modules": [], "isTag": false
+            }))?))
+        };
+        let error = recover_failed_jitpack(&root, "demo", &before, "0.1.1", &corrected, &fetch)
+            .expect_err("Unknown build status must preserve the journal");
+        let message = format!("{error:#}");
+        for detail in [
+            "tagNotFound",
+            "release-pending/jitpack/demo/0.1.0",
+            "--version X.Y.Z",
+            "--allow-pending-jitpack",
+            "bypass_version_verification",
+        ] {
+            assert!(message.contains(detail), "Missing {detail}: {message}");
+        }
+        assert_eq!(remote_tags(&root)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_reconciliation_preserves_a_replaced_valid_pending_journal() -> Result<()> {
+        let (_temp, root, source) = failed_attempt_fixture()?;
+        let original = add_failed_attempt(&root, "0.1.0", &source)?;
+        let pending = "release-pending/jitpack/demo/0.1.0";
+        let inspected = BTreeMap::from([(pending.to_owned(), original)]);
+        let (mut replacement, _) = read_reservation(&root, "demo", "0.1.0", "jitpack", "jitpack/")?;
+        replacement["workflow_run"] = json!("replacement-run");
+        git_text(
+            &root,
+            &[
+                "tag",
+                "-f",
+                "-a",
+                pending,
+                &source,
+                "-m",
+                &replacement.to_string(),
+            ],
+        )?;
+        git_text(&root, &["push", "--force", "origin", &refname(pending)])?;
+        let before = remote_tags(&root)?;
+        let fetch = |url: &str, _: bool| failed_response(url, &source);
+        let report = reconcile_failed_jitpack_snapshot(
+            &root,
+            "demo",
+            &["0.1.0".into()],
+            true,
+            &fetch,
+            &inspected,
+        )?;
+        assert_eq!(report[0].action, "needs-review");
+        assert_eq!(remote_tags(&root)?, before);
+        Ok(())
     }
 
     #[test]
