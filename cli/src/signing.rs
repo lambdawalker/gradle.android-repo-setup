@@ -934,6 +934,23 @@ mod tests {
     }
 
     #[test]
+    fn local_properties_strip_windows_verbatim_prefixes() {
+        assert_eq!(
+            local_properties_path(r"\\?\C:\Users\David\.projects\auth\release.jks"),
+            "C:/Users/David/.projects/auth/release.jks",
+        );
+        assert_eq!(
+            local_properties_path(r"\\?\UNC\server\share\release.jks"),
+            "//server/share/release.jks",
+        );
+        assert_eq!(
+            local_properties_path(r"C:\Users\David\release.jks"),
+            "C:/Users/David/release.jks",
+        );
+        assert_eq!(local_properties_path("/home/david/release.jks"), "/home/david/release.jks");
+    }
+
+    #[test]
     fn local_properties_omit_redundant_key_password_and_replace_managed_block() -> Result<()> {
         let passwords = SigningPasswords {
             keystore: "/tmp/release.jks".into(),
