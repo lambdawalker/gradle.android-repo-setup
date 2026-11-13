@@ -52,6 +52,26 @@ pub(crate) fn expected(root: &Path) -> Result<BTreeMap<&'static str, String>> {
         }
         ignored.push_str("/.project/setup/cache/\n");
     }
+    if root.join(".project/docs/config.yaml").is_file() {
+        let workflow = files.get_mut(".github/workflows/verify-setup.yml").unwrap();
+        *workflow = workflow.replace("          sh ./setup.sh module-release verify\n          sh ./setup.sh documentation-history verify", "          sh ./docs.sh check");
+        *workflow = workflow.replace(
+            "          fetch-depth: 0\n",
+            "          fetch-depth: 0\n          lfs: true\n",
+        );
+        workflow.push_str("      - name: Verify standalone Windows documentation launcher\n        if: runner.os == 'Windows'\n        shell: cmd\n        run: docs.bat bootstrap check\n");
+        for (name, contents) in android_repo_docs::bootstrap::expected(root)? {
+            if name != ".gitignore" {
+                files.insert(name, contents);
+            }
+        }
+        if !ignored.lines().any(|line| line == "/.project/docs/cache/") {
+            if !ignored.is_empty() && !ignored.ends_with('\n') {
+                ignored.push('\n');
+            }
+            ignored.push_str("/.project/docs/cache/\n");
+        }
+    }
     files.insert(".gitignore", ignored);
     for content in files.values_mut() {
         *content = normalize_newlines(content);
@@ -120,7 +140,7 @@ pub(crate) fn run(root: &Path, check: bool, overwrite: bool) -> Result<()> {
         use std::io::Write;
         staged.write_all(content.as_bytes())?;
         #[cfg(unix)]
-        if name == "setup.sh" {
+        if name == "setup.sh" || name == "docs.sh" {
             use std::os::unix::fs::PermissionsExt;
             staged
                 .as_file()

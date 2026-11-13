@@ -291,32 +291,7 @@ pub(super) fn coordinates_for_record(
     })
 }
 
-pub(super) fn local_identity(root: &Path, module: &str) -> Result<(String, String)> {
-    let properties = fs::read_to_string(root.join("gradle.properties"))?;
-    let properties: BTreeMap<_, _> = properties
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.starts_with('#') {
-                None
-            } else {
-                line.split_once('=')
-            }
-        })
-        .collect();
-    let group = *properties.get("GROUP").context("Missing GROUP")?;
-    let artifact = properties
-        .get(format!("POM_ARTIFACT_ID.{module}").as_str())
-        .or_else(|| properties.get("POM_ARTIFACT_ID"))
-        .copied()
-        .unwrap_or(module);
-    ensure!(
-        Regex::new(r"\A[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\z")?.is_match(group)
-            && Regex::new(r"\A[a-z][a-z0-9-]*\z")?.is_match(artifact),
-        "Unexpected module coordinates"
-    );
-    Ok((group.to_owned(), artifact.to_owned()))
-}
+pub(super) use android_repo_docs::local_identity;
 
 pub(super) fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")

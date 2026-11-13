@@ -206,3 +206,75 @@ fn crlf_checkouts_are_equivalent_and_generation_is_lf() {
             .contains('\r'));
     }
 }
+
+#[test]
+fn documentation_bootstrap_uses_its_own_pin_and_checks_drift() {
+    let root = fixture("v0.1.15");
+    assert!(run(root.path(), &["generate"]).status.success());
+    assert!(!root.path().join("docs.sh").exists());
+    fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+    fs::write(
+        root.path().join(".project/docs/config.yaml"),
+        "schema: 1\ntooling_ref: v0.1.16\n",
+    )
+    .unwrap();
+    let out = run(root.path(), &["generate", "--overwrite"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let launcher = fs::read_to_string(root.path().join("docs.sh")).unwrap();
+    assert!(launcher.contains("pin='v0.1.16'"));
+    assert!(launcher.contains("android-repo-docs"));
+    let ignore = fs::read_to_string(root.path().join(".gitignore")).unwrap();
+    assert!(ignore.contains("/.project/setup/cache/"));
+    assert!(ignore.contains("/.project/docs/cache/"));
+    assert!(run(root.path(), &["check"]).status.success());
+    fs::write(root.path().join("docs.sh"), "changed").unwrap();
+    assert!(!run(root.path(), &["check"]).status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn launcher_makes_pinned_executable_available_to_child_processes() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture("v0.1.15");
+    assert!(run(root.path(), &["generate"]).status.success());
+    let bin = root.path().join(".project/setup/cache/v0.1.15/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("android-repo-setup");
+    fs::write(&exe, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'android-repo-setup 0.1.15'; exit 0; fi\ncommand -v android-repo-setup\n").unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new("sh")
+        .arg(root.path().join("setup.sh"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        exe.to_str().unwrap()
+    );
+}
+
+#[test]
+fn docs_cache_rule_is_separate_after_unterminated_setup_rule() {
+    let root = fixture("v0.1.15");
+    fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+    fs::write(
+        root.path().join(".project/docs/config.yaml"),
+        "tooling_ref: v0.1.16\n",
+    )
+    .unwrap();
+    fs::write(root.path().join(".gitignore"), "/.project/setup/cache/").unwrap();
+    assert!(run(root.path(), &["generate"]).status.success());
+    assert_eq!(
+        fs::read_to_string(root.path().join(".gitignore")).unwrap(),
+        "/.project/setup/cache/\n/.project/docs/cache/\n"
+    );
+}

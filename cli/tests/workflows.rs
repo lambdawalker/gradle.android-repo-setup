@@ -579,3 +579,213 @@ fn yaml_like_module_ids_remain_strings_and_discovered_projects_skip_demo_screens
     let docs = fs::read_to_string(output.join("documentation.yml")).unwrap();
     assert!(!docs.contains("cd docs/screenshots"));
 }
+
+#[test]
+fn opted_in_documentation_uses_independent_tool_and_pin() {
+    let root = fixture();
+    fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+    let pin = "1234567890abcdef1234567890abcdef12345678";
+    fs::write(
+        root.path().join(".project/docs/config.yaml"),
+        format!("schema: 1\ntooling_ref: '{pin}'\n"),
+    )
+    .unwrap();
+    let out = run(root.path(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let folder = root.path().join(".github/workflows");
+    let docs = fs::read_to_string(folder.join("documentation.yml")).unwrap();
+    assert!(docs.contains(&format!("--rev {pin} android-repo-docs")));
+    assert!(docs.contains("android-repo-docs check"));
+    assert!(docs.contains("lfs: true"));
+    assert!(docs.contains("android-repo-docs build"));
+    assert!(!docs.contains("android-repo-setup publishing_config"));
+    assert!(!docs.contains("\"${ref[@]}\" android-repo-setup"));
+    let publication = fs::read_to_string(folder.join("publish-library.yml")).unwrap();
+    assert!(publication.contains(&format!("--rev {pin} android-repo-docs")));
+    let updater = fs::read_to_string(folder.join("update-workflows.yml")).unwrap();
+    assert!(updater.contains("docs_version:"));
+    assert!(
+        updater.find("Update documentation tooling pin").unwrap()
+            < updater.find("workflows --overwrite").unwrap()
+    );
+    assert!(updater.contains("git add .project/docs/config.yaml"));
+    assert!(updater.contains("git add docs.sh docs.bat .project/docs/bootstrap.ps1 .gitignore"));
+    let check = run(root.path(), &["--check"]);
+    assert!(
+        check.status.success(),
+        "generated workflows must immediately pass --check:\n{}\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    // Embedded fragments may have CRLF after a Windows checkout. All generated
+    // workflows must use the same LF representation as comparison and hashes.
+    for entry in fs::read_dir(folder).unwrap() {
+        let entry = entry.unwrap();
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        assert!(
+            !contents.contains('\r'),
+            "{} contains noncanonical line endings",
+            entry.path().display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn updater_executes_pin_refresh_and_staging_for_independent_adoption_states() {
+    for (setup, docs) in [(false, false), (false, true), (true, true)] {
+        for (key, value) in [
+            ("tooling_ref", "v0.1.16"),
+            ("'tooling_ref'", "'v0.1.16'"),
+            ("\"tooling_ref\"", "\"v0.1.16\""),
+        ] {
+            let root = fixture();
+            fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+            let config = root.path().join(".project/docs/config.yaml");
+            fs::write(
+                &config,
+                format!("schema: 1\n{key}  :  {value} # keep comment\n"),
+            )
+            .unwrap();
+            if setup {
+                let out = Command::new(env!("CARGO_BIN_EXE_android-repo-setup"))
+                    .args([
+                        "--project",
+                        root.path().to_str().unwrap(),
+                        "bootstrap",
+                        "generate",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            } else if docs {
+                android_repo_docs::bootstrap::run(root.path(), false, true).unwrap();
+            }
+            assert!(run(root.path(), &[]).status.success());
+            assert!(Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success());
+            let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_slice(
+                &fs::read(root.path().join(".github/workflows/update-workflows.yml")).unwrap(),
+            )
+            .unwrap();
+            let steps = workflow["jobs"]["update"]["steps"].as_sequence().unwrap();
+            // Execute the generated scripts. Cargo is a harmless install recorder;
+            // the docs command records the invocation for the real library below.
+            for name in [
+                "Update documentation tooling pin",
+                "Refresh adopted bootstrap",
+                "Refresh adopted documentation bootstrap",
+                "Create review patch",
+            ] {
+                let script = steps.iter().find(|step| step["name"] == name).unwrap()["run"]
+                    .as_str()
+                    .unwrap();
+                let script = format!("set -e\ncargo() {{ printf '%s\\n' \"$@\" >> install.log; }}\nandroid-repo-setup() {{ \"$SETUP_BIN\" \"$@\"; }}\nandroid-repo-docs() {{ printf '%s\\n' \"$@\" > docs-command.log; }}\n{script}");
+                let out = Command::new("bash")
+                    .args(["-c", &script])
+                    .current_dir(root.path())
+                    .env("DOCS_TOOLING_REF", "v0.1.17")
+                    .env("SETUP_BIN", env!("CARGO_BIN_EXE_android-repo-setup"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{name} ({setup}, {docs}, {key}): {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if name == "Refresh adopted documentation bootstrap" && docs {
+                    assert_eq!(
+                        fs::read_to_string(root.path().join("docs-command.log")).unwrap(),
+                        "bootstrap\ngenerate\n--overwrite\n"
+                    );
+                    android_repo_docs::bootstrap::run(root.path(), false, true).unwrap();
+                }
+            }
+            assert!(fs::read_to_string(&config)
+                .unwrap()
+                .contains("'v0.1.17' # keep comment"));
+            assert_eq!(root.path().join("docs.sh").exists(), docs);
+            assert_eq!(root.path().join("setup.sh").exists(), setup);
+            if docs {
+                assert!(fs::read_to_string(root.path().join("docs.sh"))
+                    .unwrap()
+                    .contains("pin='v0.1.17'"));
+                let install = fs::read_to_string(root.path().join("install.log")).unwrap();
+                assert!(install.contains("--tag\nv0.1.17\nandroid-repo-docs\n"));
+            } else {
+                assert!(!root.path().join("install.log").exists());
+            }
+            let staged = Command::new("git")
+                .args(["diff", "--cached", "--name-only"])
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            let staged = String::from_utf8(staged.stdout).unwrap();
+            assert!(staged
+                .lines()
+                .any(|line| line == ".project/docs/config.yaml"));
+            assert_eq!(staged.lines().any(|line| line == "docs.sh"), docs);
+            assert!(root.path().join("workflow-update.patch").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn updater_validates_pin_serialization_before_writing_and_blank_preserves_pin() {
+    let root = fixture();
+    fs::create_dir_all(root.path().join(".project/docs")).unwrap();
+    let config = root.path().join(".project/docs/config.yaml");
+    fs::write(&config, "tooling_ref: v0.1.16\n").unwrap();
+    assert!(run(root.path(), &[]).status.success());
+    let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_slice(
+        &fs::read(root.path().join(".github/workflows/update-workflows.yml")).unwrap(),
+    )
+    .unwrap();
+    let script = workflow["jobs"]["update"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "Update documentation tooling pin")
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    for (text, pin, success) in [
+        ("tooling_ref: v0.1.16 # unchanged\n", "", true),
+        ("tooling_ref: v0.1.16\n", "main", false),
+        ("tooling_ref: >-\n  v0.1.16\n", "v0.1.17", false),
+        ("{tooling_ref: v0.1.16}\n", "v0.1.17", false),
+        (
+            "tooling_ref: v0.1.16\n\"tooling_ref\": v0.1.16\n",
+            "v0.1.17",
+            false,
+        ),
+    ] {
+        fs::write(&config, text).unwrap();
+        let out = Command::new("bash")
+            .args(["-e", "-c", script])
+            .current_dir(root.path())
+            .env("DOCS_TOOLING_REF", pin)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), text);
+    }
+}

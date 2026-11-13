@@ -21,21 +21,27 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.package }} ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
+        package: [android-repo-setup, android-repo-docs]
+        platform: [windows, linux, macos]
         include:
-          - runner: windows-2025
+          - platform: windows
+            runner: windows-2025
             target: x86_64-pc-windows-msvc
-          - runner: ubuntu-22.04
+          - platform: linux
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - runner: macos-15
+          - platform: macos
+            runner: macos-15
             target: aarch64-apple-darwin
     env:
       TARGET: ${{ matrix.target }}
+      PACKAGE: ${{ matrix.package }}
       RELEASE_VERSION: ${{ inputs.release_version }}
     steps:
       - uses: actions/checkout@v7
@@ -58,14 +64,14 @@ jobs:
           version = os.environ["RELEASE_VERSION"]
           if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", version):
               raise SystemExit("Expected a stable X.Y.Z release version.")
-          for filename in ("Cargo.toml", "Cargo.lock"):
+          for filename in ("Cargo.toml", "docs/Cargo.toml", "Cargo.lock"):
               path = Path("cli") / filename
               content, count = re.subn(
-                  r'(?m)^(name = "android-repo-setup"\nversion = ")[^"\n]+(")$',
+                  r'(?m)^(name = "android-repo-(?:setup|docs)"\nversion = ")[^"\n]+(")$',
                   lambda match: match[1] + version + match[2],
                   path.read_text(encoding="utf-8"),
               )
-              if count != 1:
+              if count != (2 if filename == "Cargo.lock" else 1):
                   raise SystemExit(f"Could not locate the CLI package version in {filename}.")
               path.write_text(content, encoding="utf-8")
           PY
@@ -74,14 +80,14 @@ jobs:
         run: |
           set -euo pipefail
           rustup target add "$TARGET"
-          cargo build --manifest-path cli/Cargo.toml --locked --release --target "$TARGET"
-          executable=android-repo-setup
+          cargo build --manifest-path cli/Cargo.toml --locked --release --target "$TARGET" --package "$PACKAGE"
+          executable="$PACKAGE"
           if [[ "$RUNNER_OS" == Windows ]]; then executable+=.exe; fi
           binary="cli/target/$TARGET/release/$executable"
           version="$("$binary" --version)"
           printf '%s\n' "$version"
           "$binary" --help
-          if [[ -n "$RELEASE_VERSION" && "$version" != "android-repo-setup $RELEASE_VERSION" ]]; then
+          if [[ -n "$RELEASE_VERSION" && "$version" != "$PACKAGE $RELEASE_VERSION" ]]; then
             echo "The executable version must match the release version." >&2
             exit 1
           fi
@@ -91,18 +97,18 @@ jobs:
       - name: Package Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path package/* -DestinationPath "dist/android-repo-setup-$env:TARGET.zip"
+        run: Compress-Archive -Path package/* -DestinationPath "dist/$env:PACKAGE-$env:TARGET.zip"
       - name: Package Unix executable
         if: runner.os != 'Windows'
         shell: bash
-        run: tar -czf "dist/android-repo-setup-$TARGET.tar.gz" -C package android-repo-setup LICENSE
+        run: tar -czf "dist/$PACKAGE-$TARGET.tar.gz" -C package "$PACKAGE" LICENSE
       - name: Generate archive checksum
         shell: bash
         working-directory: dist
         run: |
           set -euo pipefail
-          archive="android-repo-setup-$TARGET.tar.gz"
-          if [[ "$RUNNER_OS" == Windows ]]; then archive="android-repo-setup-$TARGET.zip"; fi
+          archive="$PACKAGE-$TARGET.tar.gz"
+          if [[ "$RUNNER_OS" == Windows ]]; then archive="$PACKAGE-$TARGET.zip"; fi
           if command -v sha256sum >/dev/null; then
             sha256sum "$archive" > "$archive.sha256"
           else
@@ -110,6 +116,6 @@ jobs:
           fi
       - uses: actions/upload-artifact@v6
         with:
-          name: android-repo-setup-${{ matrix.target }}
+          name: ${{ matrix.package }}-${{ matrix.target }}
           path: dist/
           if-no-files-found: error

@@ -63,18 +63,22 @@ jobs:
           gradle = Path("build.gradle.kts")
           manifest = Path("cli/Cargo.toml")
           lockfile = Path("cli/Cargo.lock")
+          docs_manifest = Path("cli/docs/Cargo.toml")
           gradle_text = gradle.read_text(encoding="utf-8")
           gradle_pattern = r'(?m)^(version = ")[^"\n]+(")$'
           gradle_versions = re.findall(r'(?m)^version = "([^"\n]+)"$', gradle_text)
           if len(gradle_versions) != 1:
               raise SystemExit("Expected one Gradle project version.")
           package = tomllib.loads(manifest.read_text(encoding="utf-8"))["package"]
+          docs_package = tomllib.loads(docs_manifest.read_text(encoding="utf-8"))["package"]
           locked = tomllib.loads(lockfile.read_text(encoding="utf-8"))["package"]
           if [entry["version"] for entry in locked if entry["name"] == package["name"]] != [package["version"]]:
               raise SystemExit("The CLI manifest and lockfile must have the same package version.")
+          if [entry["version"] for entry in locked if entry["name"] == docs_package["name"]] != [docs_package["version"]]:
+              raise SystemExit("Documentation manifest and lockfile versions differ.")
           stable = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
           versions = []
-          for value in (gradle_versions[0], package["version"]):
+          for value in (gradle_versions[0], package["version"], docs_package["version"]):
               match = re.fullmatch(stable, value)
               if not match:
                   raise SystemExit(f"Expected a stable project version, got {value!r}.")
@@ -85,17 +89,17 @@ jobs:
                   versions.append(tuple(map(int, match.groups())))
           major, minor, patch = max(versions)
           version = f"{major}.{minor}.{patch + 1}"
-          cargo_pattern = r'(?m)^(name = "android-repo-setup"\nversion = ")[^"\n]+(")$'
-          for path, pattern in ((gradle, gradle_pattern), (manifest, cargo_pattern), (lockfile, cargo_pattern)):
+          cargo_pattern = r'(?m)^(name = "android-repo-(?:setup|docs)"\nversion = ")[^"\n]+(")$'
+          for path, pattern in ((gradle, gradle_pattern), (manifest, cargo_pattern), (docs_manifest, cargo_pattern), (lockfile, cargo_pattern)):
               updated, count = re.subn(pattern, lambda match: match[1] + version + match[2], path.read_text(encoding="utf-8"))
-              if count != 1:
+              if count != (2 if path == lockfile else 1):
                   raise SystemExit(f"Could not identify the version in {path}.")
               path.write_text(updated, encoding="utf-8")
           print(version)
           PY
             )"
             tag="v$version"
-            git add build.gradle.kts cli/Cargo.toml cli/Cargo.lock
+            git add build.gradle.kts cli/Cargo.toml cli/docs/Cargo.toml cli/Cargo.lock
             git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               -c commit.gpgsign=false commit -m "Release $tag"

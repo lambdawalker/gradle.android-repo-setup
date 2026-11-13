@@ -99,7 +99,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v7
         with:
-          pattern: android-repo-setup-*
+          pattern: android-repo-*
           path: dist
           merge-multiple: true
       - name: Verify checksums and publish
@@ -117,7 +117,10 @@ jobs:
           for archive in \
             android-repo-setup-x86_64-pc-windows-msvc.zip \
             android-repo-setup-x86_64-unknown-linux-gnu.tar.gz \
-            android-repo-setup-aarch64-apple-darwin.tar.gz
+            android-repo-setup-aarch64-apple-darwin.tar.gz \
+            android-repo-docs-x86_64-pc-windows-msvc.zip \
+            android-repo-docs-x86_64-unknown-linux-gnu.tar.gz \
+            android-repo-docs-aarch64-apple-darwin.tar.gz
           do
             sha256sum --check "$archive.sha256"
             assets+=("$archive" "$archive.sha256")

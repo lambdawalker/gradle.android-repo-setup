@@ -1,3 +1,8 @@
+[workspace]
+members = ["docs"]
+default-members = [".", "docs"]
+resolver = "2"
+
 [package]
 name = "android-repo-setup"
 version = "0.1.15"
@@ -5,6 +10,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+android-repo-docs = { path = "docs" }
 anyhow = "1"
 arboard = { version = "3", default-features = false }
 argon2 = "0.5"
@@ -19,7 +25,6 @@ indexmap = { version = "2", features = ["serde"] }
 iocraft = "0.9.5"
 libc = "0.2"
 percent-encoding = "2"
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 regex = "1"
 roxmltree = "0.20"
 serde = { version = "1", features = ["derive"] }
@@ -31,7 +36,6 @@ signal-hook = "0.3"
 smol = "2"
 tempfile = "3"
 unicode-casefold = "0.2"
-unicode-normalization = "0.1"
 unicode-segmentation = "1.13.3"
 ureq = { version = "3", default-features = false, features = ["platform-verifier", "rustls"] }
 zip = { version = "6", default-features = false, features = ["deflate"] }
