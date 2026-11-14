@@ -531,6 +531,24 @@ fn signing_property_line(line: &str) -> bool {
     })
 }
 
+fn local_properties_path(value: &str) -> String {
+    let (value, windows_path) = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        (format!(r"\\{rest}"), true)
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        (rest.to_owned(), true)
+    } else {
+        let windows_drive = value.as_bytes().get(1) == Some(&b':')
+            && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        let unc = value.starts_with(r"\\");
+        (value.to_owned(), windows_drive || unc)
+    };
+    if windows_path {
+        value.replace('\\', "/")
+    } else {
+        escape_property_value(&value)
+    }
+}
+
 fn escape_property_value(value: &str) -> String {
     let mut escaped = String::new();
     for ch in value.chars() {
@@ -583,7 +601,7 @@ fn local_properties_content(existing: &str, passwords: &SigningPasswords) -> Res
     lines.push(LOCAL_PROPERTIES_BEGIN.into());
     lines.push(format!(
         "ANDROID_KEYSTORE_PATH={}",
-        escape_property_value(&passwords.keystore)
+        local_properties_path(&passwords.keystore)
     ));
     lines.push(format!(
         "ANDROID_KEYSTORE_PASSWORD={}",
@@ -906,13 +924,30 @@ mod tests {
         assert!(rendered.contains("sdk.dir=C:\\\\Android\\Sdk\n"));
         assert!(rendered.contains("custom=value\n"));
         assert!(!rendered.contains("ANDROID_KEYSTORE_PATH=old.jks"));
-        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C\\:\\\\Users\\\\David\\\\.projects\\\\demo\\\\secrets\\\\release\\ key.jks"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C:/Users/David/.projects/demo/secrets/release key.jks"));
         assert!(rendered.contains("ANDROID_KEYSTORE_PASSWORD=store\\ pass\\:\\=\\#\\!"));
         assert!(rendered.contains("ANDROID_KEY_ALIAS=release\\:key"));
         assert!(rendered.contains("ANDROID_KEY_PASSWORD=different\\ key"));
         assert_eq!(rendered.matches(LOCAL_PROPERTIES_BEGIN).count(), 1);
         assert_eq!(rendered.matches(LOCAL_PROPERTIES_END).count(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn local_properties_strip_windows_verbatim_prefixes() {
+        assert_eq!(
+            local_properties_path(r"\\?\C:\Users\David\.projects\auth\release.jks"),
+            "C:/Users/David/.projects/auth/release.jks",
+        );
+        assert_eq!(
+            local_properties_path(r"\\?\UNC\server\share\release.jks"),
+            "//server/share/release.jks",
+        );
+        assert_eq!(
+            local_properties_path(r"C:\Users\David\release.jks"),
+            "C:/Users/David/release.jks",
+        );
+        assert_eq!(local_properties_path("/home/david/release.jks"), "/home/david/release.jks");
     }
 
     #[test]
