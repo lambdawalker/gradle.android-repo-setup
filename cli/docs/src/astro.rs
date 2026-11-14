@@ -22,9 +22,16 @@ fn npm(root: &Path, args: &[&str], destination: Option<&Path>) -> Result<Output>
     #[cfg(windows)]
     let output = match output {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let base = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
             let shim = std::env::var_os("PATH").and_then(|path| {
                 std::env::split_paths(&path)
-                    .map(|dir| root.join(dir).join("npm.cmd"))
+                    .map(|dir| {
+                        if dir.is_absolute() {
+                            dir.join("npm.cmd")
+                        } else {
+                            base.join(dir).join("npm.cmd")
+                        }
+                    })
                     .find(|path| path.is_file())
             });
             match shim {

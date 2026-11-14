@@ -125,6 +125,7 @@ internal fun inspectSigningKey(
     storePasswordInput: String,
     aliasInput: String,
     keyPasswordInput: String,
+    keystorePathInput: String = "ANDROID_KEYSTORE_PATH",
 ): SigningIssue? {
     val storeChars = storePassword.value.toCharArray()
     val keyChars = keyPassword.value.toCharArray()
@@ -140,7 +141,7 @@ internal fun inspectSigningKey(
                 )
                 error.looksLikeFormatFailure() -> SigningIssue(
                     "Keystore '${keystore.path}' is not a readable JKS or PKCS12 keystore",
-                    "Verify that $aliasInput points to the intended Android signing keystore and that the file is not corrupt.",
+                    "Verify that $keystorePathInput points to the intended Android signing keystore and that the file is not corrupt.",
                 )
                 else -> SigningIssue(
                     "Keystore '${keystore.path}' could not be opened with $storePasswordInput " +
@@ -248,6 +249,7 @@ internal fun Project.localSigningVerification(
         storePasswordInput = convention.keystorePasswordInput,
         aliasInput = convention.keyAliasInput,
         keyPasswordInput = convention.keyPasswordInput,
+        keystorePathInput = convention.keystorePathInput,
     )?.let { issue ->
         throw org.gradle.api.GradleException(
             buildString {
@@ -264,13 +266,24 @@ internal fun Project.localSigningVerification(
             ?: throw org.gradle.api.GradleException(
                 "Alias '${alias.value}' has no certificate in '${keystore.path}'"
             )
+        val x509 = certificate as? X509Certificate
+        if (x509 != null) {
+            try {
+                x509.checkValidity()
+            } catch (error: Exception) {
+                throw org.gradle.api.GradleException(
+                    "Signing certificate for alias '${alias.value}' in '${keystore.path}' is not currently valid: ${error.message}",
+                    error,
+                )
+            }
+        }
         return LocalSigningVerification(
             keystore = keystore,
             keystorePathSource = keystorePath.source,
             alias = alias.value,
             aliasSource = alias.source,
             fingerprint = certificateFingerprint(certificate),
-            certificate = certificate as? X509Certificate,
+            certificate = x509,
         )
     } finally {
         storeChars.fill('\u0000')
@@ -362,6 +375,7 @@ internal fun Project.configureSigningConventions(
         storePasswordInput = convention.keystorePasswordInput,
         aliasInput = convention.keyAliasInput,
         keyPasswordInput = convention.keyPasswordInput,
+        keystorePathInput = convention.keystorePathInput,
     )
     if (issue != null) {
         reportSigningUnavailable(convention, issue)

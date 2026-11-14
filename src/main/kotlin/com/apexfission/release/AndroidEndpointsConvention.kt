@@ -108,8 +108,8 @@ internal class EndpointResolver(
         }
         val binding = byName[name]
         val value = raw(name)
-            ?: binding?.defaultValue?.let { expand(it, stack) }
-            ?: ""
+            ?: binding?.let { configured -> configured.defaultValue?.let { expand(it, stack) } ?: "" }
+            ?: throw IllegalArgumentException("Unknown Android endpoint property in default template: $name")
         stack.remove(name)
         resolved[name] = value
         return value
@@ -175,7 +175,12 @@ internal fun validateEndpoint(binding: EndpointBinding, value: String) {
     }
     when (binding.validation) {
         EndpointValidation.NONE -> Unit
-        EndpointValidation.HOSTNAME -> require(value.matches(Regex("[A-Za-z0-9.-]+"))) {
+        EndpointValidation.HOSTNAME -> require(
+            value.length <= 253 &&
+                value.matches(
+                    Regex("[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"),
+                ),
+        ) {
             "${binding.propertyName} must be a hostname"
         }
         EndpointValidation.ENVIRONMENT -> require(value.matches(Regex("[a-z][a-z0-9-]{0,31}"))) {

@@ -552,9 +552,23 @@ pub(super) fn verify_published_dependencies(
             !archive.is_empty(),
             "Published dependency archive is empty: {url}"
         );
+        const MAX_DEPENDENCY_ARCHIVE_ENTRIES: usize = 16_384;
+        const MAX_DEPENDENCY_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+        ensure!(
+            archive.len() <= MAX_DEPENDENCY_ARCHIVE_ENTRIES,
+            "Published dependency archive has too many entries: {url}"
+        );
+        let mut total_bytes = 0u64;
         for index in 0..archive.len() {
-            let mut entry = archive.by_index(index)?;
-            io::copy(&mut entry, &mut io::sink())?;
+            let entry = archive.by_index(index)?;
+            let remaining = MAX_DEPENDENCY_ARCHIVE_BYTES.saturating_sub(total_bytes);
+            let mut limited = io::Read::take(entry, remaining + 1);
+            let copied = io::copy(&mut limited, &mut io::sink())?;
+            total_bytes = total_bytes.saturating_add(copied);
+            ensure!(
+                total_bytes <= MAX_DEPENDENCY_ARCHIVE_BYTES,
+                "Published dependency archive exceeds maximum decompressed size: {url}"
+            );
         }
     }
     Ok(())
@@ -639,7 +653,7 @@ mod jvm_tests {
         for (name, major, valid) in [
             ("com/example/Math.class", 55, true),
             ("com/other/Math.class", 55, false),
-            ("com/example/Math.class", 61, false),
+            ("com/example/Math.class", 52, false),
         ] {
             let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
             writer.start_file(name, zip::write::SimpleFileOptions::default())?;

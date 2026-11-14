@@ -84,12 +84,17 @@ class AndroidApplicationConventionTest {
                 storePasswordInput = "ANDROID_KEYSTORE_PASSWORD",
                 aliasInput = "ANDROID_KEY_ALIAS",
                 keyPasswordInput = "ANDROID_KEY_PASSWORD",
+                keystorePathInput = "CUSTOM_KEYSTORE_PATH",
             )
             assertNotNull(issue)
             assertTrue(
                 issue!!.summary.contains("not a readable JKS or PKCS12") ||
                     issue.summary.contains("could not be opened"),
             )
+            if (issue.summary.contains("not a readable JKS or PKCS12")) {
+                assertTrue(issue.guidance.orEmpty().contains("CUSTOM_KEYSTORE_PATH"))
+                assertFalse(issue.guidance.orEmpty().contains("ANDROID_KEY_ALIAS"))
+            }
         } finally {
             file.delete()
         }
@@ -162,5 +167,32 @@ class AndroidApplicationConventionTest {
         }
         val binding = endpoints.configuredBindings().single()
         validateEndpoint(binding, "http://example.com")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `unknown endpoint template placeholder is rejected`() {
+        val endpoints = AndroidEndpointsConvention().apply {
+            string("host", buildConfig = "HOST", defaultValue = "{missing}.example.com")
+        }
+        val binding = endpoints.configuredBindings().single()
+        EndpointResolver(endpoints.configuredBindings()) { null }.resolve(binding)
+    }
+
+    @Test
+    fun `malformed hostname endpoints are rejected`() {
+        val endpoints = AndroidEndpointsConvention().apply {
+            string(
+                "host",
+                buildConfig = "HOST",
+                validation = EndpointValidation.HOSTNAME,
+                allowBlank = false,
+            )
+        }
+        val binding = endpoints.configuredBindings().single()
+        validateEndpoint(binding, "api-1.example.com")
+        for (invalid in listOf("...", "---", ".example.com", "example..com", "-bad.example.com", "bad-.example.com")) {
+            val failed = runCatching { validateEndpoint(binding, invalid) }.isFailure
+            assertTrue("Expected invalid hostname to be rejected: $invalid", failed)
+        }
     }
 }

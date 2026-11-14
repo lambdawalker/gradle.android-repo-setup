@@ -56,7 +56,15 @@ fn request(root: &Path, prefix: &str, stream: &mut TcpStream) -> Result<()> {
         );
     }
     let path = target.split('?').next().unwrap_or("");
-    let decoded = percent_encoding::percent_decode_str(path).decode_utf8()?;
+    let Ok(decoded) = percent_encoding::percent_decode_str(path).decode_utf8() else {
+        return respond(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Invalid preview path",
+            head,
+        );
+    };
     if !decoded.starts_with('/')
         || decoded.contains(['\\', '\0'])
         || Path::new(decoded.trim_start_matches('/'))
@@ -86,8 +94,21 @@ fn request(root: &Path, prefix: &str, stream: &mut TcpStream) -> Result<()> {
     let Ok(file) = file.canonicalize() else {
         return respond(stream, "404 Not Found", "text/plain", b"Not found", head);
     };
-    if !file.starts_with(root) || !file.is_file() {
+    let Ok(metadata) = file.metadata() else {
         return respond(stream, "404 Not Found", "text/plain", b"Not found", head);
+    };
+    if !file.starts_with(root) || !metadata.is_file() {
+        return respond(stream, "404 Not Found", "text/plain", b"Not found", head);
+    }
+    const MAX_PREVIEW_FILE_BYTES: u64 = 64 * 1024 * 1024;
+    if metadata.len() > MAX_PREVIEW_FILE_BYTES {
+        return respond(
+            stream,
+            "413 Payload Too Large",
+            "text/plain",
+            b"Preview file exceeds maximum size",
+            head,
+        );
     }
     let content_type = match file.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",

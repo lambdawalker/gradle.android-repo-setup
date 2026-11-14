@@ -543,10 +543,33 @@ fn local_properties_path(value: &str) -> String {
         (value.to_owned(), windows_drive || unc)
     };
     if windows_path {
-        value.replace('\\', "/")
+        escape_windows_property_path(&value)
     } else {
         escape_property_value(&value)
     }
+}
+
+fn escape_windows_property_path(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let has_drive = normalized.as_bytes().get(1) == Some(&b':')
+        && normalized.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    let mut escaped = String::new();
+    for (index, ch) in normalized.chars().enumerate() {
+        match ch {
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            ':' if has_drive && index == 1 => escaped.push(':'),
+            '=' | ':' | '#' | '!' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            ' ' if index == 0 => escaped.push_str("\\ "),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn escape_property_value(value: &str) -> String {
@@ -948,6 +971,10 @@ mod tests {
             "C:/Users/David/release.jks",
         );
         assert_eq!(local_properties_path("/home/david/release.jks"), "/home/david/release.jks");
+        assert_eq!(
+            local_properties_path("C:\\Users\\David\\dir#1=test!\\release.jks\nINJECTED=1"),
+            "C:/Users/David/dir\\#1\\=test\\!/release.jks\\nINJECTED\\=1",
+        );
     }
 
     #[test]
