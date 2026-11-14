@@ -653,7 +653,7 @@ mod jvm_tests {
         for (name, major, valid) in [
             ("com/example/Math.class", 55, true),
             ("com/other/Math.class", 55, false),
-            ("com/example/Math.class", 52, false),
+            ("com/example/Math.class", 61, false),
         ] {
             let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
             writer.start_file(name, zip::write::SimpleFileOptions::default())?;
