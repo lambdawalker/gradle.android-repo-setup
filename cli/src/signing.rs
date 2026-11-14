@@ -924,7 +924,7 @@ mod tests {
         assert!(rendered.contains("sdk.dir=C:\\\\Android\\Sdk\n"));
         assert!(rendered.contains("custom=value\n"));
         assert!(!rendered.contains("ANDROID_KEYSTORE_PATH=old.jks"));
-        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C\\:\\\\Users\\\\David\\\\.projects\\\\demo\\\\secrets\\\\release\\ key.jks"));
+        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C:/Users/David/.projects/demo/secrets/release key.jks"));
         assert!(rendered.contains("ANDROID_KEYSTORE_PASSWORD=store\\ pass\\:\\=\\#\\!"));
         assert!(rendered.contains("ANDROID_KEY_ALIAS=release\\:key"));
         assert!(rendered.contains("ANDROID_KEY_PASSWORD=different\\ key"));
