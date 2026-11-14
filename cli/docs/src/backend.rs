@@ -25,13 +25,17 @@ struct Site {
     build: Option<Vec<String>>,
     #[serde(default)]
     serve: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, rename = "pages", alias = "_pages")]
     _pages: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "translation_manifest",
+        alias = "_translation_manifest"
+    )]
     _translation_manifest: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, rename = "translation_paths", alias = "_translation_paths")]
     _translation_paths: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, rename = "aliases", alias = "_aliases")]
     _aliases: Option<serde_json::Value>,
 }
 
@@ -162,11 +166,40 @@ fn windows_command_shim(root: &Path, program: &str) -> Option<std::path::PathBuf
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn site_metadata_rejects_misspelled_fields() {
+        for key in ["page", "translation_manfiest", "translation_path", "alias"] {
+            let site = json!({"backend": "astro", key: {}});
+            let error = settings(Some(&site))
+                .err()
+                .expect("unknown fields must fail");
+            assert!(format!("{error:#}").contains("unknown field"));
+        }
+    }
+
+    #[test]
+    fn site_metadata_accepts_legacy_underscore_aliases() -> Result<()> {
+        for (name, alias) in [
+            ("pages", "_pages"),
+            ("translation_manifest", "_translation_manifest"),
+            ("translation_paths", "_translation_paths"),
+            ("aliases", "_aliases"),
+        ] {
+            let site = json!({"backend": "astro", alias: {}});
+            assert_eq!(select(Path::new("."), Some(&site))?, SiteBackend::Astro);
+            let duplicate = json!({"backend": "astro", name: {}, alias: {}});
+            assert!(
+                settings(Some(&duplicate)).is_err(),
+                "duplicate {name} aliases must fail"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn built_in_backend_accepts_renderer_specific_site_metadata() -> Result<()> {
@@ -178,10 +211,7 @@ mod tests {
             "translation_paths": {"README.md": "docs/es/README.md"},
             "aliases": [{"source": "README.md", "html": "{language}/main/README.html"}]
         });
-        assert_eq!(
-            select(Path::new("."), Some(&site))?,
-            SiteBackend::Astro
-        );
+        assert_eq!(select(Path::new("."), Some(&site))?, SiteBackend::Astro);
         Ok(())
     }
 }
