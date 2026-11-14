@@ -3,7 +3,9 @@ package com.apexfission.release
 import com.android.build.api.dsl.ApplicationExtension
 import java.io.File
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.PrivateKey
+import java.security.cert.X509Certificate
 import java.security.UnrecoverableKeyException
 import java.util.Properties
 import org.gradle.api.Project
@@ -193,6 +195,110 @@ internal fun inspectSigningKey(
         storeChars.fill('\u0000')
         keyChars.fill('\u0000')
     }
+}
+
+internal fun certificateFingerprint(certificate: java.security.cert.Certificate): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest(certificate.encoded)
+        .joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xff) }
+
+internal data class LocalSigningVerification(
+    val keystore: File,
+    val keystorePathSource: SigningValueSource,
+    val alias: String,
+    val aliasSource: SigningValueSource,
+    val fingerprint: String,
+    val certificate: X509Certificate?,
+)
+
+internal fun Project.localSigningVerification(
+    convention: AndroidSigningConvention,
+): LocalSigningVerification {
+    val local = signingProperties()
+    val keystorePath = signingSetting(local, convention.keystorePathInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: throw org.gradle.api.GradleException(
+            "${convention.keystorePathInput} is not configured. Run the setup Local Gradle signing step first."
+        )
+
+    val keystore = rootProject.file(keystorePath.value)
+    if (!keystore.isFile) {
+        throw org.gradle.api.GradleException(
+            "${convention.keystorePathInput} from ${keystorePath.source.description} points to missing file '${keystore.path}'"
+        )
+    }
+
+    val storePassword = signingSetting(local, convention.keystorePasswordInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: throw org.gradle.api.GradleException(
+            "${convention.keystorePasswordInput} is missing while ${convention.keystorePathInput} points to '${keystore.path}'"
+        )
+    val alias = signingSetting(local, convention.keyAliasInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: SigningSetting(convention.defaultAlias, SigningValueSource.DEFAULT)
+    val keyPassword = signingSetting(local, convention.keyPasswordInput)
+        ?.takeIf { it.value.isNotBlank() }
+        ?: SigningSetting(storePassword.value, SigningValueSource.DEFAULT)
+
+    inspectSigningKey(
+        keystore = keystore,
+        alias = alias,
+        storePassword = storePassword,
+        keyPassword = keyPassword,
+        storePasswordInput = convention.keystorePasswordInput,
+        aliasInput = convention.keyAliasInput,
+        keyPasswordInput = convention.keyPasswordInput,
+    )?.let { issue ->
+        throw org.gradle.api.GradleException(
+            buildString {
+                append(issue.summary)
+                issue.guidance?.let { append(". ").append(it) }
+            }
+        )
+    }
+
+    val storeChars = storePassword.value.toCharArray()
+    try {
+        val store = KeyStore.getInstance(keystore, storeChars)
+        val certificate = store.getCertificate(alias.value)
+            ?: throw org.gradle.api.GradleException(
+                "Alias '${alias.value}' has no certificate in '${keystore.path}'"
+            )
+        return LocalSigningVerification(
+            keystore = keystore,
+            keystorePathSource = keystorePath.source,
+            alias = alias.value,
+            aliasSource = alias.source,
+            fingerprint = certificateFingerprint(certificate),
+            certificate = certificate as? X509Certificate,
+        )
+    } finally {
+        storeChars.fill('\u0000')
+    }
+}
+
+internal fun Project.verifyLocalSigning(convention: AndroidSigningConvention) {
+    val verification = localSigningVerification(convention)
+    verification.certificate?.checkValidity()
+
+    logger.lifecycle("Local Android signing verification: PASS")
+    logger.lifecycle("  Keystore: ${verification.keystore.absolutePath}")
+    logger.lifecycle("  Keystore path source: ${verification.keystorePathSource.description}")
+    logger.lifecycle("  Alias: ${verification.alias}")
+    logger.lifecycle("  Alias source: ${verification.aliasSource.description}")
+    logger.lifecycle("  SHA-256: ${verification.fingerprint}")
+    verification.certificate?.let { certificate ->
+        logger.lifecycle("  Subject: ${certificate.subjectX500Principal.name}")
+        logger.lifecycle("  Issuer: ${certificate.issuerX500Principal.name}")
+        logger.lifecycle("  Valid from: ${certificate.notBefore}")
+        logger.lifecycle("  Valid until: ${certificate.notAfter}")
+        logger.lifecycle("  Certificate validity: current")
+    }
+    logger.lifecycle(
+        "  Expected signed variant: " +
+            if (convention.createSignedDebug) convention.signedDebugName else "(none configured)"
+    )
+    logger.lifecycle("No signing passwords were printed.")
 }
 
 internal fun Project.configureSigningConventions(

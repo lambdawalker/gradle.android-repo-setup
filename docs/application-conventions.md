@@ -71,6 +71,32 @@ The optional extra debug type inherits the normal debug build type and dependenc
 configurations. `debugSourceDirectory` can reuse project-specific debug runtime
 implementations without placing that policy in the shared plugin.
 
+### Signing verification tasks
+
+The application plugin always registers:
+
+```sh
+./gradlew :app:verifyLocalSigning --no-configuration-cache
+```
+
+This is an explicit diagnostic task. Unlike project sync, it fails when the local
+signing identity is unusable. It verifies the keystore file, store password,
+alias, private-key password and certificate validity, then prints the certificate
+SHA-256 fingerprint plus the non-secret path/alias sources. Passwords are never
+printed.
+
+When `createSignedDebug = true` and the signing identity is valid, the plugin
+also registers a variant task such as:
+
+```sh
+./gradlew :app:verifySignedDebugSigning --no-configuration-cache
+```
+
+That task consumes the APK produced by the Android Gradle Plugin, verifies its
+APK signature, and requires every APK signer certificate to match the configured
+keystore certificate. This distinguishes "the keystore is valid" from "the APK
+was actually signed by that key".
+
 ## Runtime and endpoint properties
 
 Endpoint bindings read values with this precedence:
