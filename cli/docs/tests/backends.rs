@@ -114,3 +114,9 @@ fn fresh_docs_only_repository_builds_with_inferred_module_at_domain_root() {
         .is_file());
     assert!(!root.path().join(".project/setup").exists());
 }
+
+#[test]
+fn existing_site_metadata_loads_through_documentation_config() {
+    let root = project("site:\n  backend: astro\n  base_url: https://example.com/coordinates/\n  pages:\n    docs/documentation.md: development\n    docs/site-home.md: overview\n  translation_manifest: docs/translations.json\n  translation_paths: {docs/agents/index.md: docs/es/index.md}\n  aliases: [{source: README.md, html: index.html}]\n");
+    assert_eq!(site_backend(root.path()).unwrap(), SiteBackend::Astro);
+}
