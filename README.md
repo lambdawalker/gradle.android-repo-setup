@@ -252,7 +252,7 @@ directly.
 The browser uses the existing encrypted setup vault and signing environment
 scope. The site opens with a vault dialog: enter the existing passphrase, or
 create and confirm one if there is no vault. The same dialog asks for the
-passphrase again when the page is reopened. The **File** menu has a **Vault**
+passphrase again when the page is reopened. The main menu (☰) has a **Vault**
 section to view the masked saved entries or remake the local vault; these
 actions remain available after a setup run finishes. Saved secret values are
 not returned to the browser. Choose **Use vault value** when prompted to keep an
