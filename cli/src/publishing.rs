@@ -130,6 +130,19 @@ pub(crate) fn render_workflow(root: &Path, name: &str, content: &str) -> Result<
 }
 
 pub(crate) fn generate(root: &Path, check: bool) -> Result<()> {
+    generate_scoped(root, check, None)
+}
+
+pub(crate) fn generate_for_module(root: &Path, check: bool, module_id: &str) -> Result<()> {
+    let modules = crate::discovery::load(root)?.context("No saved module inventory")?;
+    ensure!(
+        modules.get(module_id).is_some_and(|module| module.selected && module.kind.is_library()),
+        "Publishing requires a selected library module: {module_id}"
+    );
+    generate_scoped(root, check, Some(module_id))
+}
+
+fn generate_scoped(root: &Path, check: bool, module_id: Option<&str>) -> Result<()> {
     let entries = load_registry(&root.join(REGISTRY_PATH))?;
     let mut properties = format!("{PROPERTIES_HEADER}\n");
     for (id, entry) in &entries {
@@ -138,8 +151,12 @@ pub(crate) fn generate(root: &Path, check: bool) -> Result<()> {
             entry.environment, entry.publisher
         ));
     }
-    let mut outputs = vec![(root.join(PROPERTIES_PATH), properties)];
-    let names: Vec<String> = if let Some(modules) = crate::discovery::load(root)? {
+    let properties_path = root.join(PROPERTIES_PATH);
+    let mut outputs = Vec::new();
+    if module_id.is_none() || !properties_path.try_exists()? {
+        outputs.push((properties_path, properties));
+    }
+    let mut names: Vec<String> = if let Some(modules) = crate::discovery::load(root)? {
         let mut names = modules
             .iter()
             .filter(|(_, m)| m.selected && m.kind.is_library())
@@ -152,6 +169,11 @@ pub(crate) fn generate(root: &Path, check: bool) -> Result<()> {
     } else {
         WORKFLOWS.iter().map(|s| (*s).into()).collect()
     };
+    if let Some(module_id) = module_id {
+        // Publishing credentials and the registry are shared, but this action
+        // must not rewrite another library's workflow or the shared finalizer.
+        names.retain(|name| name == &format!("publish-{module_id}.yml"));
+    }
     for name in names {
         let path = root.join(".github/workflows").join(name);
         let content = fs::read_to_string(&path)
@@ -279,6 +301,21 @@ fn settings_for(entry: &Destination) -> Vec<Setting<'_>> {
         default: "",
     })
     .collect()
+}
+
+pub(crate) fn settings_catalog(root: &Path) -> Result<Vec<Value>> {
+    let entries = load_registry(&root.join(REGISTRY_PATH))?;
+    Ok(entries.iter().map(|(id, destination)| json!({
+        "id": id,
+        "publisher": destination.publisher,
+        "environment": destination.environment,
+        "fields": settings_for(destination).iter().map(|setting| json!({
+            "name": setting.name,
+            "required": setting.required,
+            "secret": setting.kind == Kind::Secret,
+            "inputLabel": format!("{} / {} new value", setting.environment, setting.name),
+        })).collect::<Vec<_>>(),
+    })).collect())
 }
 
 impl Setting<'_> {
@@ -688,9 +725,10 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
             continue;
         }
         loop {
+            let input_label = format!("{} / {} new value", setting.environment, setting.name);
             let entered = match setting.kind {
-                Kind::Secret => vault::secret_prompt("New value")?,
-                Kind::Variable => vault::prompt("New value", None)?,
+                Kind::Secret => vault::secret_prompt(&input_label)?,
+                Kind::Variable => vault::prompt(&input_label, None)?,
             };
             match setting.choose(entered, existing) {
                 Ok(Some(value)) => {
@@ -771,6 +809,45 @@ mod tests {
 
     const CONFIG: &str = "repositories:\n  jitpack:\n    environment: jitpack\n    publisher: jitpack\n  maven-central:\n    environment: maven-central\n    publisher: central\n";
     const WORKFLOW: &str = "    # BEGIN GENERATED REPOSITORIES\n    options: [\"maven-central\"]\n    # END GENERATED REPOSITORIES\n";
+
+    #[test]
+    fn scoped_generation_keeps_other_module_and_shared_publishing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let setup = root.path().join(".project/setup");
+        let workflows = root.path().join(".github/workflows");
+        fs::create_dir_all(&setup).unwrap();
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(setup.join("repositories.yml"), CONFIG).unwrap();
+        fs::write(setup.join("config.yaml"), "repository: example/sample\nandroid_modules:\n  first: {path: ':first', directory: first, kind: library}\n  second: {path: ':second', directory: second, kind: library}\n").unwrap();
+        fs::write(workflows.join("publish-first.yml"), WORKFLOW).unwrap();
+        fs::write(workflows.join("publish-second.yml"), "# another module\n").unwrap();
+        fs::write(workflows.join("finalize-release.yml"), "# shared finalizer\n").unwrap();
+        fs::write(setup.join("repositories.properties"), "# existing shared properties\n").unwrap();
+
+        generate_for_module(root.path(), false, "first").unwrap();
+        assert!(fs::read_to_string(workflows.join("publish-first.yml")).unwrap().contains("options: [\"jitpack\", \"maven-central\"]"));
+        assert_eq!(fs::read_to_string(workflows.join("publish-second.yml")).unwrap(), "# another module\n");
+        assert_eq!(fs::read_to_string(workflows.join("finalize-release.yml")).unwrap(), "# shared finalizer\n");
+        assert_eq!(fs::read_to_string(setup.join("repositories.properties")).unwrap(), "# existing shared properties\n");
+        fs::remove_file(setup.join("repositories.properties")).unwrap();
+        generate_for_module(root.path(), false, "first").unwrap();
+        assert!(fs::read_to_string(setup.join("repositories.properties")).unwrap().contains("maven-central.environment=maven-central"));
+        assert!(generate_for_module(root.path(), false, "unknown").is_err());
+    }
+
+    #[test]
+    fn settings_catalog_exposes_field_metadata_without_values() {
+        let root = tempfile::tempdir().unwrap();
+        let setup = root.path().join(".project/setup");
+        fs::create_dir_all(&setup).unwrap();
+        fs::write(setup.join("repositories.yml"), CONFIG).unwrap();
+        let catalog = settings_catalog(root.path()).unwrap();
+        assert_eq!(catalog[0]["publisher"], "jitpack");
+        assert_eq!(catalog[0]["fields"], json!([]));
+        assert_eq!(catalog[1]["fields"][0]["name"], "MAVEN_CENTRAL_USERNAME");
+        assert_eq!(catalog[1]["fields"][0]["inputLabel"], "maven-central / MAVEN_CENTRAL_USERNAME new value");
+        assert_eq!(catalog[1]["fields"][0]["secret"], true);
+    }
 
     #[test]
     fn repository_generation_preserves_config_order_and_accepts_legacy_header() {

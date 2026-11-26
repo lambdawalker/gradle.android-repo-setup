@@ -226,14 +226,22 @@ APK signing key, local Gradle signing, APK signing environment, publishing
 environments, and GitHub workflows. Available operations depend on the
 discovered application and library modules. After Gradle discovery, the header
 shows one tab for each discovered Android or JVM module. The Actions panel
-shows the operations applicable to the active module; shared operations such as
-GitHub workflows retain one repository-wide selection. Opening the private link
+shows the operations applicable to the active module. **Setup selected tasks**
+submits only the checked actions visible on that module tab. Module workflow
+files are updated for that module; shared workflow prerequisites may be created
+when missing. The keystore, app signing associations, local.properties,
+publishing environments and credentials are shared by the repository. Opening
+the private link
 starts Gradle discovery and saves the discovered module inventory, retaining
 previously excluded modules. The browser proceeds directly to the module action
 tabs; use `android-repo-setup select-modules` to change which modules are included.
 The workspace groups **Actions**,
 **Settings**, **Overview**, and **Process output** beside progress and, when
-available, generated-file details. Select steps, review their target and
+available, module-specific APK, AAR, JAR and workflow details. The Settings tab
+groups advance inputs by action for the active module. Prepared values remain
+in browser-tab memory and are supplied only when the chosen operation requests
+them; conditional choices and confirmations still appear during setup. Select
+steps, review their target and
 changes, and respond to confirmations in the wizard. Starting the chosen setup
 operations can create missing workflow files before asking whether to replace
 modified ones.
@@ -242,9 +250,10 @@ explicit confirmation steps. Headless and CI commands continue to use the CLI
 directly.
 
 The browser uses the existing encrypted setup vault and signing environment
-scope. Creating a vault requires a new password and confirmation; an existing
-vault must be unlocked with its current password. Saved credentials are shown
-only as masked placeholders. Choose **Use vault value** when prompted to keep an
+scope. If there is no vault, the wizard creates one before showing the action
+tabs, requiring a new password and confirmation. An existing
+vault must be unlocked with its current password. Saved secret values are
+not returned to the browser. Choose **Use vault value** when prompted to keep an
 existing value; an empty replacement is not a general reuse signal. After
 30 minutes without operator activity, enter the saved vault password or the
 CLI-printed recovery code to unlock the browser session. An operation already

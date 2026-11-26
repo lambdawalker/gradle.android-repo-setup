@@ -1,7 +1,7 @@
 //! Local browser renderer for the existing setup worker. All setup decisions stay in Rust.
 use super::{Answer, Client, KeyChoice, Menu, Question, Update, CLIENT, PRIVATE_WORKER};
 use crate::{
-    discovery,
+    discovery, publishing,
     gpg::{self, SigningKey},
     setup, vault,
 };
@@ -49,6 +49,104 @@ struct Session {
     csrf: String,
     last_seen: Instant,
     locked: bool,
+}
+
+fn regular_directory(root: &Path, relative: &Path) -> bool {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if !fs::symlink_metadata(&current)
+            .is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// Only show regular build outputs under the module's validated project directory.
+// A bounded walk avoids following symlinks or traversing large build trees.
+fn build_artifacts(root: &Path, relative: &Path, extension: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut directories = vec![(relative.to_path_buf(), 0usize)];
+    let mut inspected = 0usize;
+    while let Some((directory, depth)) = directories.pop() {
+        if !regular_directory(root, &directory) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(root.join(&directory)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            inspected += 1;
+            if inspected > 512 {
+                break;
+            }
+            let Ok(kind) = entry.file_type() else { continue };
+            let path = directory.join(entry.file_name());
+            if kind.is_file()
+                && path.extension().and_then(|value| value.to_str()) == Some(extension)
+                && files.len() < 64
+            {
+                files.push(path.to_string_lossy().replace('\\', "/"));
+            } else if kind.is_dir() && depth < 4 {
+                directories.push((path, depth + 1));
+            }
+        }
+        if inspected > 512 || files.len() >= 64 {
+            break;
+        }
+    }
+    files.sort();
+    files
+}
+
+fn module_artifacts(root: &Path, id: &str, module: &discovery::Module) -> Vec<Value> {
+    let (folder, extension, label) = match &module.kind {
+        discovery::Kind::Application => ("build/outputs/apk", "apk", "APK"),
+        discovery::Kind::Library => ("build/outputs/aar", "aar", "AAR"),
+        discovery::Kind::JvmLibrary => ("build/libs", "jar", "JAR"),
+        discovery::Kind::Other => return Vec::new(),
+    };
+    let output = if module.directory == "." {
+        PathBuf::from(folder)
+    } else {
+        Path::new(module.directory.as_str()).join(folder)
+    };
+    let files = build_artifacts(root, &output, extension);
+    let mut artifacts = if files.is_empty() {
+        vec![json!({"path":output.to_string_lossy().replace('\\', "/"),
+            "status":"not built","kind":extension,
+            "description":format!("No local {label} build output found for {}. Build the module to populate this location.", module.path)})]
+    } else {
+        files.into_iter().map(|path| json!({"path":path,"status":"present","kind":extension,
+            "description":format!("Local {label} build output for {}", module.path)})).collect()
+    };
+    let mut workflows = match &module.kind {
+        discovery::Kind::Application => vec![format!("build-signed-{id}-apk.yml")],
+        discovery::Kind::Library | discovery::Kind::JvmLibrary => vec![
+            format!("publish-{id}.yml"),
+            format!("verify-release-tooling-{id}.yml"),
+            format!("reconcile-failed-jitpack-{id}.yml"),
+        ],
+        discovery::Kind::Other => Vec::new(),
+    };
+    if module.screenshots && !matches!(&module.kind, discovery::Kind::JvmLibrary) {
+        workflows.push(format!("screenshots-{id}.yml"));
+    }
+    if !regular_directory(root, Path::new(".github/workflows")) {
+        return artifacts;
+    }
+    for name in workflows {
+        let path = format!(".github/workflows/{name}");
+        if fs::symlink_metadata(root.join(&path))
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            artifacts.push(json!({"path":path,"status":"present","kind":"workflow",
+                "description":format!("GitHub Actions workflow for {}", module.path)}));
+        }
+    }
+    artifacts
 }
 
 struct Server {
@@ -311,25 +409,36 @@ impl Server {
         if self.session.as_ref().is_some_and(|session| session.locked) {
             let status = if self.closing { self.status } else { "locked" };
             return json!({"revision":self.revision,"phase":self.phase,"status":status,
-                "prompt":null,"notes":[],"context":{},"artifacts":[],"actions":[]});
+                "prompt":null,"notes":[],"context":{},"artifacts":[],"moduleArtifacts":{},"actions":[]});
         }
         let repository = fs::read_to_string(self.root.join(".project/setup/config.yaml"))
             .ok()
             .and_then(|text| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text).ok())
             .and_then(|config| config["repository"].as_str().map(str::to_owned));
-        let modules = discovery::load(&self.root)
-            .ok()
-            .flatten()
-            .map(|modules| {
-                modules
-                    .into_iter()
-                    .map(|(name, module)| {
-                        json!({"name":name,"path":module.path,"kind":module.kind,
-                            "selected":module.selected,"directory":module.directory})
-                    })
-                    .collect::<Vec<_>>()
+        let discovered = discovery::load(&self.root).ok().flatten().unwrap_or_default();
+        let modules = discovered
+            .iter()
+            .map(|(name, module)| {
+                json!({"name":name,"path":module.path,"kind":module.kind,
+                    "selected":module.selected,"directory":module.directory})
             })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
+        let module_artifacts = discovered
+            .iter()
+            .map(|(name, module)| (name.clone(), module_artifacts(&self.root, name, module)))
+            .collect::<BTreeMap<_, _>>();
+        let publishing = if self.root.join(".project/setup/repositories.yml").is_file() {
+            match publishing::settings_catalog(&self.root) {
+                Ok(destinations) => json!({"registryPresent":true,"destinations":destinations}),
+                Err(error) => json!({"registryPresent":true,"destinations":[],"error":error.to_string()}),
+            }
+        } else {
+            json!({"registryPresent":false,"destinations":[]})
+        };
+        let vault_exists = setup::signing_config(&self.root)
+            .ok()
+            .and_then(|config| vault::regular_file_exists(&config.state_path()).ok())
+            .unwrap_or(false);
         let artifacts = [
             ".project/setup/config.yaml",
             ".project/setup/repositories.yml",
@@ -346,8 +455,9 @@ impl Server {
             "revision":self.revision,"phase":self.phase,"status":self.status,
             "prompt":self.pending.as_ref().map(Pending::public),
             "notes":lines,
-            "context":{"repository":repository,"root":self.root,"modules":modules},
+            "context":{"repository":repository,"root":self.root,"modules":modules,"publishing":publishing,"vaultExists":vault_exists},
             "artifacts":artifacts,
+            "moduleArtifacts":module_artifacts,
             "actions":[{"value":"setup","label":"Set up repository","description":"Discover modules and review the setup operations"}],
         })
     }
@@ -375,6 +485,29 @@ impl Server {
         } else {
             let value = input.get("value").ok_or((400, "Missing answer.".into()))?;
             pending.parse_answer(value)?
+        };
+        let answer = match answer {
+            Answer::Menu(Menu::Setup(selected)) => {
+                if let Question::Menu { operations, .. } = &pending.question {
+                    let module_id = input
+                        .get("module")
+                        .and_then(Value::as_str)
+                        .ok_or((422, "Choose a module tab before running actions.".into()))?;
+                    let modules = discovery::load(&self.root)
+                        .map_err(|error| (422, format!("Could not load module selection: {error}")))?
+                        .ok_or((422, "Discover modules before choosing actions.".into()))?;
+                    let module = modules.get(module_id)
+                        .filter(|module| module.selected)
+                        .ok_or((422, "Choose an included module tab.".into()))?;
+                    if selected.iter().any(|&index| !operation_applies_to_module(&operations[index].id, &module.kind)) {
+                        return Err((422, "An action is not available for the chosen module.".into()));
+                    }
+                    Answer::Menu(Menu::ScopedSetup { module_id: module_id.into(), selected })
+                } else {
+                    Answer::Menu(Menu::Setup(selected))
+                }
+            }
+            other => other,
         };
         let pending = self.pending.take().expect("validated pending question");
         pending
@@ -537,6 +670,15 @@ impl Server {
             }
             _ => Response::json_error(404, "Unknown local path."),
         }
+    }
+}
+
+fn operation_applies_to_module(id: &str, kind: &discovery::Kind) -> bool {
+    match id {
+        "key" | "local" | "github" => *kind == discovery::Kind::Application,
+        "publishing" => kind.is_library(),
+        "workflows" => true,
+        _ => false,
     }
 }
 
@@ -1054,6 +1196,49 @@ mod tests {
     }
 
     #[test]
+    fn menu_answer_is_validated_against_the_active_module() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".project/setup")).unwrap();
+        fs::write(
+            root.path().join(discovery::CONFIG),
+            "repository: example/project\nandroid_modules:\n  app:\n    path: :app\n    directory: app\n    kind: application\n  library:\n    path: :library\n    directory: library\n    kind: library\n  excluded:\n    path: :excluded\n    directory: excluded\n    kind: library\n    selected: false\n",
+        ).unwrap();
+        let (sender, updates) = mpsc::channel();
+        let mut server = Server::new(root.path().to_path_buf(), sender, updates,
+            "launch-secret".into(), "recovery-secret".into());
+        let (bearer, csrf) = login(&mut server);
+        let (reply, received) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 1,
+            question: Question::Menu {
+                operations: vec![
+                    crate::ui::OperationChoice { id: "key".into(), label: "APK signing key".into(), description: String::new() },
+                    crate::ui::OperationChoice { id: "publishing".into(), label: "Publishing".into(), description: String::new() },
+                    crate::ui::OperationChoice { id: "workflows".into(), label: "Workflows".into(), description: String::new() },
+                ],
+                first_run: true,
+            },
+            reply,
+            keys: Vec::new(),
+            key_status: None,
+        });
+        for (module, choices) in [("app", json!([1])), ("library", json!([0])),
+            ("excluded", json!([2])), ("unknown", json!([2]))] {
+            let response = server.handle(request("POST", "/api/answer",
+                json!({"id":1,"module":module,"value":choices}), Some((&bearer, &csrf))), HOST);
+            assert_eq!(response.status, 422, "{module}");
+            assert!(received.try_recv().is_err());
+            assert_eq!(server.pending.as_ref().unwrap().id, 1);
+        }
+        let response = server.handle(request("POST", "/api/answer",
+            json!({"id":1,"module":"app","value":[0,2]}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(response.status, 200);
+        assert!(matches!(received.recv().unwrap(),
+            Answer::Menu(Menu::ScopedSetup { module_id, selected })
+                if module_id == "app" && selected == vec![0, 2]));
+    }
+
+    #[test]
     fn discovered_modules_are_structured_before_the_selection_is_saved() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join(".project/setup")).unwrap();
@@ -1146,6 +1331,53 @@ mod tests {
         assert_eq!(context[1]["name"], "libs--vision");
         assert_eq!(context[1]["kind"], "library");
         assert_eq!(context[1]["selected"], true);
+    }
+
+    #[test]
+    fn module_artifacts_follow_module_kind_and_existing_build_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".project/setup")).unwrap();
+        fs::write(
+            root.path().join(discovery::CONFIG),
+            "repository: example/project\nandroid_modules:\n  app:\n    path: :app\n    directory: app\n    kind: application\n  library:\n    path: :library\n    directory: library\n    kind: library\n  tools:\n    path: :tools\n    directory: tools\n    kind: jvm-library\n",
+        ).unwrap();
+        fs::create_dir_all(root.path().join("app/build/outputs/apk/debug")).unwrap();
+        fs::write(root.path().join("app/build/outputs/apk/debug/app-debug.apk"), b"apk").unwrap();
+        fs::create_dir_all(root.path().join("tools/build/libs")).unwrap();
+        fs::write(root.path().join("tools/build/libs/tools.jar"), b"jar").unwrap();
+        fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+        fs::write(
+            root.path().join(".github/workflows/build-signed-app-apk.yml"),
+            "name: signed APK\n",
+        ).unwrap();
+        let (sender, updates) = mpsc::channel();
+        let server = Server::new(root.path().to_path_buf(), sender, updates, "token".into(), "recovery".into());
+        let artifacts = server.snapshot()["moduleArtifacts"].clone();
+        assert!(artifacts["app"].as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == "app/build/outputs/apk/debug/app-debug.apk"
+                && artifact["status"] == "present" && artifact["kind"] == "apk"));
+        assert!(artifacts["app"].as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == ".github/workflows/build-signed-app-apk.yml"));
+        assert!(artifacts["library"].as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == "library/build/outputs/aar"
+                && artifact["status"] == "not built" && artifact["kind"] == "aar"));
+        assert!(artifacts["tools"].as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == "tools/build/libs/tools.jar"
+                && artifact["status"] == "present" && artifact["kind"] == "jar"));
+        assert!(!artifacts["app"].as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == "tools/build/libs/tools.jar"));
+
+        fs::create_dir_all(root.path().join("library/build/outputs/aar")).unwrap();
+        fs::write(
+            root.path().join("library/build/outputs/aar/library-release.aar"),
+            b"aar",
+        ).unwrap();
+        let built = server.snapshot()["moduleArtifacts"]["library"].clone();
+        assert!(built.as_array().unwrap().iter().any(|artifact|
+            artifact["path"] == "library/build/outputs/aar/library-release.aar"
+                && artifact["status"] == "present"));
+        assert!(!built.as_array().unwrap().iter().any(|artifact|
+            artifact["status"] == "not built"));
     }
 
     #[test]

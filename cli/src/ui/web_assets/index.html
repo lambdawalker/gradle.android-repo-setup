@@ -50,10 +50,10 @@
       </nav>
       <section id="panel-actions" class="tab-panel" role="tabpanel" aria-labelledby="tab-actions" tabindex="0">
         <div class="section-title"><div><h1>Setup actions</h1><p>Choose the repository tasks you want to run.</p></div><span id="action-state" class="state-badge">Connecting</span></div>
-        <div id="action-content" class="action-content"><p class="empty-state">Opening the local setup session…</p></div>
+        <div id="action-content" class="action-content"><div class="loading-state" role="status" aria-live="polite"><span class="loading-spinner" aria-hidden="true"></span><strong>Opening setup wizard</strong><p>Connecting to the local session. Gradle module discovery will follow.</p></div></div>
       </section>
       <section id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" hidden>
-        <div class="section-title"><div><h1>Settings</h1><p>Review and edit the values for the current step.</p></div></div>
+        <div class="section-title"><div><h1>Settings</h1><p>Prepare inputs for the selected module, grouped by setup action.</p></div></div>
         <div id="settings-content" class="settings-content"><p class="empty-state">Choose an action to inspect its settings.</p></div>
       </section>
       <section id="panel-overview" class="tab-panel" role="tabpanel" aria-labelledby="tab-overview" tabindex="0" hidden>
@@ -69,7 +69,7 @@
     <aside id="right" class="right" aria-label="Setup artifacts">
       <section id="details-panel" class="panel details"><div class="panel-heading"><h2>Details</h2><button id="toggle-details" class="panel-toggle" type="button" aria-label="Collapse details" aria-expanded="true">−</button></div><div id="detail-content" class="detail-content"><p class="empty-state">Select a task or file to see details.</p></div></section>
       <div class="h-divider" role="separator" tabindex="0" aria-label="Resize details and files" aria-orientation="horizontal" data-split="right-height"></div>
-      <section class="panel artifacts"><div class="panel-heading"><h2>Files and outputs</h2><span id="artifact-count" class="count">0</span></div><div class="artifact-tools"><input id="artifact-search" type="search" placeholder="Search files" aria-label="Search setup files"></div><div id="artifact-list" class="artifact-list"><p class="empty-state">Affected files appear here when known.</p></div></section>
+      <section class="panel artifacts"><div class="panel-heading"><h2 id="artifact-heading">Module artifacts</h2><span id="artifact-count" class="count">0</span></div><div class="artifact-tools"><input id="artifact-search" type="search" placeholder="Search artifacts" aria-label="Search module artifacts"></div><div id="artifact-list" class="artifact-list"><p class="empty-state">APK or library outputs appear here after discovery.</p></div></section>
     </aside>
     <nav class="tool-stripe right-stripe" aria-label="Artifact tools"><button id="stripe-details" class="stripe-button active" type="button" aria-label="Collapse details" aria-expanded="true" title="Details"><svg class="icon"><use href="#icon-file"></use></svg></button></nav>
   </main>

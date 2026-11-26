@@ -40,6 +40,10 @@ pub enum Answer {
 }
 pub enum Menu {
     Setup(Vec<usize>),
+    ScopedSetup {
+        module_id: String,
+        selected: Vec<usize>,
+    },
     ViewVault,
     RemakeVault,
     Exit,

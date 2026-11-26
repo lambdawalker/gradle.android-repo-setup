@@ -65,6 +65,7 @@ let state = null;
 let lastRevision = -1;
 let promptId;
 let lastStatus;
+let lastPhase;
 let keySignature = "";
 let selectedDetail = null;
 let pending = false;
@@ -79,6 +80,42 @@ const moduleFocusKey = "android-repo-setup-module-focus-v1";
 let activeModule = (() => { try { return sessionStorage.getItem(moduleFocusKey) || null; } catch { return null; } })();
 let availableModules = [];
 let moduleTabsKey = "";
+let lastMenuOptions = null;
+let menuSelectionId = null;
+const menuSelections = new Map();
+// Prepared values remain in this browser tab's memory. Secrets are never
+// written to sessionStorage or included in the state snapshot.
+const settingsDrafts = new Map();
+let draftExecution = null;
+function clearPreparedValues() {
+  settingsDrafts.clear();
+  draftExecution = null;
+  for (const input of $("workspace").querySelectorAll('input[type="password"]')) input.value = "";
+}
+
+const actionFields = {
+  key: [
+    {key: "keystore-path", label: "Keystore path", prompts: ["Keystore path"], help: "Outside the repository. Leave blank to use the saved or suggested path."},
+    {key: "signing-key-alias", label: "Signing key alias", prompts: ["Signing key alias"], help: "Leave blank to use the saved alias."},
+    {key: "keystore-password", label: "Keystore password", prompts: ["Keystore password"], secret: true, help: "At least six characters when creating a key."},
+    {key: "confirm-keystore-password", label: "Confirm keystore password", prompts: ["Confirm keystore password"], secret: true},
+    {key: "key-password", label: "Key password", prompts: ["Key password"], secret: true, help: "At least six characters when creating a key."},
+    {key: "confirm-key-password", label: "Confirm key password", prompts: ["Confirm key password"], secret: true},
+    {key: "application-ids", label: "Android application IDs", prompts: ["Android application IDs (comma-separated installed package names)"], help: "Comma-separated package names; leave blank to review discovered IDs later."},
+  ],
+  local: [],
+  github: [
+    {key: "github-token", label: "GitHub token", prompts: ["GitHub token"], secret: true, help: "Repository administration and environment permissions. Existing vault values can be reused."},
+  ],
+  workflows: [],
+};
+const actionNotes = {
+  key: "The wizard will verify or create a keystore and ask you to review changes. Saved values can be reused.",
+  local: "Uses the signing identity saved in the vault. You will confirm the write to ignored local.properties.",
+  github: "Existing GitHub secrets are inspected before changes. A keystore may also be required if signing secrets are missing.",
+  publishing: "Credentials depend on .project/setup/repositories.yml and the current GitHub environments. GPG key selection and final review occur during setup.",
+  workflows: "No credentials are required. Changes to existing workflow files require your confirmation.",
+};
 
 $("sidebar-menu").addEventListener("click", () => {
   const hidden = $("workspace").classList.toggle("sidebar-hidden");
@@ -159,7 +196,7 @@ function showLock() {
   if (locked) return;
   locked = true;
   pauseCountdown();
-  for (const input of $("workspace").querySelectorAll('input[type="password"]')) input.value = "";
+  clearPreparedValues();
   const dialog = $("notice-dialog");
   if (dialog.open) dialog.close();
   $("notice-title").textContent = "Wizard locked";
@@ -216,6 +253,7 @@ async function request(path, method = "GET", value = null) {
   const response = await fetch(path, {method, headers, body: value === null ? undefined : JSON.stringify(value), cache: "no-store"});
   if (response.status === 401 && path !== "/api/unlock") {
     forgetSession();
+    clearPreparedValues();
     session = "";
     csrf = "";
     const error = new Error("The local session expired. Restart the CLI to open a new wizard.");
@@ -314,6 +352,162 @@ function field(label, value, secret = false, help = "") {
   if (help) wrapper.append(el("small", help));
   return {wrapper, input};
 }
+function visibleMenuCards() {
+  return [...$("action-content").querySelectorAll(".action-card")].filter(card => !card.hidden);
+}
+function selectedMenuCards() {
+  return visibleMenuCards().filter(card => card.querySelector('input[type="checkbox"]:checked'));
+}
+function fieldsForAction(action, data) {
+  if (action === "github") return [
+    ...actionFields.github,
+    ...actionFields.key.map(item => ({...item, draftAction: "key", help: item.help || "Needed only if GitHub signing secrets require a local keystore."})),
+  ];
+  if (action !== "publishing") return actionFields[action] || [];
+  const fields = [{key: "github-access-token", label: "GitHub access token", prompts: ["GitHub access token"], secret: true,
+    help: "Used to inspect and configure GitHub publishing environments."}];
+  for (const destination of data?.context?.publishing?.destinations || []) {
+    for (const item of destination.fields || []) {
+      if (!item?.name || !item.secret) continue;
+      // A GPG identity is chosen and reviewed by the CLI; it is not a text
+      // credential that can safely be staged in this form.
+      if (["SIGNING_IN_MEMORY_KEY", "SIGNING_IN_MEMORY_KEY_PASSWORD"].includes(item.name)) continue;
+      fields.push({key: `${destination.environment}/${item.name}`, label: `${destination.environment} / ${item.name}`,
+        prompts: [item.inputLabel], secret: true,
+        help: item.required ? "Required when this secret is absent in GitHub." : "Optional. Leave blank to preserve an existing value."});
+    }
+  }
+  return fields;
+}
+function draftKey(moduleId, actionId, fieldKey) { return `${moduleId}\u0000${actionId}\u0000${fieldKey}`; }
+function renderSettingsGroups(data) {
+  const options = data?.prompt?.kind === "menu" ? data.prompt.options : lastMenuOptions;
+  if (!Array.isArray(options)) return;
+  const content = $("settings-content");
+  const module = availableModules.find(item => item.id === activeModule);
+  let groups = $("prepared-settings");
+  if (!groups || !content.contains(groups)) {
+    groups = el("div");
+    groups.id = "prepared-settings";
+    content.append(groups);
+  }
+  groups.replaceChildren();
+  if (!module) {
+    groups.append(el("p", "Discovering modules and preparing settings…", "empty-state"));
+    return;
+  }
+  groups.append(el("p", `Prepare ${module.path} values here. Blank fields are requested by the wizard only if needed. Prepared values stay in this tab's memory until setup ends; saved vault values are never shown.`, "settings-note"));
+  const vaultGroup = el("section", "", "settings-group");
+  vaultGroup.append(el("h2", "Local encrypted vault"), el("p", data.context?.vaultExists ?
+    "Vault ready. Saved credentials remain hidden and are requested only when an action needs them." :
+    "The wizard will create a vault before configuring actions."));
+  groups.append(vaultGroup);
+  const applicable = options.filter(option => operationAppliesToModule(option.id, module));
+  if (!applicable.length) {
+    groups.append(el("p", "This module is excluded from setup. Use the terminal module selector to include it.", "empty-state"));
+    return;
+  }
+  for (const option of applicable) {
+    const group = el("section", "", "settings-group");
+    group.dataset.operationId = option.id;
+    group.append(el("h2", option.label), el("p", actionNotes[option.id] || option.description || ""));
+    if (option.id === "publishing" && data.context?.publishing?.registryPresent === false) {
+      group.append(el("p", "Add .project/setup/repositories.yml before configuring publishing environments.", "problem"));
+    }
+    if (option.id === "publishing" && data.context?.publishing?.error) {
+      group.append(el("p", `Publishing configuration needs attention: ${data.context.publishing.error}`, "problem"));
+    }
+    const fields = fieldsForAction(option.id, data);
+    if (fields.length) {
+      const list = el("div", "", "field-list");
+      for (const item of fields) {
+        const wrapper = el("div", "", "settings-field");
+        const input = document.createElement("input");
+        input.type = item.secret ? "password" : "text";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.maxLength = item.secret ? 48 * 1024 : 8 * 1024;
+        const key = draftKey(module.id, item.draftAction || option.id, item.key);
+        input.dataset.draftKey = key;
+        input.value = settingsDrafts.get(key) || "";
+        input.placeholder = "Leave blank to review when requested";
+        const label = el("label", item.label);
+        label.append(input);
+        wrapper.append(label);
+        if (item.help) wrapper.append(el("small", item.help));
+        input.addEventListener("input", () => {
+          if (input.value) settingsDrafts.set(key, input.value);
+          else settingsDrafts.delete(key);
+          for (const other of groups.querySelectorAll(".settings-field input")) {
+            if (other !== input && other.dataset.draftKey === key) other.value = input.value;
+          }
+        });
+        list.append(wrapper);
+      }
+      group.append(list);
+    } else group.append(el("p", "No advance inputs. The wizard will show any review or confirmation steps when needed.", "settings-note"));
+    groups.append(group);
+  }
+}
+function preparedAnswers(moduleId, selectedActions) {
+  const answers = new Map();
+  const actions = new Set(selectedActions);
+  // GitHub signing may need the same existing keystore details even if only
+  // the environment action is checked.
+  if (actions.has("github")) actions.add("key");
+  for (const actionId of actions) {
+    for (const item of fieldsForAction(actionId, state)) {
+      const value = settingsDrafts.get(draftKey(moduleId, item.draftAction || actionId, item.key));
+      if (value) for (const promptLabel of item.prompts || []) answers.set(promptLabel, value);
+    }
+  }
+  return answers;
+}
+function validatePreparedPasswords(moduleId, selectedActions) {
+  if (!selectedActions.includes("key") && !selectedActions.includes("github")) return true;
+  for (const [password, confirmation, label] of [
+    ["keystore-password", "confirm-keystore-password", "keystore"],
+    ["key-password", "confirm-key-password", "key"],
+  ]) {
+    const entered = settingsDrafts.get(draftKey(moduleId, "key", password));
+    const repeated = settingsDrafts.get(draftKey(moduleId, "key", confirmation));
+    if (entered && repeated && entered !== repeated) {
+      setProblem(`The ${label} password and confirmation differ.`);
+      activateTab($("tab-settings"));
+      return false;
+    }
+  }
+  return true;
+}
+function schedulePreparedAnswer(prompt) {
+  if (!draftExecution || !["text", "saved"].includes(prompt.kind) ||
+      draftExecution.used.has(prompt.id) || !draftExecution.answers.has(prompt.label)) return;
+  const value = draftExecution.answers.get(prompt.label);
+  if (!value) return;
+  if (prompt.kind === "text") {
+    const input = $("settings-content").querySelector(".form-field input");
+    if (!input) return;
+    input.value = value;
+  } else {
+    const replacement = [...$("settings-content").querySelectorAll('input[type="radio"]')].find(input => input.value === "new");
+    if (!replacement) return;
+    replacement.checked = true;
+  }
+  draftExecution.used.add(prompt.id);
+  // The user already chose these prepared values by pressing Setup. Never
+  // auto-answer confirmations, key choices, forms, or vault creation prompts.
+  setTimeout(() => {
+    if (!pending && !locked && state?.prompt?.id === prompt.id && draftExecution && !closed) submitPrompt("primary");
+  }, 0);
+}
+function loadingState(title, message) {
+  const container = el("div", "", "loading-state");
+  container.setAttribute("role", "status");
+  container.setAttribute("aria-live", "polite");
+  container.append(el("span", "", "loading-spinner"), el("strong", title), el("p", message));
+  container.firstChild.setAttribute("aria-hidden", "true");
+  return container;
+}
 function renderChoice(prompt, multiple) {
   const grid = el("div", "", "action-grid");
   for (const option of prompt.options || []) {
@@ -336,12 +530,25 @@ function chooseTabFor(prompt) {
 }
 function renderPrompt(prompt) {
   stopCountdown();
+  if (prompt.kind === "menu") {
+    lastMenuOptions = prompt.options || [];
+    draftExecution = null;
+    if (menuSelectionId !== prompt.id) {
+      menuSelectionId = prompt.id;
+      menuSelections.clear();
+      for (const module of availableModules) {
+        menuSelections.set(module.id, new Set(lastMenuOptions.filter(option =>
+          option.selected && operationAppliesToModule(option.id, module)).map(option => option.value)));
+      }
+    }
+  }
   const actions = $("action-content");
   const settings = $("settings-content");
   actions.replaceChildren();
   settings.replaceChildren();
   const title = prompt.label || (prompt.kind === "menu" ? "Choose setup tasks" : "Configure setup");
   const container = ["menu", "modules"].includes(prompt.kind) ? actions : settings;
+  if (container === settings) actions.append(el("p", "Continue the current setup question in Settings.", "empty-state"));
   container.append(el("h2", title, "prompt-title"));
   const card = $("continue-button");
   card.hidden = false;
@@ -352,7 +559,7 @@ function renderPrompt(prompt) {
 
   if (prompt.kind === "menu" || prompt.kind === "modules") {
     const note = el("p", prompt.kind === "menu" ?
-      "Choose setup operations for the active module. Selected operations run once for the repository and its selected modules." :
+      "Choose setup operations for the active module. Signing identity, local.properties, and publishing credentials can be shared across the repository." :
       "Choose the modules and apps this repository should configure. Header tabs show module details; use these checkboxes to change the setup selection.", "prompt-help");
     container.append(note);
     if (prompt.kind === "menu") {
@@ -375,7 +582,7 @@ function renderPrompt(prompt) {
     container.addEventListener("change", () => {
       updateFooter();
       if (prompt.kind === "modules") syncModuleSelection();
-      else { renderMenuScope(); renderOverview(state); }
+      else { saveMenuSelection(); renderMenuScope(); renderOverview(state); }
     });
   } else if (prompt.kind === "text") {
     const input = field(title, prompt.default, Boolean(prompt.secret));
@@ -428,13 +635,15 @@ function renderPrompt(prompt) {
   chooseTabFor(prompt);
   highlightModuleChoice();
   renderMenuScope();
+  renderSettingsGroups(state);
   updateFooter();
   startCountdown(prompt);
+  schedulePreparedAnswer(prompt);
   requireResumeOnRestore = false;
 }
 function selectedHelp() {
   const options = state?.prompt?.options || [];
-  const selected = new Set([...$("action-content").querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value));
+  const selected = new Set(selectedMenuCards().map(card => card.querySelector('input[type="checkbox"]').value));
   const help = options.filter(option => selected.has(option.value)).map(option => `${option.label}\n${option.description || "No further details available."}`);
   return help.join("\n\n") || "Select a task to read its description.";
 }
@@ -448,7 +657,7 @@ function promptValue(prompt, action) {
     }
     case "form": return [...container.querySelectorAll(".form-field input")].map(input => input.value);
     case "confirm": return container.querySelector('.confirmation input').checked;
-    case "menu":
+    case "menu": return selectedMenuCards().map(card => Number(card.querySelector('input[type="checkbox"]').value));
     case "modules": return [...container.querySelectorAll('input[type="checkbox"]:checked')].map(input => Number(input.value));
     case "saved": return container.querySelector('input[type="radio"]:checked')?.value || "reuse";
     case "key": return container.querySelector('input[name="signing-key"]:checked')?.value || "";
@@ -461,17 +670,23 @@ async function submitPrompt(action = "primary") {
   const value = action === "cancel" && prompt.kind === "confirm" ? false : promptValue(prompt, action);
   if (action === "primary" && ((["menu", "modules"].includes(prompt.kind) && !value.length) ||
       (prompt.kind === "key" && !value) || (prompt.kind === "confirm" && !value))) return;
+  const menuModule = prompt.kind === "menu" && action === "primary" ? activeModule : null;
+  if (prompt.kind === "menu" && !menuModule) draftExecution = null;
+  const selectedActions = menuModule ? selectedMenuCards().map(card => card.dataset.operationId) : [];
+  if (menuModule && !validatePreparedPasswords(menuModule, selectedActions)) return;
   if (prompt.countdownSeconds && !prompt.secret) rememberPausedPrompt(prompt.id);
   stopCountdown();
   pending = true;
   updateFooter();
+  if (menuModule) draftExecution = {module: menuModule, answers: preparedAnswers(menuModule, selectedActions), used: new Set()};
   try {
     await request("/api/answer", "POST", action === "cancel" && prompt.kind !== "confirm" ?
-      {id: prompt.id, cancel: true} : {id: prompt.id, value});
+      {id: prompt.id, cancel: true} : {id: prompt.id, value, ...(menuModule ? {module: menuModule} : {})});
     forgetPausedPrompt();
     $("footer-status").textContent = "Continuing setup…";
     await refresh();
   } catch (error) {
+    if (menuModule) draftExecution = null;
     setProblem(error.message);
     if (prompt.countdownSeconds && state?.prompt?.id === prompt.id) {
       paused = true;
@@ -518,6 +733,10 @@ function finishClose() {
   closed = true;
   closingRequested = false;
   stopCountdown();
+  clearPreparedValues();
+  lastMenuOptions = null;
+  menuSelections.clear();
+  menuSelectionId = null;
   $("action-content").replaceChildren(el("p", "The local wizard is closed. You may close this tab.", "empty-state"));
   $("footer-status").textContent = "Session closed after cleanup";
   $("back-button").hidden = true;
@@ -553,8 +772,8 @@ function updateFooter() {
   if (!prompt) { primary.hidden = true; $("back-button").hidden = true; return; }
   primary.hidden = false;
   const container = ["menu", "modules"].includes(prompt.kind) ? $("action-content") : $("settings-content");
-  const choices = container.querySelectorAll('input[type="checkbox"]:checked');
-  primary.disabled = ["menu", "modules"].includes(prompt.kind) && choices.length === 0 ||
+  const choices = prompt.kind === "menu" ? selectedMenuCards().length : container.querySelectorAll('input[type="checkbox"]:checked').length;
+  primary.disabled = ["menu", "modules"].includes(prompt.kind) && choices === 0 ||
     prompt.kind === "confirm" && !container.querySelector('.confirmation input')?.checked ||
     prompt.kind === "key" && !container.querySelector('input[name="signing-key"]:checked');
 }
@@ -565,7 +784,7 @@ function renderProgress(data) {
     ["review", "Review changes"], ["apply", "Apply setup"], ["complete", "Finish"],
   ];
   const phase = String(data.phase || "").toLowerCase();
-  const current = phase.includes("module") ? 1 : phase.includes("action") || phase.includes("menu") ? 1 :
+  const current = phase.includes("module") ? 0 : phase.includes("action") || phase.includes("menu") ? 1 :
     phase.includes("review") || phase.includes("confirm") ? 3 :
     phase.includes("apply") || phase.includes("write") ? 4 :
     phase.includes("complete") || data.status === "finished" ? 5 :
@@ -617,7 +836,11 @@ function operationAppliesToModule(id, module) {
   if (!module?.selected) return false;
   if (["key", "local", "github"].includes(id)) return module.kind === "application";
   if (id === "publishing") return ["library", "jvm-library"].includes(module.kind);
-  return true; // Workflows and future repository-wide operations are shared.
+  return id === "workflows";
+}
+function saveMenuSelection() {
+  if (state?.prompt?.kind !== "menu" || !activeModule) return;
+  menuSelections.set(activeModule, new Set(selectedMenuCards().map(card => card.querySelector("input").value)));
 }
 function renderMenuScope() {
   if (state?.prompt?.kind !== "menu") return;
@@ -625,20 +848,25 @@ function renderMenuScope() {
   if (!scope) return;
   const module = availableModules.find(item => item.id === activeModule);
   const cards = [...$("action-content").querySelectorAll(".action-card")];
-  for (const card of cards) card.hidden = Boolean(module) && !operationAppliesToModule(card.dataset.operationId, module);
-  const selected = cards.filter(card => card.querySelector('input[type="checkbox"]:checked'));
-  const other = selected.filter(card => card.hidden).map(card => card.querySelector(".action-title").textContent);
-  const count = `${selected.length} repository ${selected.length === 1 ? "action" : "actions"} selected`;
-  scope.textContent = !module ? `${count}. Choose a module tab to see its actions.` : !module.selected ?
-    `${module.path} is not selected for setup. ${count} on other modules.` :
-    `Showing ${module.path}. ${count}.${other.length ? ` Also selected on other module tabs: ${other.join(", ")}.` : ""} Shared actions run once for the repository.`;
+  const selectedValues = menuSelections.get(activeModule);
+  for (const card of cards) {
+    card.hidden = Boolean(module) && !operationAppliesToModule(card.dataset.operationId, module);
+    if (selectedValues) card.querySelector("input").checked = selectedValues.has(card.querySelector("input").value);
+  }
+  const selected = selectedMenuCards();
+  const count = `${selected.length} ${selected.length === 1 ? "action" : "actions"} selected for this tab`;
+  scope.textContent = !module ? "Choose a module tab to see its actions." : !module.selected ?
+    `${module.path} is not selected for setup. Run the terminal module selector to include it.` :
+    `Showing ${module.path}. ${count}. Setup selected tasks runs only these actions; signing files and publishing credentials can be shared across the repository.`;
 }
 function renderModuleDetail() {
   if (selectedDetail) return;
   const module = availableModules.find(item => item.id === activeModule);
+  const artifacts = Array.isArray(state?.moduleArtifacts?.[activeModule]) ? state.moduleArtifacts[activeModule] : [];
+  const output = artifacts.find(item => item.kind === "output") || artifacts.find(item => item.status === "not built") || artifacts[0];
   $("detail-content").replaceChildren(module ?
     el("h3", module.path) : el("h3", "Repository setup"),
-    el("p", module ? `${moduleKind(module.kind)} · ${module.directory || "."}\n${module.selected ? "Included in repository setup." : "Not selected for repository setup."}\nRelevant setup areas: ${moduleSetupAreas(module)}. Operations run for the repository and its selected modules.` :
+    el("p", module ? `${moduleKind(module.kind)} · ${module.directory || "."}\n${module.selected ? "Included in repository setup." : "Not selected for repository setup."}\n${output ? `Artifact: ${output.path} (${output.status || "available"}).\n` : ""}Relevant setup areas: ${moduleSetupAreas(module)}.` :
       "Gradle discovery will show each supported module in a tab with its setup actions."));
 }
 function markModuleTabs() {
@@ -655,6 +883,7 @@ function markModuleTabs() {
   }
 }
 function selectModule(id, focus = false) {
+  if (state?.status === "running" && state?.prompt?.kind !== "menu") return;
   if (!availableModules.some(module => module.id === id)) return;
   activeModule = id;
   try { sessionStorage.setItem(moduleFocusKey, id); } catch { /* Keep module focus in memory. */ }
@@ -667,6 +896,9 @@ function selectModule(id, focus = false) {
   }
   highlightModuleChoice();
   renderMenuScope();
+  renderSettingsGroups(state);
+  if (state) renderArtifacts(state);
+  updateFooter();
   renderModuleDetail();
 }
 function highlightModuleChoice() {
@@ -729,11 +961,13 @@ $("module-tabs").addEventListener("keydown", event => {
   if (next >= 0) { event.preventDefault(); selectModule(tabs[next].dataset.moduleId, true); }
 });
 function renderArtifacts(data) {
-  const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
-  const signature = JSON.stringify(artifacts);
+  const module = availableModules.find(item => item.id === activeModule);
+  const artifacts = Array.isArray(data.moduleArtifacts?.[activeModule]) ? data.moduleArtifacts[activeModule] : [];
+  const signature = JSON.stringify([activeModule, artifacts]);
   if (signature === artifactSignature) return;
   artifactSignature = signature;
   $("artifact-count").textContent = String(artifacts.length);
+  $("artifact-heading").textContent = module ? `Artifacts · ${module.path}` : "Module artifacts";
   const list = $("artifact-list");
   const query = $("artifact-search").value.trim().toLowerCase();
   list.replaceChildren();
@@ -756,7 +990,7 @@ function renderArtifacts(data) {
     });
     list.append(row);
   }
-  if (!list.childElementCount) list.append(el("p", artifacts.length ? "No matching files." : "Affected files appear here when known.", "empty-state"));
+  if (!list.childElementCount) list.append(el("p", artifacts.length ? "No matching artifacts." : module ? "No artifacts discovered for this module." : "Module artifacts appear after discovery.", "empty-state"));
 }
 $("artifact-search").addEventListener("input", () => { artifactSignature = ""; if (state) renderArtifacts(state); });
 function renderLog(data) {
@@ -791,18 +1025,19 @@ function renderOverview(data) {
     add("Relevant setup areas", moduleSetupAreas(module));
   }
   const selectedValues = data.prompt?.kind === "menu" && promptId === data.prompt.id ?
-    new Set([...$("action-content").querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value)) : null;
+    new Set(selectedMenuCards().map(card => card.querySelector('input[type="checkbox"]').value)) : null;
   const selected = data.prompt?.kind === "menu" ? (data.prompt.options || [])
-    .filter(option => selectedValues ? selectedValues.has(option.value) : option.selected)
+    .filter(option => selectedValues ? selectedValues.has(option.value) : option.selected && operationAppliesToModule(option.id, module))
     .map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
   if (data.status === "error") add("Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
   if (data.status === "finished") add("Setup finished", "Review the generated files and the process output.");
-  add("Files and outputs", `${(data.artifacts || []).length} known`);
+  add("Module artifacts", `${(data.moduleArtifacts?.[activeModule] || []).length} known`);
 }
 function renderState(data) {
   state = data;
   if (data.status === "closed") { finishClose(); return; }
+  if (data.status === "finished" || data.status === "error") { clearPreparedValues(); lastMenuOptions = null; }
   if (data.status === "locked") {
     showLock();
     $("footer-status").textContent = "Wizard locked after inactivity";
@@ -824,6 +1059,11 @@ function renderState(data) {
   status.textContent = ({idle: "Ready", running: "In progress", finished: "Complete", error: "Needs attention", closing: "Stopping"})[data.status] || data.status || "Connecting";
   status.className = "state-badge " + (data.status === "running" ? "running" : data.status === "finished" ? "complete" : data.status === "error" ? "failed" : "");
   renderModuleTabs(data);
+  for (const tab of $("module-tabs").children) {
+    tab.disabled = data.status === "running" && data.prompt?.kind !== "menu";
+    tab.title = tab.disabled ? "Complete the current setup step before switching modules" :
+      moduleDescription(availableModules.find(module => module.id === tab.dataset.moduleId));
+  }
   renderContext(data);
   renderProgress(data);
   renderArtifacts(data);
@@ -833,8 +1073,9 @@ function renderState(data) {
   const nextPromptId = data.prompt?.id ?? null;
   const promptChanged = nextPromptId !== promptId;
   const statusChanged = data.status !== lastStatus;
+  const phaseChanged = data.phase !== lastPhase;
   if (promptChanged && promptId !== undefined) forgetPausedPrompt();
-  if (promptChanged || statusChanged && !data.prompt || nextKeySignature !== keySignature && data.prompt?.kind === "key") {
+  if (promptChanged || (statusChanged || phaseChanged) && !data.prompt || nextKeySignature !== keySignature && data.prompt?.kind === "key") {
     const selectedKey = promptChanged ? "" : $("settings-content").querySelector('input[name="signing-key"]:checked')?.value || "";
     const existingTab = activeTab;
     keySignature = nextKeySignature;
@@ -852,7 +1093,9 @@ function renderState(data) {
       stopCountdown();
       $("settings-content").replaceChildren(el("p", data.status === "running" ? "Working… Accepted answers are saved as setup progresses." : "Choose an action to inspect its settings.", "empty-state"));
       if (data.status === "idle") $("action-content").replaceChildren(el("p", "Start the local setup to choose repository tasks.", "empty-state"));
-      else if (data.status === "running") $("action-content").replaceChildren(el("p", "Working… New choices will appear here when they are needed.", "empty-state"));
+      else if (data.status === "running") $("action-content").replaceChildren(data.phase === "modules" ?
+        loadingState("Discovering modules and apps", "Gradle is inspecting this repository. Available actions will appear under each module tab.") :
+        loadingState("Preparing setup", "The next setup step will appear when the current operation is ready."));
       else if (data.status === "finished" || data.status === "error") {
         $("action-content").replaceChildren(el("p", data.status === "finished" ? "Setup finished. Review the results in Overview and Process output." : "Setup needs attention. Review Process output for recovery steps.", "empty-state"));
         activateTab($(data.status === "error" ? "tab-output" : "tab-overview"));
@@ -860,6 +1103,7 @@ function renderState(data) {
     }
   }
   lastStatus = data.status;
+  lastPhase = data.phase;
   if (!data.prompt && data.status === "running") $("footer-status").textContent = "Working on your repository…";
   else if (!data.prompt && data.status === "idle") $("footer-status").textContent = "Ready to set up this repository";
   else if (!data.prompt && data.status === "finished") $("footer-status").textContent = "Setup complete";
