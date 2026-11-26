@@ -124,7 +124,7 @@ fn checksum_failure_keeps_cache_uninstalled() {
 
 #[cfg(unix)]
 #[test]
-fn source_pins_reuse_shared_build_target_and_failed_install_stays_unpublished() {
+fn source_pins_share_build_artifacts_only_for_the_same_revision() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = TempDir::new().unwrap();
@@ -138,19 +138,27 @@ set -eu
 [ "$1" = install ] || exit 51
 shift
 install_root=
+requested_pin=
 while [ "$#" -gt 0 ]; do
-  case "$1" in --root) install_root=$2; shift 2;; *) shift;; esac
+  case "$1" in
+    --root) install_root=$2; shift 2;;
+    --rev) requested_pin=$2; shift 2;;
+    *) shift;;
+  esac
 done
 [ -n "$install_root" ] || exit 52
+[ -n "$requested_pin" ] || exit 54
 printf '%s\n' "$CARGO_TARGET_DIR" >> "$TEST_BUILD_LOG"
 mkdir -p "$CARGO_TARGET_DIR"
-if [ -f "$CARGO_TARGET_DIR/reused-marker" ]; then
+if [ -f "$CARGO_TARGET_DIR/compiled-source" ]; then
   printf 'reused\n' >> "$TEST_BUILD_LOG"
+else
+  printf '%s\n' "$requested_pin" > "$CARGO_TARGET_DIR/compiled-source"
 fi
-printf 'keep across revisions\n' > "$CARGO_TARGET_DIR/reused-marker"
 if [ "${MOCK_CARGO_FAIL:-0}" = 1 ]; then exit 53; fi
 mkdir -p "$install_root/bin"
-printf '#!/bin/sh\necho "android-repo-docs 0.1.28"\n' > "$install_root/bin/android-repo-docs"
+compiled_pin=$(cat "$CARGO_TARGET_DIR/compiled-source")
+printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "android-repo-docs 0.1.28"; else echo "%s"; fi\n' "$compiled_pin" > "$install_root/bin/android-repo-docs"
 chmod +x "$install_root/bin/android-repo-docs"
 "#,
     )
@@ -164,7 +172,7 @@ chmod +x "$install_root/bin/android-repo-docs"
     let invoke = |root: &Path, fail: bool| {
         Command::new("sh")
             .arg(root.join("docs.sh"))
-            .arg("--version")
+            .arg("source-pin")
             .env("PATH", &path)
             .env("HOME", home.path())
             .env("TEST_BUILD_LOG", &log)
@@ -173,34 +181,54 @@ chmod +x "$install_root/bin/android-repo-docs"
             .unwrap()
     };
 
-    let pins = ["a".repeat(40), "b".repeat(40), "c".repeat(40)];
+    let pins = [
+        "a".repeat(40),
+        "a".repeat(40),
+        "b".repeat(40),
+        "c".repeat(40),
+    ];
     let roots = pins.iter().map(|pin| fixture(pin)).collect::<Vec<_>>();
     for root in &roots {
         assert!(run(root.path(), &["generate"]).status.success());
     }
-    for root in roots.iter().take(2) {
+    for (root, pin) in roots.iter().zip(&pins).take(3) {
         let result = invoke(root.path(), false);
         assert!(
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), pin);
     }
-    assert!(!invoke(roots[2].path(), true).status.success());
+    assert!(!invoke(roots[3].path(), true).status.success());
 
     let entries = fs::read_to_string(&log).unwrap();
     let targets = entries
         .lines()
         .filter(|line| *line != "reused")
         .collect::<Vec<_>>();
-    let expected = home.path().join(".cache/android-repo-setup/cargo-target");
-    assert_eq!(targets, vec![expected.to_str().unwrap(); 3]);
-    assert_eq!(entries.lines().filter(|line| *line == "reused").count(), 2);
+    let target_root = home.path().join(".cache/android-repo-setup/cargo-target");
+    let expected = pins
+        .iter()
+        .map(|pin| target_root.join(pin))
+        .collect::<Vec<_>>();
     assert_eq!(
-        fs::read_to_string(expected.join("reused-marker")).unwrap(),
-        "keep across revisions\n"
+        targets,
+        expected
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect::<Vec<_>>()
     );
-    for (root, pin) in roots.iter().zip(&pins).take(2) {
+    assert_eq!(entries.lines().filter(|line| *line == "reused").count(), 1);
+    assert_eq!(
+        fs::read_to_string(expected[0].join("compiled-source")).unwrap(),
+        format!("{}\n", pins[0])
+    );
+    assert_eq!(
+        fs::read_to_string(expected[2].join("compiled-source")).unwrap(),
+        format!("{}\n", pins[2])
+    );
+    for (root, pin) in roots.iter().zip(&pins).take(3) {
         assert!(root
             .path()
             .join(".project/docs/cache")
@@ -208,10 +236,10 @@ chmod +x "$install_root/bin/android-repo-docs"
             .join("bin/android-repo-docs")
             .is_file());
     }
-    assert!(!roots[2]
+    assert!(!roots[3]
         .path()
         .join(".project/docs/cache")
-        .join(&pins[2])
+        .join(&pins[3])
         .exists());
 }
 

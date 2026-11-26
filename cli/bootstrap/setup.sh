@@ -15,8 +15,9 @@ if [ -L "$cache/$pin/bin" ] || [ -L "$exe" ]; then echo 'Refusing symlink in bin
 source_install() {
   case "${HOME:-}" in /*) ;; *) echo 'HOME must be an absolute directory for a source build.' >&2; exit 1 ;; esac
   build_root="$HOME/.cache/android-repo-setup"
-  build_target="$build_root/cargo-target"
-  for path in "$build_root" "$build_target"; do
+  target_root="$build_root/cargo-target"
+  build_target="$target_root/$pin"
+  for path in "$build_root" "$target_root" "$build_target"; do
     [ ! -L "$path" ] || { echo "Refusing symlink in source build cache: $path" >&2; exit 1; }
   done
   (umask 077; mkdir -p "$build_target")

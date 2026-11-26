@@ -147,7 +147,7 @@ fn checksum_failure_keeps_cache_uninstalled() {
 
 #[cfg(unix)]
 #[test]
-fn source_pins_reuse_build_artifacts_across_repositories_and_keep_failed_installs_unpublished() {
+fn source_pins_share_build_artifacts_only_for_the_same_revision() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = TempDir::new().unwrap();
@@ -161,19 +161,27 @@ set -eu
 [ "$1" = install ] || exit 51
 shift
 install_root=
+requested_pin=
 while [ "$#" -gt 0 ]; do
-  case "$1" in --root) install_root=$2; shift 2;; *) shift;; esac
+  case "$1" in
+    --root) install_root=$2; shift 2;;
+    --rev) requested_pin=$2; shift 2;;
+    *) shift;;
+  esac
 done
 [ -n "$install_root" ] || exit 52
+[ -n "$requested_pin" ] || exit 54
 printf '%s\n' "$CARGO_TARGET_DIR" >> "$TEST_BUILD_LOG"
 mkdir -p "$CARGO_TARGET_DIR"
-if [ -f "$CARGO_TARGET_DIR/reused-marker" ]; then
+if [ -f "$CARGO_TARGET_DIR/compiled-source" ]; then
   printf 'reused\n' >> "$TEST_BUILD_LOG"
+else
+  printf '%s\n' "$requested_pin" > "$CARGO_TARGET_DIR/compiled-source"
 fi
-printf 'keep across revisions\n' > "$CARGO_TARGET_DIR/reused-marker"
 if [ "${MOCK_CARGO_FAIL:-0}" = 1 ]; then exit 53; fi
 mkdir -p "$install_root/bin"
-printf '#!/bin/sh\necho "android-repo-setup 0.1.28"\n' > "$install_root/bin/android-repo-setup"
+compiled_pin=$(cat "$CARGO_TARGET_DIR/compiled-source")
+printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "android-repo-setup 0.1.28"; else echo "%s"; fi\n' "$compiled_pin" > "$install_root/bin/android-repo-setup"
 chmod +x "$install_root/bin/android-repo-setup"
 "#,
     )
@@ -188,7 +196,7 @@ chmod +x "$install_root/bin/android-repo-setup"
     let invoke = |root: &Path, fail: bool| {
         Command::new("sh")
             .arg(root.join("setup.sh"))
-            .arg("--version")
+            .arg("source-pin")
             .env("PATH", &path)
             .env("HOME", home.path())
             .env("TEST_BUILD_LOG", &log)
@@ -200,9 +208,10 @@ chmod +x "$install_root/bin/android-repo-setup"
     let second_pin = "b".repeat(40);
     let failed_pin = "c".repeat(40);
     let first = fixture(&first_pin);
+    let another_first = fixture(&first_pin);
     let second = fixture(&second_pin);
     let failed = fixture(&failed_pin);
-    for root in [&first, &second, &failed] {
+    for root in [&first, &another_first, &second, &failed] {
         assert!(run(root.path(), &["generate"]).status.success());
     }
     let first_run = invoke(first.path(), false);
@@ -211,11 +220,26 @@ chmod +x "$install_root/bin/android-repo-setup"
         "{}",
         String::from_utf8_lossy(&first_run.stderr)
     );
+    assert_eq!(String::from_utf8_lossy(&first_run.stdout).trim(), first_pin);
+    let another_first_run = invoke(another_first.path(), false);
+    assert!(
+        another_first_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&another_first_run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&another_first_run.stdout).trim(),
+        first_pin
+    );
     let second_run = invoke(second.path(), false);
     assert!(
         second_run.status.success(),
         "{}",
         String::from_utf8_lossy(&second_run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second_run.stdout).trim(),
+        second_pin
     );
     let failed_run = invoke(failed.path(), true);
     assert!(!failed_run.status.success());
@@ -225,18 +249,34 @@ chmod +x "$install_root/bin/android-repo-setup"
         .lines()
         .filter(|line| *line != "reused")
         .collect::<Vec<_>>();
-    assert_eq!(targets.len(), 3, "{entries}");
-    assert!(
-        targets.iter().all(|target| *target == targets[0]),
-        "{entries}"
-    );
-    assert_eq!(entries.lines().filter(|line| *line == "reused").count(), 2);
-    let target = Path::new(targets[0]);
+    let target_root = home.path().join(".cache/android-repo-setup/cargo-target");
+    let expected = [
+        target_root.join(&first_pin),
+        target_root.join(&first_pin),
+        target_root.join(&second_pin),
+        target_root.join(&failed_pin),
+    ];
     assert_eq!(
-        fs::read_to_string(target.join("reused-marker")).unwrap(),
-        "keep across revisions\n"
+        targets,
+        expected
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect::<Vec<_>>()
     );
-    for (root, pin) in [(&first, &first_pin), (&second, &second_pin)] {
+    assert_eq!(entries.lines().filter(|line| *line == "reused").count(), 1);
+    assert_eq!(
+        fs::read_to_string(expected[0].join("compiled-source")).unwrap(),
+        format!("{first_pin}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(expected[2].join("compiled-source")).unwrap(),
+        format!("{second_pin}\n")
+    );
+    for (root, pin) in [
+        (&first, &first_pin),
+        (&another_first, &first_pin),
+        (&second, &second_pin),
+    ] {
         assert!(root
             .path()
             .join(".project/setup/cache")
@@ -331,7 +371,7 @@ fn windows_launcher_uses_verified_cache_and_propagates_cli_exit() {
 
 #[cfg(windows)]
 #[test]
-fn windows_source_pins_share_build_target_across_repositories() {
+fn windows_source_pins_share_build_target_only_for_same_revision() {
     let mocks = TempDir::new().unwrap();
     let log = mocks.path().join("build-targets.log");
     fs::write(
@@ -371,8 +411,9 @@ exit /b 0
     let first_pin = "a".repeat(40);
     let second_pin = "b".repeat(40);
     let first = fixture(&first_pin);
+    let another_first = fixture(&first_pin);
     let second = fixture(&second_pin);
-    for root in [&first, &second] {
+    for root in [&first, &another_first, &second] {
         assert!(run(root.path(), &["generate"]).status.success());
         let output = invoke(root.path());
         assert!(
@@ -386,12 +427,20 @@ exit /b 0
         .lines()
         .map(|entry| entry.strip_prefix("CARGO_TARGET_DIR=").unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(targets.len(), 2, "{entries}");
+    assert_eq!(targets.len(), 3, "{entries}");
     assert_eq!(targets[0], targets[1]);
+    assert_ne!(targets[0], targets[2]);
+    assert!(Path::new(targets[0]).ends_with(&first_pin));
+    assert!(Path::new(targets[2]).ends_with(&second_pin));
     assert!(Path::new(targets[0]).is_absolute());
     assert!(!Path::new(targets[0]).starts_with(first.path()));
+    assert!(!Path::new(targets[0]).starts_with(another_first.path()));
     assert!(!Path::new(targets[0]).starts_with(second.path()));
-    for (root, pin) in [(&first, &first_pin), (&second, &second_pin)] {
+    for (root, pin) in [
+        (&first, &first_pin),
+        (&another_first, &first_pin),
+        (&second, &second_pin),
+    ] {
         assert!(root
             .path()
             .join(".project/setup/cache")

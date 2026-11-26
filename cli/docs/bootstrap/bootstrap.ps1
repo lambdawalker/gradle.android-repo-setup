@@ -29,13 +29,14 @@ if (!(Test-Path -LiteralPath $exe)) {
     } else {
       $previousTarget = $env:CARGO_TARGET_DIR
       try {
-        # Reuse compiled dependencies across source pins and repositories.
-        # Cargo coordinates concurrent builds that share this target directory.
+        # Keep build artifacts for this pin across repositories without reusing
+        # a final executable compiled from another Git revision.
         $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
         if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'Could not locate the local build cache directory' }
         $buildCache = Join-Path $localAppData 'android-repo-setup'
-        $buildTarget = Join-Path $buildCache 'cargo-target'
-        foreach ($path in @($buildCache, $buildTarget)) {
+        $targetRoot = Join-Path $buildCache 'cargo-target'
+        $buildTarget = Join-Path $targetRoot $pin
+        foreach ($path in @($buildCache, $targetRoot, $buildTarget)) {
           if ((Test-Path -LiteralPath $path) -and ((Get-Item -Force -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Refusing symlink: $path" }
         }
         New-Item -ItemType Directory -Force $buildTarget | Out-Null
