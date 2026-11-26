@@ -356,11 +356,15 @@ impl Server {
                 match action {
                     WorkerAction::Setup => setup::run(&root, created_vault),
                     WorkerAction::ViewVault => {
-                        vault::view(&setup::signing_config(&root)?)?;
+                        if !vault::view(&setup::signing_config(&root)?)? {
+                            super::message("Vault view canceled; no changes were made.".into());
+                        }
                         Ok(())
                     }
                     WorkerAction::RemakeVault => {
-                        vault::remake(&setup::signing_config(&root)?)?;
+                        if !vault::remake(&setup::signing_config(&root)?)? {
+                            super::message("Vault replacement canceled; the vault was not changed.".into());
+                        }
                         Ok(())
                     }
                 }

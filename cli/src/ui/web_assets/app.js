@@ -1200,7 +1200,7 @@ function renderOverview(data) {
     .map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
   if (data.status === "error") add(vaultLabel ? `${vaultLabel} needs attention` : "Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
-  if (data.status === "finished") add(vaultLabel ? `${vaultLabel} complete` : "Setup finished", vaultLabel ? "Review the result in Process output." : "Review the generated files and the process output.");
+  if (data.status === "finished") add(vaultLabel ? `${vaultLabel} finished` : "Setup finished", vaultLabel ? "Review the result in Process output." : "Review the generated files and the process output.");
   add("Module artifacts", `${(data.moduleArtifacts?.[activeModule] || []).length} known`);
 }
 function renderState(data) {
@@ -1271,7 +1271,7 @@ function renderState(data) {
         loadingState("Preparing setup", "The next setup step will appear when the current operation is ready."));
       else if (data.status === "finished" || data.status === "error") {
         $("action-content").replaceChildren(el("p", vaultLabel ?
-          `${vaultLabel} ${data.status === "finished" ? "complete" : "needs attention"}. Review Process output for details.` :
+          `${vaultLabel} ${data.status === "finished" ? "finished" : "needs attention"}. Review Process output for details.` :
           data.status === "finished" ? "Setup finished. Review the results in Overview and Process output." : "Setup needs attention. Review Process output for recovery steps.", "empty-state"));
         activateTab($(vaultLabel || data.status === "error" ? "tab-output" : "tab-overview"));
       }
@@ -1281,7 +1281,7 @@ function renderState(data) {
   lastPhase = data.phase;
   if (!data.prompt && data.status === "running") $("footer-status").textContent = vaultLabel ? `${vaultLabel} in progress…` : "Working on your repository…";
   else if (!data.prompt && data.status === "idle") $("footer-status").textContent = "Ready to set up this repository";
-  else if (!data.prompt && data.status === "finished") $("footer-status").textContent = vaultLabel ? `${vaultLabel} complete; review Process output` : "Setup complete";
+  else if (!data.prompt && data.status === "finished") $("footer-status").textContent = vaultLabel ? `${vaultLabel} finished; review Process output` : "Setup complete";
   else if (!data.prompt && data.status === "error") $("footer-status").textContent = vaultLabel ? `${vaultLabel} needs attention; review Process output` : "Setup needs attention; review the process output";
   else if (data.status === "closing") $("footer-status").textContent = "Stop requested; waiting for cleanup…";
   else if (data.prompt && paused) updateCountdownLabel();
