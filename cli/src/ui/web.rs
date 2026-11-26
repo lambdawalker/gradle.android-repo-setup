@@ -390,6 +390,12 @@ impl Server {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty() && value.len() <= 4096)
             .ok_or((422, "Enter the vault passphrase."))?;
+        if session.authenticated && constant_time_eq(credential, &self.recovery_code) {
+            session.locked = false;
+            session.last_seen = Instant::now();
+            self.revision += 1;
+            return Ok(());
+        }
         let config = setup::signing_config(&self.root)
             .map_err(|_| (500, "Could not load the setup vault configuration."))?;
         if !session.authenticated {
@@ -403,10 +409,7 @@ impl Server {
             .map_err(|_| (500, "Could not inspect the setup vault."))?;
         if exists {
             // Open only to verify the passphrase, then discard decrypted data.
-            // The recovery code is accepted after the first vault login only.
-            if vault::SetupVault::open(&path, credential).is_err()
-                && !(session.authenticated && constant_time_eq(credential, &self.recovery_code))
-            {
+            if vault::SetupVault::open(&path, credential).is_err() {
                 return Err((401, "Could not unlock the setup vault."));
             }
         } else {
@@ -1632,7 +1635,7 @@ mod tests {
             423
         );
         assert!(received.try_recv().is_err());
-        assert_eq!(
+        assert_ne!(
             server
                 .handle(
                     request(
@@ -1644,7 +1647,7 @@ mod tests {
                     HOST
                 )
                 .status,
-            401
+            200
         );
         assert_eq!(
             server

@@ -222,6 +222,7 @@ function openVaultDialog(title, description, mode, confirm = false) {
   $("vault-confirmation").value = "";
   $("vault-confirm-group").hidden = !confirm;
   $("vault-confirmation").required = confirm;
+  $("vault-cancel").hidden = mode !== "worker";
   $("vault-submit").textContent = confirm ? "Create vault" : mode === "worker" ? "Continue" : "Unlock";
   vaultProblem("");
   if (!$("vault-dialog").open) $("vault-dialog").showModal();
@@ -319,11 +320,11 @@ function showVaultPrompt(prompt) {
     prompt.label.startsWith("Confirm vault password") ? "Repeat the vault passphrase to confirm it." :
       "Enter the vault passphrase for this setup action.", "worker");
 }
-async function answerVaultPrompt() {
+async function answerVaultPrompt(cancel = false) {
   const prompt = state?.prompt;
   if (locked || pending || !isVaultPrompt(prompt) || vaultWorkerPromptId !== prompt.id) return;
   const value = $("vault-credential").value;
-  if (!value || prompt.label.startsWith("Create vault password") && value.length < 12) {
+  if (!cancel && (!value || prompt.label.startsWith("Create vault password") && value.length < 12)) {
     vaultProblem(value ? "Use at least 12 characters." : "Enter the vault passphrase.");
     $("vault-credential").focus();
     return;
@@ -332,7 +333,7 @@ async function answerVaultPrompt() {
   pending = true;
   $("vault-submit").disabled = true;
   try {
-    await request("/api/answer", "POST", {id: prompt.id, value});
+    await request("/api/answer", "POST", cancel ? {id: prompt.id, cancel: true} : {id: prompt.id, value});
     closeVaultDialog();
     await refresh();
   } catch (error) {
@@ -344,6 +345,7 @@ async function answerVaultPrompt() {
     updateFooter();
   }
 }
+$("vault-cancel").addEventListener("click", () => answerVaultPrompt(true));
 
 let lastActivity = 0;
 function reportActivity(event) {
@@ -844,6 +846,7 @@ function updateFooter() {
     $("close-button").disabled = true;
     return;
   }
+  $("close-button").disabled = !session;
   if (pending) { primary.disabled = true; return; }
   if (["idle", "finished", "error"].includes(state?.status)) {
     primary.hidden = false;
