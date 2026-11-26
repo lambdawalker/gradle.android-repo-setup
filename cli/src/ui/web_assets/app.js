@@ -273,22 +273,21 @@ window.addEventListener("pointerup", () => {
   tabs.splice(0, tabs.length, ...tablist.querySelectorAll(".tab"));
 });
 
+function setFooterStatus(message, tone = "neutral") {
+  const footer = $("footer-status");
+  $("footer-status-text").textContent = message;
+  footer.querySelector("use").setAttribute("href", "#icon-" + ({neutral: "info", warning: "warning", error: "error", success: "check"}[tone] || "info"));
+  footer.dataset.tone = tone;
+}
 function setProblem(message) {
-  $("footer-status").textContent = message;
-  let problem = $("prompt-error");
-  if (problem) {
-    problem.textContent = message;
-    problem.hidden = !message;
-  }
+  setFooterStatus(message, "error");
 }
 function markDisconnected() {
   if (closed || !session) return;
   if (!disconnected) pauseCountdown();
   disconnected = true;
   closeMainMenu();
-  $("action-state").textContent = "Reconnecting";
-  $("action-state").className = "state-badge failed";
-  $("footer-status").textContent = "Connection to the local CLI interrupted. Retrying… Keep the launching terminal open.";
+  setFooterStatus("Connection to the local CLI interrupted. Retrying… Keep the launching terminal open.", "warning");
   $("vault-submit").disabled = true;
   $("vault-cancel").disabled = true;
   updateFooter();
@@ -492,8 +491,8 @@ function stopCountdown() {
 function updateCountdownLabel() {
   if (!state?.prompt) return;
   const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-  $("footer-status").textContent = paused ? "Countdown paused. Review the value and continue when ready." :
-    `The displayed default will be used in ${seconds} seconds.`;
+  setFooterStatus(paused ? "Countdown paused. Review the value and continue when ready." :
+    `The displayed default will be used in ${seconds} seconds.`);
 }
 function startCountdown(prompt, explicitResume = false) {
   stopCountdown();
@@ -816,10 +815,6 @@ function renderPrompt(prompt) {
     container.append(el("p", "Waiting for the next setup step.", "empty-state"));
     card.disabled = true;
   }
-  const error = el("p", "", "problem");
-  error.id = "prompt-error";
-  error.hidden = true;
-  container.append(error);
   chooseTabFor(prompt);
   highlightModuleChoice();
   renderMenuCards();
@@ -865,7 +860,7 @@ async function submitPrompt(action = "primary") {
     await request("/api/answer", "POST", action === "cancel" && prompt.kind !== "confirm" ?
       {id: prompt.id, cancel: true} : {id: prompt.id, value, ...(menuModule ? {module: menuModule} : {})});
     forgetPausedPrompt();
-    $("footer-status").textContent = "Continuing setup…";
+    setFooterStatus("Continuing setup…");
     await refresh();
   } catch (error) {
     if (menuModule) draftExecution = null;
@@ -895,7 +890,7 @@ $("close-button").addEventListener("click", async () => {
     await request("/api/close", "POST", {});
     // Keep the scoped session until cleanup is confirmed, including if this
     // page reloads while the worker is still stopping.
-    $("footer-status").textContent = "Stop requested; waiting for cleanup…";
+    setFooterStatus("Stop requested; waiting for cleanup…");
     $("action-content").replaceChildren(el("p", "Stop requested; waiting for local work to finish and release its locks.", "empty-state"));
     await refresh();
   } catch (error) {
@@ -920,7 +915,7 @@ function finishClose() {
   menuSelections.clear();
   menuSelectionId = null;
   $("action-content").replaceChildren(el("p", "The local wizard is closed. You may close this tab.", "empty-state"));
-  $("footer-status").textContent = "Session closed after cleanup";
+  setFooterStatus("Session closed after cleanup", "success");
   $("back-button").hidden = true;
   $("continue-button").hidden = true;
   $("close-button").disabled = true;
@@ -1241,8 +1236,8 @@ function renderState(data) {
   if (data.status === "finished" || data.status === "error") { clearPreparedValues(); lastMenuOptions = null; }
   if (data.status === "locked") {
     showLock(data);
-    $("footer-status").textContent = data.vaultMode === "create" ? "Create a vault passphrase to begin" :
-      data.initial ? "Unlock the vault to begin" : "Wizard locked after 20 minutes of inactivity";
+    setFooterStatus(data.vaultMode === "create" ? "Create a vault passphrase to begin" :
+      data.initial ? "Unlock the vault to begin" : "Wizard locked after 20 minutes of inactivity", "warning");
     updateFooter();
     return;
   }
@@ -1255,11 +1250,8 @@ function renderState(data) {
     closingRequested = true;
     stopCountdown();
     $("action-content").replaceChildren(el("p", "Stop requested; waiting for local work to finish and release its locks.", "empty-state"));
-    $("footer-status").textContent = "Stop requested; waiting for cleanup…";
+    setFooterStatus("Stop requested; waiting for cleanup…");
   }
-  const status = $("action-state");
-  status.textContent = ({idle: "Ready", running: "In progress", finished: "Complete", error: "Needs attention", closing: "Stopping"})[data.status] || data.status || "Connecting";
-  status.className = "state-badge " + (data.status === "running" ? "running" : data.status === "finished" ? "complete" : data.status === "error" ? "failed" : "");
   renderModuleTabs(data);
   for (const tab of $("module-tabs").children) {
     tab.disabled = data.status === "running" && data.prompt?.kind !== "menu";
@@ -1309,12 +1301,13 @@ function renderState(data) {
   }
   lastStatus = data.status;
   lastPhase = data.phase;
-  if (!data.prompt && data.status === "running") $("footer-status").textContent = vaultLabel ? `${vaultLabel} in progress…` : "Working on your repository…";
-  else if (!data.prompt && data.status === "idle") $("footer-status").textContent = "Ready to set up this repository";
-  else if (!data.prompt && data.status === "finished") $("footer-status").textContent = vaultLabel ? `${vaultLabel} finished; review Process output` : "Setup complete";
-  else if (!data.prompt && data.status === "error") $("footer-status").textContent = vaultLabel ? `${vaultLabel} needs attention; review Process output` : "Setup needs attention; review the process output";
-  else if (data.status === "closing") $("footer-status").textContent = "Stop requested; waiting for cleanup…";
+  if (!data.prompt && data.status === "running") setFooterStatus(vaultLabel ? `${vaultLabel} in progress…` : "Working on your repository…");
+  else if (!data.prompt && data.status === "idle") setFooterStatus("Ready to set up this repository");
+  else if (!data.prompt && data.status === "finished") setFooterStatus(vaultLabel ? `${vaultLabel} finished; review Process output` : "Setup complete", "success");
+  else if (!data.prompt && data.status === "error") setFooterStatus(vaultLabel ? `${vaultLabel} needs attention; review Process output` : "Setup needs attention; review the process output", "error");
+  else if (data.status === "closing") setFooterStatus("Stop requested; waiting for cleanup…");
   else if (data.prompt && paused) updateCountdownLabel();
+  else if (data.prompt) setFooterStatus("Ready for the current setup step.");
   if (!data.prompt && ["idle", "finished", "error"].includes(data.status)) requireResumeOnRestore = false;
   updateFooter();
   // The lock screen hides footer controls. The same pending prompt can return
@@ -1341,8 +1334,8 @@ async function refresh() {
     if (!pending) $("vault-submit").disabled = false;
     $("vault-cancel").disabled = false;
     updateFooter();
-    if (data.prompt && !paused && !closed) $("footer-status").textContent = data.prompt.kind === "menu" ?
-      "Connection restored. Choose actions for this module." : "Connection restored. Continue the current step.";
+    if (data.prompt && !paused && !closed) setFooterStatus(data.prompt.kind === "menu" ?
+      "Connection restored. Choose actions for this module." : "Connection restored. Continue the current step.", "success");
   }
 }
 async function poll() {
