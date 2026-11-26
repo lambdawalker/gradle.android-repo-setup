@@ -145,6 +145,159 @@ fn checksum_failure_keeps_cache_uninstalled() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn source_pins_reuse_build_artifacts_across_repositories_and_keep_failed_installs_unpublished() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    let mocks = TempDir::new().unwrap();
+    let log = home.path().join("cargo-targets.log");
+    let cargo = mocks.path().join("cargo");
+    fs::write(
+        &cargo,
+        r#"#!/bin/sh
+set -eu
+[ "$1" = install ] || exit 51
+shift
+install_root=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --root) install_root=$2; shift 2;; *) shift;; esac
+done
+[ -n "$install_root" ] || exit 52
+printf '%s\n' "$CARGO_TARGET_DIR" >> "$TEST_BUILD_LOG"
+mkdir -p "$CARGO_TARGET_DIR"
+if [ -f "$CARGO_TARGET_DIR/reused-marker" ]; then
+  printf 'reused\n' >> "$TEST_BUILD_LOG"
+fi
+printf 'keep across revisions\n' > "$CARGO_TARGET_DIR/reused-marker"
+if [ "${MOCK_CARGO_FAIL:-0}" = 1 ]; then exit 53; fi
+mkdir -p "$install_root/bin"
+printf '#!/bin/sh\necho "android-repo-setup 0.1.28"\n' > "$install_root/bin/android-repo-setup"
+chmod +x "$install_root/bin/android-repo-setup"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        mocks.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    let invoke = |root: &Path, fail: bool| {
+        Command::new("sh")
+            .arg(root.join("setup.sh"))
+            .arg("--version")
+            .env("PATH", &path)
+            .env("HOME", home.path())
+            .env("TEST_BUILD_LOG", &log)
+            .env("MOCK_CARGO_FAIL", if fail { "1" } else { "0" })
+            .output()
+            .unwrap()
+    };
+    let first_pin = "a".repeat(40);
+    let second_pin = "b".repeat(40);
+    let failed_pin = "c".repeat(40);
+    let first = fixture(&first_pin);
+    let second = fixture(&second_pin);
+    let failed = fixture(&failed_pin);
+    for root in [&first, &second, &failed] {
+        assert!(run(root.path(), &["generate"]).status.success());
+    }
+    let first_run = invoke(first.path(), false);
+    assert!(
+        first_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_run.stderr)
+    );
+    let second_run = invoke(second.path(), false);
+    assert!(
+        second_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second_run.stderr)
+    );
+    let failed_run = invoke(failed.path(), true);
+    assert!(!failed_run.status.success());
+
+    let entries = fs::read_to_string(&log).unwrap();
+    let targets = entries
+        .lines()
+        .filter(|line| *line != "reused")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 3, "{entries}");
+    assert!(
+        targets.iter().all(|target| *target == targets[0]),
+        "{entries}"
+    );
+    assert_eq!(entries.lines().filter(|line| *line == "reused").count(), 2);
+    let target = Path::new(targets[0]);
+    assert_eq!(
+        fs::read_to_string(target.join("reused-marker")).unwrap(),
+        "keep across revisions\n"
+    );
+    for (root, pin) in [(&first, &first_pin), (&second, &second_pin)] {
+        assert!(root
+            .path()
+            .join(".project/setup/cache")
+            .join(pin)
+            .join("bin/android-repo-setup")
+            .is_file());
+    }
+    assert!(!failed
+        .path()
+        .join(".project/setup/cache")
+        .join(&failed_pin)
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn source_pin_refuses_symlinked_shared_build_target_before_running_cargo() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = fixture(&"d".repeat(40));
+    assert!(run(root.path(), &["generate"]).status.success());
+    let home = TempDir::new().unwrap();
+    let external = TempDir::new().unwrap();
+    let shared = home.path().join(".cache/android-repo-setup");
+    fs::create_dir_all(&shared).unwrap();
+    symlink(external.path(), shared.join("cargo-target")).unwrap();
+    let mocks = TempDir::new().unwrap();
+    let called = home.path().join("cargo-called");
+    let cargo = mocks.path().join("cargo");
+    fs::write(
+        &cargo,
+        "#!/bin/sh\nprintf called > \"$TEST_CARGO_CALLED\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new("sh")
+        .arg(root.path().join("setup.sh"))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                mocks.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .env("HOME", home.path())
+        .env("TEST_CARGO_CALLED", &called)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        !called.exists(),
+        "Cargo must not run through a symlinked target"
+    );
+    assert!(!root
+        .path()
+        .join(".project/setup/cache")
+        .join("d".repeat(40))
+        .exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_launcher_uses_verified_cache_and_propagates_cli_exit() {
@@ -174,6 +327,78 @@ fn windows_launcher_uses_verified_cache_and_propagates_cli_exit() {
         .output()
         .unwrap();
     assert!(!failure.status.success());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_source_pins_share_build_target_across_repositories() {
+    let mocks = TempDir::new().unwrap();
+    let log = mocks.path().join("build-targets.log");
+    fs::write(
+        mocks.path().join("cargo.cmd"),
+        r#"@echo off
+setlocal
+set CARGO_TARGET_DIR >>"%TEST_BUILD_LOG%"
+:args
+if "%~1"=="" exit /b 51
+if /I "%~1"=="--root" goto root
+shift
+goto args
+:root
+shift
+if "%~1"=="" exit /b 52
+mkdir "%~1\bin" || exit /b 53
+copy /Y "%TEST_SETUP_EXE%" "%~1\bin\android-repo-setup.exe" >nul || exit /b 54
+exit /b 0
+"#,
+    )
+    .unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(mocks.path().to_owned())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let invoke = |root: &Path| {
+        Command::new("cmd")
+            .args(["/c", "setup.bat", "--version"])
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("TEST_BUILD_LOG", &log)
+            .env("TEST_SETUP_EXE", env!("CARGO_BIN_EXE_android-repo-setup"))
+            .output()
+            .unwrap()
+    };
+    let first_pin = "a".repeat(40);
+    let second_pin = "b".repeat(40);
+    let first = fixture(&first_pin);
+    let second = fixture(&second_pin);
+    for root in [&first, &second] {
+        assert!(run(root.path(), &["generate"]).status.success());
+        let output = invoke(root.path());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let entries = fs::read_to_string(&log).unwrap();
+    let targets = entries
+        .lines()
+        .map(|entry| entry.strip_prefix("CARGO_TARGET_DIR=").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 2, "{entries}");
+    assert_eq!(targets[0], targets[1]);
+    assert!(Path::new(targets[0]).is_absolute());
+    assert!(!Path::new(targets[0]).starts_with(first.path()));
+    assert!(!Path::new(targets[0]).starts_with(second.path()));
+    for (root, pin) in [(&first, &first_pin), (&second, &second_pin)] {
+        assert!(root
+            .path()
+            .join(".project/setup/cache")
+            .join(pin)
+            .join("bin/android-repo-setup.exe")
+            .is_file());
+    }
 }
 
 #[test]

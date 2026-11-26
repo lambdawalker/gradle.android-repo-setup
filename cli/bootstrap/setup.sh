@@ -12,13 +12,23 @@ done
 mkdir -p "$cache"
 exe="$cache/$pin/bin/android-repo-setup"
 if [ -L "$cache/$pin/bin" ] || [ -L "$exe" ]; then echo 'Refusing symlink in binary cache' >&2; exit 1; fi
+source_install() {
+  case "${HOME:-}" in /*) ;; *) echo 'HOME must be an absolute directory for a source build.' >&2; exit 1 ;; esac
+  build_root="$HOME/.cache/android-repo-setup"
+  build_target="$build_root/cargo-target"
+  for path in "$build_root" "$build_target"; do
+    [ ! -L "$path" ] || { echo "Refusing symlink in source build cache: $path" >&2; exit 1; }
+  done
+  (umask 077; mkdir -p "$build_target")
+  CARGO_TARGET_DIR="$build_target" cargo install --locked --root "$stage" --git https://github.com/lambdawalker/gradle.android-repo-setup.git "$@" android-repo-setup
+}
 if [ ! -x "$exe" ]; then
   stage=$(mktemp -d "$cache/.install.XXXXXXXX")
   trap 'rm -rf "$stage"' EXIT HUP INT TERM
   case "$pin" in
     v*)
       if [ "${ANDROID_REPO_SETUP_SOURCE:-0}" = 1 ]; then
-        CARGO_TARGET_DIR="$stage/target" cargo install --locked --root "$stage" --git https://github.com/lambdawalker/gradle.android-repo-setup.git --tag "$pin" android-repo-setup
+        source_install --tag "$pin"
       else
       case "$(uname -s):$(uname -m)" in
         Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
@@ -38,11 +48,10 @@ if [ ! -x "$exe" ]; then
       chmod +x "$stage/bin/android-repo-setup"
       fi
       ;;
-    *) CARGO_TARGET_DIR="$stage/target" cargo install --locked --root "$stage" --git https://github.com/lambdawalker/gradle.android-repo-setup.git --rev "$pin" android-repo-setup ;;
+    *) source_install --rev "$pin" ;;
   esac
   version=$("$stage/bin/android-repo-setup" --version)
   case "$pin" in v*) [ "$version" = "android-repo-setup ${pin#v}" ] || { echo 'Downloaded CLI version mismatch' >&2; exit 1; };; *) case "$version" in 'android-repo-setup '*) ;; *) echo 'Invalid CLI version' >&2; exit 1;; esac;; esac
-  rm -rf "$stage/target"
   [ ! -e "$cache/$pin" ] || { echo 'Invalid existing cache; remove it and retry' >&2; exit 1; }
   mv "$stage" "$cache/$pin"
   trap - EXIT HUP INT TERM
