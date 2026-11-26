@@ -33,9 +33,10 @@ h1, h2, h3, p { margin-top: 0; }
 .icon-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .icon { width: 17px; height: 17px; flex: none; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .topbar { min-height: 44px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 13px 0 43px; border-bottom: 1px solid var(--line); background: var(--chrome); }
-.brand, .header-tools { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.brand { flex: 1; }
-.brand-title { font-size: 12px; font-weight: 650; white-space: nowrap; }
+.brand, .header-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand { flex: 1; align-self: stretch; }
+.main-menu-toggle { display: grid; place-items: center; flex: none; width: 30px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); font-size: 17px; line-height: 1; }
+.main-menu-toggle:hover, .main-menu-toggle[aria-expanded="false"] { background: var(--elevated); }
 .brand-mark { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--blue); }
 .brand-mark .icon { width: 15px; height: 15px; }
 .module-tabs { display: flex; align-self: stretch; flex: 1; min-width: 0; gap: 2px; overflow-x: auto; padding: 5px 3px 0; scrollbar-width: thin; }
@@ -49,6 +50,8 @@ h1, h2, h3, p { margin-top: 0; }
 .theme-control { display: flex; align-items: center; gap: 7px; }
 .theme-control select { min-height: 27px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); }
 .workspace { --left: 290px; --right: 345px; flex: 1; min-height: 0; display: grid; grid-template-columns: 36px minmax(225px,var(--left)) 6px minmax(310px,1fr) 6px minmax(260px,var(--right)) 34px; gap: 0; padding: 6px 0; }
+.workspace.sidebar-hidden { grid-template-columns: minmax(310px,1fr) 6px minmax(260px,var(--right)) 34px; }
+.workspace.sidebar-hidden > .tool-stripe:first-child, .workspace.sidebar-hidden > #sidebar, .workspace.sidebar-hidden > .divider[aria-label="Resize setup context"] { display: none; }
 .tool-stripe { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 5px; padding-top: 4px; }
 .stripe-button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--muted); }
 .stripe-button:hover, .stripe-button.active { background: var(--elevated); color: var(--blue); }
@@ -171,7 +174,6 @@ dialog::backdrop { background: rgba(7,10,17,.74); }
 }
 @media (max-width: 640px) {
   .topbar { padding: 5px 9px; flex-wrap: wrap; }
-  .brand-title { display: none; }
   .module-tabs { min-width: 120px; }
   .module-tab { max-width: 160px; }
   .header-tools { margin-left: auto; }

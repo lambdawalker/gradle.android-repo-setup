@@ -227,14 +227,16 @@ environments, and GitHub workflows. Available operations depend on the
 discovered application and library modules. After Gradle discovery, the header
 shows one tab for each discovered Android or JVM module. The Actions panel
 shows the operations applicable to the active module; shared operations such as
-GitHub workflows retain one repository-wide selection. The module checkboxes
-control which modules are configured. The workspace groups **Actions**,
+GitHub workflows retain one repository-wide selection. Opening the private link
+starts Gradle discovery and saves the discovered module inventory, retaining
+previously excluded modules. The browser proceeds directly to the module action
+tabs; use `android-repo-setup select-modules` to change which modules are included.
+The workspace groups **Actions**,
 **Settings**, **Overview**, and **Process output** beside progress and, when
 available, generated-file details. Select steps, review their target and
-changes, and respond to confirmations in the wizard. Launching the site alone
-does not change the repository. Continuing past module selection saves the
-selected module inventory; starting the chosen setup operations can create
-missing workflow files before asking whether to replace modified ones.
+changes, and respond to confirmations in the wizard. Starting the chosen setup
+operations can create missing workflow files before asking whether to replace
+modified ones.
 Workflow replacements and signing or publishing changes retain the CLI's
 explicit confirmation steps. Headless and CI commands continue to use the CLI
 directly.

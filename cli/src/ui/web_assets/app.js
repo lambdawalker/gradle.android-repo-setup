@@ -80,6 +80,14 @@ let activeModule = (() => { try { return sessionStorage.getItem(moduleFocusKey) 
 let availableModules = [];
 let moduleTabsKey = "";
 
+$("sidebar-menu").addEventListener("click", () => {
+  const hidden = $("workspace").classList.toggle("sidebar-hidden");
+  const label = hidden ? "Show repository panels" : "Hide repository panels";
+  $("sidebar-menu").setAttribute("aria-expanded", String(!hidden));
+  $("sidebar-menu").setAttribute("aria-label", label);
+  $("sidebar-menu").title = label;
+});
+
 const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
 function activateTab(tab, focus = false) {
   activeTab = tab.id.slice("tab-".length);
@@ -631,7 +639,7 @@ function renderModuleDetail() {
   $("detail-content").replaceChildren(module ?
     el("h3", module.path) : el("h3", "Repository setup"),
     el("p", module ? `${moduleKind(module.kind)} · ${module.directory || "."}\n${module.selected ? "Included in repository setup." : "Not selected for repository setup."}\nRelevant setup areas: ${moduleSetupAreas(module)}. Operations run for the repository and its selected modules.` :
-      "Discover modules, select the ones to configure, then review repository setup operations."));
+      "Gradle discovery will show each supported module in a tab with its setup actions."));
 }
 function markModuleTabs() {
   for (const tab of $("module-tabs").children) {
@@ -779,7 +787,7 @@ function renderOverview(data) {
   const module = availableModules.find(item => item.id === activeModule);
   if (module) {
     add("Focused module", `${module.path} · ${moduleKind(module.kind)}\n${module.directory || "."}`);
-    add("Setup selection", module.selected ? "Included in repository setup." : "Not selected for repository setup. Select it in the module checklist to include it.");
+    add("Setup selection", module.selected ? "Included in repository setup." : "Not selected for repository setup. Run android-repo-setup select-modules to include it.");
     add("Relevant setup areas", moduleSetupAreas(module));
   }
   const selectedValues = data.prompt?.kind === "menu" && promptId === data.prompt.id ?
@@ -935,7 +943,9 @@ async function bootstrap() {
     csrf = credentials.csrf;
     rememberSession();
     $("close-button").disabled = false;
-    await refresh();
+    // Discover modules and show their available actions as soon as the local
+    // session opens; the browser has no separate module-selection screen.
+    await startSetup();
     poll();
   } catch (error) { setProblem(error.message); }
 }
