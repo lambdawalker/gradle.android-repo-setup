@@ -52,6 +52,13 @@ struct Session {
     authenticated: bool,
 }
 
+#[derive(Clone, Copy)]
+enum WorkerAction {
+    Setup,
+    ViewVault,
+    RemakeVault,
+}
+
 fn regular_directory(root: &Path, relative: &Path) -> bool {
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -165,6 +172,7 @@ struct Server {
     revision: u64,
     phase: &'static str,
     status: &'static str,
+    operation: &'static str,
     notes: String,
     last_chunk: String,
     closing: bool,
@@ -195,6 +203,7 @@ impl Server {
             revision: 0,
             phase: "ready",
             status: "idle",
+            operation: "setup",
             notes: String::new(),
             last_chunk: String::new(),
             closing: false,
@@ -288,6 +297,22 @@ impl Server {
     }
 
     fn start(&mut self) -> std::result::Result<(), (u16, &'static str)> {
+        self.start_worker(WorkerAction::Setup)
+    }
+
+    fn vault_action(&mut self, action: &str) -> std::result::Result<(), (u16, &'static str)> {
+        let action = match action {
+            "view-vault" => WorkerAction::ViewVault,
+            "remake-vault" => WorkerAction::RemakeVault,
+            _ => return Err((400, "Unknown vault action.")),
+        };
+        self.start_worker(action)
+    }
+
+    fn start_worker(
+        &mut self,
+        action: WorkerAction,
+    ) -> std::result::Result<(), (u16, &'static str)> {
         if self.closing || self.pending.is_some() || self.status == "running" {
             return Err((409, "Setup is already active."));
         }
@@ -301,11 +326,22 @@ impl Server {
         let sender = self.sender.clone();
         let root = self.root.clone();
         let created_vault = self.created_vault;
-        self.created_vault = false;
+        if matches!(action, WorkerAction::Setup) {
+            self.created_vault = false;
+        }
         self.notes.clear();
         self.last_chunk.clear();
         self.status = "running";
-        self.phase = "modules";
+        self.operation = match action {
+            WorkerAction::Setup => "setup",
+            WorkerAction::ViewVault => "view-vault",
+            WorkerAction::RemakeVault => "remake-vault",
+        };
+        self.phase = if matches!(action, WorkerAction::Setup) {
+            "modules"
+        } else {
+            "vault"
+        };
         self.revision += 1;
         self.worker = Some(thread::spawn(move || {
             PRIVATE_WORKER.with(|private| private.set(true));
@@ -317,11 +353,21 @@ impl Server {
                 });
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                setup::run(&root, created_vault)
+                match action {
+                    WorkerAction::Setup => setup::run(&root, created_vault),
+                    WorkerAction::ViewVault => {
+                        vault::view(&setup::signing_config(&root)?)?;
+                        Ok(())
+                    }
+                    WorkerAction::RemakeVault => {
+                        vault::remake(&setup::signing_config(&root)?)?;
+                        Ok(())
+                    }
+                }
             }))
             .unwrap_or_else(|_| {
                 Err(anyhow!(
-                    "Setup stopped unexpectedly. Rerun to inspect saved progress."
+                    "Wizard operation stopped unexpectedly. Rerun to inspect saved progress."
                 ))
             });
             let notes = CLIENT.with(|client| {
@@ -492,6 +538,7 @@ impl Server {
         let lines = self.notes.lines().map(str::to_owned).collect::<Vec<_>>();
         json!({
             "revision":self.revision,"phase":self.phase,"status":self.status,
+            "operation":self.operation,
             "prompt":self.pending.as_ref().map(Pending::public),
             "notes":lines,
             "context":{"repository":repository,"root":self.root,"modules":modules,"publishing":publishing,"vaultExists":vault_exists},
@@ -685,6 +732,17 @@ impl Server {
                             Response::json(200, self.snapshot())
                         }
                         Err((code, message)) => Response::json_error(code, &message),
+                    },
+                    "/api/vault-action" => match self.vault_action(
+                        input.get("action").and_then(Value::as_str).unwrap_or(""),
+                    ) {
+                        Ok(()) => {
+                            if let Some(session) = &mut self.session {
+                                session.last_seen = Instant::now();
+                            }
+                            Response::json(200, self.snapshot())
+                        }
+                        Err((code, message)) => Response::json_error(code, message),
                     },
                     "/api/activity" => {
                         if let Some(session) = &mut self.session {
@@ -1538,6 +1596,88 @@ mod tests {
                 .status,
             204
         );
+    }
+
+    #[test]
+    fn vault_actions_require_an_unlocked_idle_session_and_valid_action() {
+        let mut server = server();
+        let (bearer, csrf) = login(&mut server);
+        let send = |server: &mut Server, action: &str| {
+            server.handle(
+                request(
+                    "POST",
+                    "/api/vault-action",
+                    json!({"action":action}),
+                    Some((&bearer, &csrf)),
+                ),
+                HOST,
+            )
+        };
+        assert_eq!(
+            server
+                .handle(
+                    request(
+                        "POST",
+                        "/api/vault-action",
+                        json!({"action":"view-vault"}),
+                        None,
+                    ),
+                    HOST,
+                )
+                .status,
+            401
+        );
+        let mut missing_csrf = request(
+            "POST",
+            "/api/vault-action",
+            json!({"action":"view-vault"}),
+            Some((&bearer, &csrf)),
+        );
+        missing_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(missing_csrf, HOST).status, 403);
+        server.session.as_mut().unwrap().locked = true;
+        assert_eq!(send(&mut server, "view-vault").status, 423);
+        assert!(server.snapshot().get("operation").is_none());
+        {
+            let session = server.session.as_mut().unwrap();
+            session.locked = false;
+            session.last_seen = Instant::now() - IDLE_LIMIT - Duration::from_secs(1);
+        }
+        assert_eq!(send(&mut server, "view-vault").status, 423);
+        {
+            let session = server.session.as_mut().unwrap();
+            session.locked = false;
+            session.last_seen = Instant::now();
+        }
+        assert_eq!(send(&mut server, "invalid").status, 400);
+
+        let (reply, _) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 1,
+            question: Question::Confirm("Continue setup?".into()),
+            reply,
+            keys: Vec::new(),
+            key_status: None,
+        });
+        assert_eq!(send(&mut server, "remake-vault").status, 409);
+        server.pending = None;
+        server.status = "running";
+        assert_eq!(send(&mut server, "view-vault").status, 409);
+        server.status = "idle";
+
+        server.created_vault = true;
+        let response = send(&mut server, "view-vault");
+        assert_eq!(response.status, 200);
+        assert_eq!(server.phase, "vault");
+        assert_eq!(server.snapshot()["operation"], "view-vault");
+        assert!(server.created_vault);
+        let worker = server.worker.take().unwrap();
+        assert!(worker.join().unwrap().is_err()); // The test root has no setup config.
+        server.drain_updates();
+        assert_eq!(server.status, "error");
+        assert_eq!(send(&mut server, "remake-vault").status, 200);
+        assert_eq!(server.snapshot()["operation"], "remake-vault");
+        server.worker.take().unwrap().join().unwrap().unwrap_err();
     }
 
     #[test]

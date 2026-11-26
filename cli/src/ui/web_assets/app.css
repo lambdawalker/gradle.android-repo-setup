@@ -32,9 +32,19 @@ button { cursor: pointer; }
 h1, h2, h3, p { margin-top: 0; }
 .icon-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .icon { width: 17px; height: 17px; flex: none; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
-.topbar { min-height: 44px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 13px 0 43px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+.topbar { position: relative; z-index: 5; min-height: 44px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 0 13px 0 43px; border-bottom: 1px solid var(--line); background: var(--chrome); }
 .brand, .header-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand { flex: 1; align-self: stretch; }
+.main-menu-wrap { position: relative; display: flex; align-items: center; flex: none; }
+.main-menu-trigger { min-height: 28px; padding: 3px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); font-size: 12px; }
+.main-menu-trigger:hover, .main-menu-trigger[aria-expanded="true"] { background: var(--elevated); }
+.main-menu-panel { position: absolute; top: calc(100% + 5px); left: 0; z-index: 10; width: max-content; min-width: 230px; max-width: calc(100vw - 20px); padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: var(--chrome); box-shadow: 0 10px 30px #0006; }
+.menu-section-label { padding: 5px 11px 4px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.main-menu-panel [role="menuitem"] { display: block; width: 100%; padding: 6px 11px; border: 0; border-radius: 4px; background: transparent; color: var(--text); text-align: left; white-space: nowrap; font-size: 12px; }
+.main-menu-panel [role="menuitem"]:is(:hover, :focus-visible) { background: var(--selected); }
+.main-menu-panel [role="menuitem"]:disabled { color: var(--muted); cursor: default; opacity: .6; }
+.main-menu-panel [role="menuitem"]:disabled:hover { background: transparent; }
+.menu-separator { height: 1px; margin: 5px 4px; background: var(--line); }
 .main-menu-toggle { display: grid; place-items: center; flex: none; width: 30px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); font-size: 17px; line-height: 1; }
 .main-menu-toggle:hover, .main-menu-toggle[aria-expanded="false"] { background: var(--elevated); }
 .brand-mark { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--blue); }

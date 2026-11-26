@@ -127,6 +127,99 @@ $("sidebar-menu").addEventListener("click", () => {
   $("sidebar-menu").title = label;
 });
 
+const mainMenuButton = $("main-menu-button");
+const mainMenuPanel = $("main-menu-panel");
+const mainMenuWrap = mainMenuButton.parentElement;
+const vaultMenuItems = [$("menu-view-vault"), $("menu-remake-vault")];
+function menuItems() {
+  return [...mainMenuPanel.querySelectorAll('[role="menuitem"]:not(:disabled)')];
+}
+function closeMainMenu(restoreFocus = false) {
+  if (mainMenuPanel.hidden) return;
+  mainMenuPanel.hidden = true;
+  mainMenuButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) mainMenuButton.focus();
+}
+function openMainMenu(focus = false, last = false) {
+  mainMenuPanel.hidden = false;
+  mainMenuButton.setAttribute("aria-expanded", "true");
+  if (focus) {
+    const items = menuItems();
+    (last ? items.at(-1) : items[0])?.focus();
+  }
+}
+function syncMainMenu() {
+  const ready = Boolean(session) && !pending && !closed && !closingRequested && !locked &&
+    (state?.prompt?.kind === "menu" || ["idle", "finished", "error"].includes(state?.status));
+  const reason = ready ? "Open vault controls" : locked || state?.status === "locked" ?
+    "Unlock the vault to use these controls" : "Available while choosing tasks or after setup stops";
+  for (const item of vaultMenuItems) {
+    item.disabled = !ready;
+    item.title = reason;
+    item.setAttribute("aria-description", reason);
+  }
+  $("menu-close-wizard").disabled = !session || closed || closingRequested || locked || state?.status === "closing" || state?.status === "locked";
+  if (!mainMenuPanel.hidden && !mainMenuWrap.contains(document.activeElement)) closeMainMenu();
+}
+mainMenuButton.addEventListener("click", event => mainMenuPanel.hidden ? openMainMenu(event.detail === 0) : closeMainMenu());
+mainMenuButton.addEventListener("keydown", event => {
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    openMainMenu(true, event.key === "ArrowUp");
+  }
+});
+mainMenuPanel.addEventListener("keydown", event => {
+  const items = menuItems();
+  const index = items.indexOf(document.activeElement);
+  if (event.key === "Escape") { event.preventDefault(); closeMainMenu(true); return; }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    closeMainMenu();
+    (event.shiftKey ? mainMenuButton : $("sidebar-menu")).focus();
+    return;
+  }
+  const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 :
+    event.key === "ArrowDown" ? (index + 1) % items.length :
+      event.key === "ArrowUp" ? (index + items.length - 1) % items.length : -1;
+  if (next >= 0) { event.preventDefault(); items[next]?.focus(); }
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !mainMenuPanel.hidden) { event.preventDefault(); closeMainMenu(true); }
+});
+document.addEventListener("pointerdown", event => {
+  if (!mainMenuPanel.hidden && !mainMenuWrap.contains(event.target)) closeMainMenu();
+});
+document.addEventListener("focusin", event => {
+  if (!mainMenuPanel.hidden && !mainMenuWrap.contains(event.target)) closeMainMenu();
+});
+$("menu-toggle-panels").addEventListener("click", () => {
+  closeMainMenu();
+  $("sidebar-menu").click();
+});
+$("menu-close-wizard").addEventListener("click", () => {
+  closeMainMenu();
+  $("close-button").click();
+});
+async function runVaultMenuAction(action) {
+  const menuPrompt = state?.prompt?.kind === "menu";
+  closeMainMenu();
+  if (pending || locked || closed || closingRequested || !session) return;
+  if (menuPrompt) { await submitPrompt(action); return; }
+  if (!["idle", "finished", "error"].includes(state?.status)) return;
+  pending = true;
+  updateFooter();
+  try {
+    const data = await request("/api/vault-action", "POST", {action});
+    if (data?.revision != null) {
+      lastRevision = Number(data.revision);
+      renderState(data);
+    } else await refresh();
+  } catch (error) { setProblem(error.message); }
+  finally { pending = false; updateFooter(); }
+}
+$("menu-view-vault").addEventListener("click", () => runVaultMenuAction("view-vault"));
+$("menu-remake-vault").addEventListener("click", () => runVaultMenuAction("remake-vault"));
+
 const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
 function activateTab(tab, focus = false) {
   activeTab = tab.id.slice("tab-".length);
@@ -186,12 +279,6 @@ function setProblem(message) {
     problem.hidden = !message;
   }
 }
-function showNotice(title, message) {
-  if (locked) return;
-  $("notice-title").textContent = title;
-  $("notice-body").textContent = message;
-  $("notice-dialog").showModal();
-}
 let locked = false;
 let vaultMode = "unlock";
 let vaultWorkerPromptId = null;
@@ -213,7 +300,6 @@ function closeVaultDialog() {
   vaultWorkerPromptId = null;
 }
 function openVaultDialog(title, description, mode, confirm = false) {
-  if ($("notice-dialog").open) $("notice-dialog").close();
   vaultMode = mode;
   $("vault-title").textContent = title;
   $("vault-description").textContent = description;
@@ -275,7 +361,6 @@ async function unlockWizard() {
   }
   if (start) await startSetup();
 }
-$("notice-close").addEventListener("click", () => $("notice-dialog").close());
 $("vault-dialog").addEventListener("cancel", event => event.preventDefault());
 $("vault-form").addEventListener("submit", event => {
   event.preventDefault();
@@ -585,6 +670,9 @@ function loadingState(title, message) {
   container.firstChild.setAttribute("aria-hidden", "true");
   return container;
 }
+function vaultActionLabel(data) {
+  return data.operation === "view-vault" ? "View vault" : data.operation === "remake-vault" ? "Remake vault" : "";
+}
 function renderChoice(prompt, multiple) {
   const grid = el("div", "", "action-grid");
   for (const option of prompt.options || []) {
@@ -653,16 +741,6 @@ function renderPrompt(prompt) {
       container.append(scope);
     }
     container.append(renderChoice(prompt, true));
-    const secondary = el("div", "", "secondary-actions");
-    if (prompt.kind === "menu") {
-      for (const [label, value] of [["What will this do?", "help"], ["View vault", "view-vault"], ["Remake vault", "remake-vault"]]) {
-        const button = el("button", label, "button outline");
-        button.type = "button";
-        button.addEventListener("click", () => value === "help" ? showNotice("Selected setup tasks", selectedHelp()) : submitPrompt(value));
-        secondary.append(button);
-      }
-      container.append(secondary);
-    }
     card.textContent = prompt.kind === "menu" ? "Setup selected tasks" : "Continue";
     container.addEventListener("change", () => {
       updateFooter();
@@ -725,12 +803,6 @@ function renderPrompt(prompt) {
   startCountdown(prompt);
   schedulePreparedAnswer(prompt);
   requireResumeOnRestore = false;
-}
-function selectedHelp() {
-  const options = state?.prompt?.options || [];
-  const selected = new Set(selectedMenuCards().map(card => card.querySelector('input[type="checkbox"]').value));
-  const help = options.filter(option => selected.has(option.value)).map(option => `${option.label}\n${option.description || "No further details available."}`);
-  return help.join("\n\n") || "Select a task to read its description.";
 }
 function promptValue(prompt, action) {
   if (action !== "primary") return action;
@@ -827,6 +899,7 @@ function finishClose() {
   $("back-button").hidden = true;
   $("continue-button").hidden = true;
   $("close-button").disabled = true;
+  syncMainMenu();
 }
 async function startSetup() {
   if (pending || closed) return;
@@ -839,6 +912,7 @@ async function startSetup() {
 function updateFooter() {
   const prompt = state?.prompt;
   const primary = $("continue-button");
+  syncMainMenu();
   if (closed || closingRequested || state?.status === "closing" || state?.status === "locked") {
     primary.disabled = true;
     $("back-button").hidden = true;
@@ -850,7 +924,7 @@ function updateFooter() {
   if (pending) { primary.disabled = true; return; }
   if (["idle", "finished", "error"].includes(state?.status)) {
     primary.hidden = false;
-    primary.textContent = state.status === "idle" ? "Start setup" : "Run setup again";
+    primary.textContent = state.status === "idle" || vaultActionLabel(state) ? "Start setup" : "Run setup again";
     primary.disabled = false;
     $("back-button").hidden = true;
     return;
@@ -866,6 +940,13 @@ function updateFooter() {
 }
 
 function renderProgress(data) {
+  const vaultLabel = vaultActionLabel(data);
+  if (vaultLabel) {
+    const item = el("li", vaultLabel, data.status === "finished" ? "complete" : data.status === "error" ? "failed" : "current");
+    if (data.status === "running") item.setAttribute("aria-current", "step");
+    $("phase-list").replaceChildren(item);
+    return;
+  }
   const phases = [
     ["repository", "Inspect repository"], ["actions", "Choose tasks"], ["configure", "Configure"],
     ["review", "Review changes"], ["apply", "Apply setup"], ["complete", "Finish"],
@@ -1104,7 +1185,8 @@ function renderOverview(data) {
     card.append(el("h2", title), el("p", value));
     content.append(card);
   };
-  add("Current step", data.prompt?.label || data.phase || "Ready to start");
+  const vaultLabel = vaultActionLabel(data);
+  add(vaultLabel ? "Vault action" : "Current step", data.prompt?.label || vaultLabel || data.phase || "Ready to start");
   const module = availableModules.find(item => item.id === activeModule);
   if (module) {
     add("Focused module", `${module.path} · ${moduleKind(module.kind)}\n${module.directory || "."}`);
@@ -1117,12 +1199,13 @@ function renderOverview(data) {
     .filter(option => selectedValues ? selectedValues.has(option.value) : option.selected && operationAppliesToModule(option.id, module))
     .map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
-  if (data.status === "error") add("Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
-  if (data.status === "finished") add("Setup finished", "Review the generated files and the process output.");
+  if (data.status === "error") add(vaultLabel ? `${vaultLabel} needs attention` : "Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
+  if (data.status === "finished") add(vaultLabel ? `${vaultLabel} complete` : "Setup finished", vaultLabel ? "Review the result in Process output." : "Review the generated files and the process output.");
   add("Module artifacts", `${(data.moduleArtifacts?.[activeModule] || []).length} known`);
 }
 function renderState(data) {
   state = data;
+  const vaultLabel = vaultActionLabel(data);
   if (data.status === "closed") { finishClose(); return; }
   if (vaultWorkerPromptId != null && !isVaultPrompt(data.prompt)) closeVaultDialog();
   if (data.status === "finished" || data.status === "error") { clearPreparedValues(); lastMenuOptions = null; }
@@ -1180,23 +1263,26 @@ function renderState(data) {
     }
     else {
       stopCountdown();
-      $("settings-content").replaceChildren(el("p", data.status === "running" ? "Working… Accepted answers are saved as setup progresses." : "Choose an action to inspect its settings.", "empty-state"));
+      $("settings-content").replaceChildren(el("p", data.status === "running" ? vaultLabel ? "Complete the vault action in the secure dialog or Settings." : "Working… Accepted answers are saved as setup progresses." : "Choose an action to inspect its settings.", "empty-state"));
       if (data.status === "idle") $("action-content").replaceChildren(el("p", "Start the local setup to choose repository tasks.", "empty-state"));
-      else if (data.status === "running") $("action-content").replaceChildren(data.phase === "modules" ?
+      else if (data.status === "running") $("action-content").replaceChildren(vaultLabel ?
+        loadingState(vaultLabel, "The next vault step will appear when it is ready.") : data.phase === "modules" ?
         loadingState("Discovering modules and apps", "Gradle is inspecting this repository. Available actions will appear under each module tab.") :
         loadingState("Preparing setup", "The next setup step will appear when the current operation is ready."));
       else if (data.status === "finished" || data.status === "error") {
-        $("action-content").replaceChildren(el("p", data.status === "finished" ? "Setup finished. Review the results in Overview and Process output." : "Setup needs attention. Review Process output for recovery steps.", "empty-state"));
-        activateTab($(data.status === "error" ? "tab-output" : "tab-overview"));
+        $("action-content").replaceChildren(el("p", vaultLabel ?
+          `${vaultLabel} ${data.status === "finished" ? "complete" : "needs attention"}. Review Process output for details.` :
+          data.status === "finished" ? "Setup finished. Review the results in Overview and Process output." : "Setup needs attention. Review Process output for recovery steps.", "empty-state"));
+        activateTab($(vaultLabel || data.status === "error" ? "tab-output" : "tab-overview"));
       }
     }
   }
   lastStatus = data.status;
   lastPhase = data.phase;
-  if (!data.prompt && data.status === "running") $("footer-status").textContent = "Working on your repository…";
+  if (!data.prompt && data.status === "running") $("footer-status").textContent = vaultLabel ? `${vaultLabel} in progress…` : "Working on your repository…";
   else if (!data.prompt && data.status === "idle") $("footer-status").textContent = "Ready to set up this repository";
-  else if (!data.prompt && data.status === "finished") $("footer-status").textContent = "Setup complete";
-  else if (!data.prompt && data.status === "error") $("footer-status").textContent = "Setup needs attention; review the process output";
+  else if (!data.prompt && data.status === "finished") $("footer-status").textContent = vaultLabel ? `${vaultLabel} complete; review Process output` : "Setup complete";
+  else if (!data.prompt && data.status === "error") $("footer-status").textContent = vaultLabel ? `${vaultLabel} needs attention; review Process output` : "Setup needs attention; review the process output";
   else if (data.status === "closing") $("footer-status").textContent = "Stop requested; waiting for cleanup…";
   else if (data.prompt && paused) updateCountdownLabel();
   if (!data.prompt && ["idle", "finished", "error"].includes(data.status)) requireResumeOnRestore = false;

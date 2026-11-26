@@ -17,27 +17,27 @@ const OPERATIONS: [(&str, &str, &str); 5] = [
     (
         "key",
         "APK signing key",
-        "Create or verify the local APK signing keystore.",
+        "Create or verify a local APK signing keystore, save its credentials in the encrypted vault, and write the public Android association file for the app.",
     ),
     (
         "local",
         "Local Gradle signing",
-        "Write the saved signing identity to ignored local.properties for local builds.",
+        "Write the saved keystore path and signing passwords to ignored local.properties for local builds. Requires an APK signing key and asks before writing plaintext credentials.",
     ),
     (
         "github",
         "APK signing environment",
-        "Configure the GitHub APK signing environment and signing secrets.",
+        "Configure the GitHub APK signing environment and upload missing signing secrets from the local keystore. Existing secrets are preserved; the repository's branch policy is checked.",
     ),
     (
         "publishing",
         "Publishing environments",
-        "Review publishing credentials and configure GitHub Pages to deploy from Actions.",
+        "Review shared library publishing credentials, create or update the required GitHub environments, and set GitHub Pages to deploy from Actions.",
     ),
     (
         "workflows",
         "GitHub workflows",
-        "Generate missing workflows and review changes before replacing existing files.",
+        "Generate missing GitHub Actions workflows for the selected module or repository, then review proposed changes before replacing existing files.",
     ),
 ];
 

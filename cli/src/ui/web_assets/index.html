@@ -19,7 +19,20 @@
   </svg>
   <header class="topbar">
     <div class="brand">
-      <button id="sidebar-menu" class="main-menu-toggle" type="button" aria-label="Hide repository panels" title="Hide repository panels" aria-controls="sidebar" aria-expanded="true"><span aria-hidden="true">☰</span></button>
+      <div class="main-menu-wrap">
+        <button id="main-menu-button" class="main-menu-trigger" type="button" aria-label="File menu" aria-haspopup="menu" aria-controls="main-menu-panel" aria-expanded="false">File</button>
+        <div id="main-menu-panel" class="main-menu-panel" role="menu" aria-label="File" hidden>
+          <div role="group" aria-label="Vault">
+            <div class="menu-section-label" aria-hidden="true">Vault</div>
+            <button id="menu-view-vault" type="button" role="menuitem" disabled>View vault</button>
+            <button id="menu-remake-vault" type="button" role="menuitem" disabled>Remake vault</button>
+          </div>
+          <div class="menu-separator" role="separator"></div>
+          <button id="menu-toggle-panels" type="button" role="menuitem">Toggle repository panels</button>
+          <button id="menu-close-wizard" type="button" role="menuitem" disabled>Close wizard</button>
+        </div>
+      </div>
+      <button id="sidebar-menu" class="main-menu-toggle" type="button" aria-label="Hide repository panels" title="Hide repository panels" aria-controls="sidebar" aria-expanded="true"><span aria-hidden="true">▥</span></button>
       <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#icon-layers"></use></svg></span>
       <nav id="module-tabs" class="module-tabs" aria-label="Discovered modules" hidden></nav>
     </div>
@@ -74,7 +87,6 @@
     <nav class="tool-stripe right-stripe" aria-label="Artifact tools"><button id="stripe-details" class="stripe-button active" type="button" aria-label="Collapse details" aria-expanded="true" title="Details"><svg class="icon"><use href="#icon-file"></use></svg></button></nav>
   </main>
   <footer class="action-bar" id="action-bar"><p id="footer-status" role="status">Connecting to the local setup wizard…</p><div class="footer-actions"><button id="back-button" class="button outline" type="button" hidden>Back / Cancel</button><button id="pause-button" class="button outline" type="button" hidden>Pause</button><button id="continue-button" class="button primary" type="button" disabled>Continue</button><button id="close-button" class="button outline" type="button" disabled>Close wizard</button></div></footer>
-  <dialog id="notice-dialog" aria-labelledby="notice-title"><div class="dialog-heading"><h2 id="notice-title">Details</h2></div><div id="notice-body" class="dialog-body"></div><div class="dialog-actions"><button id="notice-close" class="button primary" type="button">Close</button></div></dialog>
   <dialog id="vault-dialog" aria-labelledby="vault-title" aria-describedby="vault-description">
     <div class="dialog-heading"><h2 id="vault-title">Unlock local vault</h2></div>
     <form id="vault-form" autocomplete="off">
