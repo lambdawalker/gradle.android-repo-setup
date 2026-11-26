@@ -129,7 +129,6 @@ h1, h2, h3, p { margin-top: 0; }
 .action-card:hover, .action-card:focus-within { border-color: var(--blue); }
 .action-card.focused-module { box-shadow: inset 3px 0 0 var(--blue); }
 .action-card:has(input:checked) { border-color: var(--blue); background: var(--selected); }
-.action-scope { margin: 9px 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--muted); font-size: 11.5px; }
 .action-card input { grid-row: 1 / span 2; width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--blue); }
 .action-title { font-size: 12px; font-weight: 650; }
 .action-description { grid-column: 2; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }

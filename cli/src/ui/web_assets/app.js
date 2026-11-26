@@ -722,7 +722,7 @@ function renderPrompt(prompt) {
   const title = prompt.label || (prompt.kind === "menu" ? "Choose setup tasks" : "Configure setup");
   const container = ["menu", "modules"].includes(prompt.kind) ? actions : settings;
   if (container === settings) actions.append(el("p", "Continue the current setup question in Settings.", "empty-state"));
-  container.append(el("h2", title, "prompt-title"));
+  if (prompt.kind !== "menu") container.append(el("h2", title, "prompt-title"));
   const card = $("continue-button");
   card.hidden = false;
   $("back-button").hidden = prompt.kind === "menu";
@@ -731,21 +731,14 @@ function renderPrompt(prompt) {
   card.textContent = "Continue";
 
   if (prompt.kind === "menu" || prompt.kind === "modules") {
-    const note = el("p", prompt.kind === "menu" ?
-      "Choose setup operations for the active module. Signing identity, local.properties, and publishing credentials can be shared across the repository." :
-      "Choose the modules and apps this repository should configure. Header tabs show module details; use these checkboxes to change the setup selection.", "prompt-help");
-    container.append(note);
-    if (prompt.kind === "menu") {
-      const scope = el("p", "", "action-scope");
-      scope.id = "action-scope";
-      container.append(scope);
-    }
+    if (prompt.kind === "modules") container.append(el("p",
+      "Choose the modules and apps this repository should configure. Header tabs show module details; use these checkboxes to change the setup selection.", "prompt-help"));
     container.append(renderChoice(prompt, true));
     card.textContent = prompt.kind === "menu" ? "Setup selected tasks" : "Continue";
     container.addEventListener("change", () => {
       updateFooter();
       if (prompt.kind === "modules") syncModuleSelection();
-      else { saveMenuSelection(); renderMenuScope(); renderOverview(state); }
+      else { saveMenuSelection(); renderMenuCards(); renderOverview(state); }
     });
   } else if (prompt.kind === "text") {
     const input = field(title, prompt.default, Boolean(prompt.secret));
@@ -797,7 +790,7 @@ function renderPrompt(prompt) {
   container.append(error);
   chooseTabFor(prompt);
   highlightModuleChoice();
-  renderMenuScope();
+  renderMenuCards();
   renderSettingsGroups(state);
   updateFooter();
   startCountdown(prompt);
@@ -1010,22 +1003,15 @@ function saveMenuSelection() {
   if (state?.prompt?.kind !== "menu" || !activeModule) return;
   menuSelections.set(activeModule, new Set(selectedMenuCards().map(card => card.querySelector("input").value)));
 }
-function renderMenuScope() {
+function renderMenuCards() {
   if (state?.prompt?.kind !== "menu") return;
-  const scope = $("action-scope");
-  if (!scope) return;
   const module = availableModules.find(item => item.id === activeModule);
   const cards = [...$("action-content").querySelectorAll(".action-card")];
   const selectedValues = menuSelections.get(activeModule);
   for (const card of cards) {
-    card.hidden = Boolean(module) && !operationAppliesToModule(card.dataset.operationId, module);
+    card.hidden = !operationAppliesToModule(card.dataset.operationId, module);
     if (selectedValues) card.querySelector("input").checked = selectedValues.has(card.querySelector("input").value);
   }
-  const selected = selectedMenuCards();
-  const count = `${selected.length} ${selected.length === 1 ? "action" : "actions"} selected for this tab`;
-  scope.textContent = !module ? "Choose a module tab to see its actions." : !module.selected ?
-    `${module.path} is not selected for setup. Run the terminal module selector to include it.` :
-    `Showing ${module.path}. ${count}. Setup selected tasks runs only these actions; signing files and publishing credentials can be shared across the repository.`;
 }
 function renderModuleDetail() {
   if (selectedDetail) return;
@@ -1063,7 +1049,7 @@ function selectModule(id, focus = false) {
     renderOverview(state);
   }
   highlightModuleChoice();
-  renderMenuScope();
+  renderMenuCards();
   renderSettingsGroups(state);
   if (state) renderArtifacts(state);
   updateFooter();
