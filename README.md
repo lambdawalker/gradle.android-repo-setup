@@ -192,10 +192,64 @@ Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
 `.exe` extension. It reads the existing `.project/setup/config.yaml`.
 
-Running `android-repo-setup` opens the [iocraft](https://github.com/ccbrown/iocraft) deployment wizard. It includes
-APK signing, GitHub signing and publishing environments, workflow previews,
-and vault viewing and recreation. The standalone `signing` and
-`setup_github_environments` commands use the same interface.
+Running `android-repo-setup` opens the [iocraft](https://github.com/ccbrown/iocraft)
+terminal setup wizard. It includes APK signing, GitHub signing and publishing
+environments, workflow previews, and vault viewing and recreation. The
+standalone `signing` and `setup_github_environments` commands use the same
+terminal interface.
+
+### Browser setup wizard
+
+From an Android repository, start the local browser wizard with the installed
+CLI or its maintained launcher:
+
+```sh
+android-repo-setup setup web
+sh ./setup.sh setup web       # Linux and macOS
+```
+
+On Windows, run `setup.bat setup web`. The launcher uses the repository's
+configured CLI pin. The CLI opens a local browser tab when a desktop browser is
+available and prints an address to open manually if automatic opening fails.
+Pass `--no-open` after `web` to print the local address without trying to open
+a browser, for example `sh ./setup.sh setup web --no-open` or
+`setup.bat setup web --no-open`. The printed link works once. Keep the session
+recovery code printed beside it private; it can unlock this wizard if it locks
+after 30 minutes without operator activity. Keep the CLI running while using
+the wizard; closing it ends the local session. The site runs on loopback and
+is separate from any documentation site or deployed application. Refreshing
+the same browser tab resumes its session using tab-scoped browser storage; a
+new tab cannot reuse the consumed launch link.
+
+The browser presents the same repository setup operations as the terminal:
+APK signing key, local Gradle signing, APK signing environment, publishing
+environments, and GitHub workflows. Available operations depend on the
+discovered application and library modules. The workspace groups **Actions**,
+**Settings**, **Overview**, and **Process output** beside progress and, when
+available, generated-file details. Select steps, review their target and
+changes, and respond to confirmations in the wizard. Launching the site alone
+does not change the repository. Continuing past module selection saves the
+selected module inventory; starting the chosen setup operations can create
+missing workflow files before asking whether to replace modified ones.
+Workflow replacements and signing or publishing changes retain the CLI's
+explicit confirmation steps. Headless and CI commands continue to use the CLI
+directly.
+
+The browser uses the existing encrypted setup vault and signing environment
+scope. Creating a vault requires a new password and confirmation; an existing
+vault must be unlocked with its current password. Saved credentials are shown
+only as masked placeholders. Choose **Use vault value** when prompted to keep an
+existing value; an empty replacement is not a general reuse signal. After
+30 minutes without operator activity, enter the saved vault password or the
+CLI-printed recovery code to unlock the browser session. An operation already
+running can finish while the session is locked; new actions wait for unlock.
+The browser does not reveal saved secrets or newly generated passwords. When
+creating an APK keystore in the browser, enter and back up your own store and
+key passwords. For automatically generated APK passwords,
+use the terminal wizard, which can show them for a private backup. Maven/OpenPGP
+key creation also requests the operator's passphrase. Treat the printed local
+launch address as private. Do not expose the local wizard over a network or
+share its session.
 
 ### Public Android signing associations
 
