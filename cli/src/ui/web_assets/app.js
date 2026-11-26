@@ -71,6 +71,7 @@ let selectedDetail = null;
 let pending = false;
 let closed = false;
 let closingRequested = false;
+let disconnected = false;
 let activeTab = "actions";
 let timer = null;
 let deadline = 0;
@@ -149,16 +150,17 @@ function openMainMenu(focus = false, last = false) {
   }
 }
 function syncMainMenu() {
-  const ready = Boolean(session) && !pending && !closed && !closingRequested && !locked &&
+  const ready = Boolean(session) && !pending && !closed && !closingRequested && !locked && !disconnected &&
     (state?.prompt?.kind === "menu" || ["idle", "finished", "error"].includes(state?.status));
   const reason = ready ? "Open vault controls" : locked || state?.status === "locked" ?
-    "Unlock the vault to use these controls" : "Available while choosing tasks or after setup stops";
+    "Unlock the vault to use these controls" : disconnected ?
+      "Waiting for the local CLI to reconnect" : "Available while choosing tasks or after setup stops";
   for (const item of vaultMenuItems) {
     item.disabled = !ready;
     item.title = reason;
     item.setAttribute("aria-description", reason);
   }
-  $("menu-close-wizard").disabled = !session || closed || closingRequested || locked || state?.status === "closing" || state?.status === "locked";
+  $("menu-close-wizard").disabled = !session || closed || closingRequested || locked || disconnected || state?.status === "closing" || state?.status === "locked";
   if (!mainMenuPanel.hidden && !mainMenuWrap.contains(document.activeElement)) closeMainMenu();
 }
 mainMenuButton.addEventListener("click", event => mainMenuPanel.hidden ? openMainMenu(event.detail === 0) : closeMainMenu());
@@ -203,7 +205,7 @@ $("menu-close-wizard").addEventListener("click", () => {
 async function runVaultMenuAction(action) {
   const menuPrompt = state?.prompt?.kind === "menu";
   closeMainMenu();
-  if (pending || locked || closed || closingRequested || !session) return;
+  if (pending || locked || closed || closingRequested || disconnected || !session) return;
   if (menuPrompt) { await submitPrompt(action); return; }
   if (!["idle", "finished", "error"].includes(state?.status)) return;
   pending = true;
@@ -214,7 +216,7 @@ async function runVaultMenuAction(action) {
       lastRevision = Number(data.revision);
       renderState(data);
     } else await refresh();
-  } catch (error) { setProblem(error.message); }
+  } catch (error) { if (!disconnected) setProblem(error.message); }
   finally { pending = false; updateFooter(); }
 }
 $("menu-view-vault").addEventListener("click", () => runVaultMenuAction("view-vault"));
@@ -279,6 +281,18 @@ function setProblem(message) {
     problem.hidden = !message;
   }
 }
+function markDisconnected() {
+  if (closed || !session) return;
+  if (!disconnected) pauseCountdown();
+  disconnected = true;
+  closeMainMenu();
+  $("action-state").textContent = "Reconnecting";
+  $("action-state").className = "state-badge failed";
+  $("footer-status").textContent = "Connection to the local CLI interrupted. Retrying… Keep the launching terminal open.";
+  $("vault-submit").disabled = true;
+  $("vault-cancel").disabled = true;
+  updateFooter();
+}
 let locked = false;
 let vaultMode = "unlock";
 let vaultWorkerPromptId = null;
@@ -329,7 +343,7 @@ function showLock(data) {
     creating ? "create" : "unlock", creating);
 }
 async function unlockWizard() {
-  if (!locked || pending) return;
+  if (!locked || pending || disconnected) return;
   const credential = $("vault-credential").value;
   const confirmation = $("vault-confirmation").value;
   if (vaultMode === "create" && (credential.length < 12 || confirmation !== credential)) {
@@ -352,8 +366,10 @@ async function unlockWizard() {
     renderState(data);
     start = data.status === "idle";
   } catch (error) {
-    vaultProblem(error.message);
-    $("vault-credential").focus();
+    if (!disconnected) {
+      vaultProblem(error.message);
+      $("vault-credential").focus();
+    }
   } finally {
     pending = false;
     $("vault-submit").disabled = false;
@@ -374,7 +390,17 @@ async function request(path, method = "GET", value = null) {
     headers["Content-Type"] = "application/json";
     headers["X-CSRF-Token"] = csrf;
   }
-  const response = await fetch(path, {method, headers, body: value === null ? undefined : JSON.stringify(value), cache: "no-store"});
+  let response;
+  try {
+    response = await fetch(path, {method, headers, body: value === null ? undefined : JSON.stringify(value), cache: "no-store"});
+  } catch (error) {
+    // A POST may have succeeded before the socket failed. Wait for a fresh
+    // state snapshot instead of replaying it against a stale prompt.
+    // Activity reports are best effort; the next state poll decides whether
+    // the actual wizard connection has been interrupted.
+    if (path !== "/api/activity") markDisconnected();
+    throw error;
+  }
   if (response.status === 401 && path !== "/api/unlock") {
     forgetSession();
     clearPreparedValues();
@@ -386,12 +412,16 @@ async function request(path, method = "GET", value = null) {
   }
   if (response.status === 409 && path === "/api/answer") throw new Error("This question changed. Review the current step and try again.");
   if (!response.ok) {
-    const body = (await response.text()).trim();
+    let body;
+    try { body = (await response.text()).trim(); }
+    catch (error) { markDisconnected(); throw error; }
     let message = body;
     try { message = JSON.parse(body).error || body; } catch { /* Plain-text error. */ }
     throw new Error(message || "The local wizard is unavailable.");
   }
-  return response.status === 204 ? null : response.json();
+  if (response.status === 204) return null;
+  try { return await response.json(); }
+  catch (error) { markDisconnected(); throw error; }
 }
 
 function isVaultPrompt(prompt) {
@@ -407,7 +437,7 @@ function showVaultPrompt(prompt) {
 }
 async function answerVaultPrompt(cancel = false) {
   const prompt = state?.prompt;
-  if (locked || pending || !isVaultPrompt(prompt) || vaultWorkerPromptId !== prompt.id) return;
+  if (locked || pending || disconnected || !isVaultPrompt(prompt) || vaultWorkerPromptId !== prompt.id) return;
   const value = $("vault-credential").value;
   if (!cancel && (!value || prompt.label.startsWith("Create vault password") && value.length < 12)) {
     vaultProblem(value ? "Use at least 12 characters." : "Enter the vault passphrase.");
@@ -422,8 +452,10 @@ async function answerVaultPrompt(cancel = false) {
     closeVaultDialog();
     await refresh();
   } catch (error) {
-    vaultProblem(error.message);
-    $("vault-credential").focus();
+    if (!disconnected) {
+      vaultProblem(error.message);
+      $("vault-credential").focus();
+    }
   } finally {
     pending = false;
     $("vault-submit").disabled = false;
@@ -434,7 +466,7 @@ $("vault-cancel").addEventListener("click", () => answerVaultPrompt(true));
 
 let lastActivity = 0;
 function reportActivity(event) {
-  if (!event.isTrusted || !session || closed || closingRequested || locked || document.hidden || Date.now() - lastActivity < 1000) return;
+  if (!event.isTrusted || !session || closed || closingRequested || locked || disconnected || document.hidden || Date.now() - lastActivity < 1000) return;
   lastActivity = Date.now();
   request("/api/activity", "POST", {}).catch(() => {});
 }
@@ -816,7 +848,7 @@ function promptValue(prompt, action) {
 }
 async function submitPrompt(action = "primary") {
   const prompt = state?.prompt;
-  if (!prompt || pending || closed) return;
+  if (!prompt || pending || closed || disconnected) return;
   const value = action === "cancel" && prompt.kind === "confirm" ? false : promptValue(prompt, action);
   if (action === "primary" && ((["menu", "modules"].includes(prompt.kind) && !value.length) ||
       (prompt.kind === "key" && !value) || (prompt.kind === "confirm" && !value))) return;
@@ -837,7 +869,7 @@ async function submitPrompt(action = "primary") {
     await refresh();
   } catch (error) {
     if (menuModule) draftExecution = null;
-    setProblem(error.message);
+    if (!disconnected) setProblem(error.message);
     if (prompt.countdownSeconds && state?.prompt?.id === prompt.id) {
       paused = true;
       $("pause-button").hidden = false;
@@ -854,7 +886,7 @@ $("continue-button").addEventListener("click", () => {
 });
 $("back-button").addEventListener("click", () => submitPrompt("cancel"));
 $("close-button").addEventListener("click", async () => {
-  if (closed || closingRequested) return;
+  if (closed || closingRequested || disconnected) return;
   if (state?.status === "running" && !window.confirm("Stop the current setup? Accepted answers remain saved for a later run.")) return;
   closingRequested = true;
   stopCountdown();
@@ -868,7 +900,7 @@ $("close-button").addEventListener("click", async () => {
     await refresh();
   } catch (error) {
     closingRequested = false;
-    setProblem(error.message);
+    if (!disconnected) setProblem(error.message);
   } finally { updateFooter(); }
 });
 function finishClose() {
@@ -895,17 +927,29 @@ function finishClose() {
   syncMainMenu();
 }
 async function startSetup() {
-  if (pending || closed) return;
+  if (pending || closed || disconnected) return;
   pending = true;
   updateFooter();
   try { await request("/api/start", "POST", {action: "setup"}); await refresh(); }
-  catch (error) { setProblem(error.message); }
+  catch (error) { if (!disconnected) setProblem(error.message); }
   finally { pending = false; updateFooter(); }
 }
 function updateFooter() {
   const prompt = state?.prompt;
   const primary = $("continue-button");
   syncMainMenu();
+  if (disconnected) {
+    primary.disabled = true;
+    $("back-button").disabled = true;
+    $("pause-button").disabled = true;
+    $("close-button").disabled = true;
+    $("vault-submit").disabled = true;
+    $("vault-cancel").disabled = true;
+    return;
+  }
+  $("back-button").disabled = false;
+  $("pause-button").disabled = false;
+  $("vault-cancel").disabled = false;
   if (closed || closingRequested || state?.status === "closing" || state?.status === "locked") {
     primary.disabled = true;
     $("back-button").hidden = true;
@@ -1285,24 +1329,35 @@ function renderState(data) {
 async function refresh() {
   if (closed || !session) return;
   const data = await request("/api/state");
-  if (Number(data.revision) !== lastRevision) {
+  const recovered = disconnected;
+  disconnected = false;
+  if (Number(data.revision) !== lastRevision || recovered) {
     lastRevision = Number(data.revision);
+    // Rendering an unchanged prompt does not replace its inputs. It does
+    // restore the status badge after a transient connection failure.
     renderState(data);
+  }
+  if (recovered) {
+    if (!pending) $("vault-submit").disabled = false;
+    $("vault-cancel").disabled = false;
+    updateFooter();
+    if (data.prompt && !paused && !closed) $("footer-status").textContent = data.prompt.kind === "menu" ?
+      "Connection restored. Choose actions for this module." : "Connection restored. Continue the current step.";
   }
 }
 async function poll() {
   if (closed) return;
   try { await refresh(); }
   catch (error) {
-    setProblem(error.message);
     if (error.unauthorized) {
+      setProblem(error.message);
       closed = true;
       stopCountdown();
       $("continue-button").disabled = true;
       $("close-button").disabled = true;
-    }
+    } else markDisconnected();
   }
-  if (!closed) setTimeout(poll, 500);
+  if (!closed) setTimeout(poll, disconnected ? 2000 : 500);
 }
 
 // Capture the fragment before any request can include it in navigation. The

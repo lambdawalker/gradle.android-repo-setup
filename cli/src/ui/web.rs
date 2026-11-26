@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1010,7 +1010,7 @@ impl Response {
     fn json_error(status: u16, message: &str) -> Self {
         Self::json(status, json!({"error":message}))
     }
-    fn write(&self, stream: &mut TcpStream) -> Result<()> {
+    fn write(&self, stream: &mut TcpStream) -> io::Result<()> {
         let reason = match self.status {
             200 => "OK",
             202 => "Accepted",
@@ -1124,6 +1124,23 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<Request, (u16, &'
     })
 }
 
+fn serve_connection(server: &mut Server, mut stream: TcpStream, host: &str) -> io::Result<()> {
+    // Winsock accept inherits the listener's nonblocking mode. The listener
+    // polls for connections, but request reads and response writes are blocking.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let response = match read_request(&mut stream) {
+        Ok(request) => server.handle(request, host),
+        Err((code, message)) => {
+            // Only static parser messages are logged; no headers or body data.
+            eprintln!("Local wizard rejected a request ({code}): {message}");
+            Response::json_error(code, message)
+        }
+    };
+    response.write(&mut stream)
+}
+
 fn open_browser(url: &str) -> Result<()> {
     #[cfg(windows)]
     let mut process = {
@@ -1189,14 +1206,10 @@ pub(crate) fn run(root: &Path, no_open: bool) -> Result<()> {
             continue;
         }
         match listener.accept() {
-            Ok((mut stream, _)) => {
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-                let response = match read_request(&mut stream) {
-                    Ok(request) => server.handle(request, &host),
-                    Err((code, message)) => Response::json_error(code, message),
-                };
-                let _ = response.write(&mut stream);
+            Ok((stream, _)) => {
+                if let Err(error) = serve_connection(&mut server, stream, &host) {
+                    eprintln!("Local wizard connection error: {:?}", error.kind());
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(40));
@@ -1277,6 +1290,40 @@ mod tests {
         session.locked = false;
         session.authenticated = true;
         credentials
+    }
+
+    #[test]
+    fn nonblocking_listener_serves_a_delayed_browser_request() -> Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let client = thread::spawn(move || -> io::Result<String> {
+            let mut stream = TcpStream::connect(address)?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            thread::sleep(Duration::from_millis(50));
+            stream.write_all(
+                format!("GET /favicon.svg HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let mut server = server();
+        serve_connection(&mut server, stream, &address.to_string())?;
+        let response = client.join().map_err(|_| anyhow!("Browser test client stopped"))??;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains("<svg"), "{response}");
+        Ok(())
     }
 
     #[test]
