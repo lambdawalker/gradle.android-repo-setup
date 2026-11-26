@@ -167,6 +167,22 @@ pub fn regular_file_exists(path: &Path) -> Result<bool> {
     }
 }
 
+pub(crate) fn browser_vault_exists(config: &SetupConfig) -> Result<bool> {
+    let path = config.state_path();
+    if regular_file_exists(&path)? {
+        return Ok(true);
+    }
+    if config.vault_path.is_some() {
+        return Ok(false);
+    }
+    let legacy = config
+        .state_dir
+        .join(config.repository.to_ascii_lowercase().replace('/', "--"))
+        .join("secrets")
+        .join(path.file_name().unwrap());
+    regular_file_exists(&legacy)
+}
+
 fn file_options() -> OpenOptions {
     #[cfg(unix)]
     {
@@ -556,6 +572,13 @@ pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVa
         }
         setup_message!("Use at least 12 characters and enter the same password twice.");
     }
+}
+
+pub(crate) fn create_browser_vault(config: &SetupConfig, password: &str) -> Result<()> {
+    let _lock = lock(config, true)?;
+    let path = config.state_path();
+    ensure!(!regular_file_exists(&path)?, "A setup vault already exists.");
+    SetupVault::create(&path, password)?.save()
 }
 
 pub fn view(config: &SetupConfig) -> Result<bool> {

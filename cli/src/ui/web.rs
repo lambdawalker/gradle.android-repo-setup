@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 const HEADER_LIMIT: usize = 16 * 1024;
 const BODY_LIMIT: usize = 128 * 1024;
 const LOG_LIMIT: usize = 512 * 1024;
-const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
+const IDLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 const BOOTSTRAP_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 struct Request {
@@ -49,6 +49,7 @@ struct Session {
     csrf: String,
     last_seen: Instant,
     locked: bool,
+    authenticated: bool,
 }
 
 fn regular_directory(root: &Path, relative: &Path) -> bool {
@@ -156,6 +157,7 @@ struct Server {
     worker: Option<JoinHandle<Result<()>>>,
     launch_token: Option<String>,
     recovery_code: String,
+    created_vault: bool,
     created_at: Instant,
     session: Option<Session>,
     pending: Option<Pending>,
@@ -185,6 +187,7 @@ impl Server {
             worker: None,
             launch_token: Some(token),
             recovery_code,
+            created_vault: false,
             created_at: Instant::now(),
             session: None,
             pending: None,
@@ -297,6 +300,8 @@ impl Server {
         }
         let sender = self.sender.clone();
         let root = self.root.clone();
+        let created_vault = self.created_vault;
+        self.created_vault = false;
         self.notes.clear();
         self.last_chunk.clear();
         self.status = "running";
@@ -311,13 +316,14 @@ impl Server {
                     web: true,
                 });
             });
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup::run(&root)))
-                    .unwrap_or_else(|_| {
-                        Err(anyhow!(
-                            "Setup stopped unexpectedly. Rerun to inspect saved progress."
-                        ))
-                    });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                setup::run(&root, created_vault)
+            }))
+            .unwrap_or_else(|_| {
+                Err(anyhow!(
+                    "Setup stopped unexpectedly. Rerun to inspect saved progress."
+                ))
+            });
             let notes = CLIENT.with(|client| {
                 client
                     .borrow_mut()
@@ -383,23 +389,48 @@ impl Server {
             .get("credential")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty() && value.len() <= 4096)
-            .ok_or((422, "Enter the vault password or CLI recovery code."))?;
-        // Open to verify and immediately drop the decrypted vault. Browser data
-        // never contains saved credentials, even when unlocking the session.
-        let vault_ok = setup::signing_config(&self.root)
-            .ok()
-            .and_then(|config| {
-                let path = config.state_path();
-                vault::regular_file_exists(&path)
-                    .ok()
-                    .filter(|exists| *exists)
-                    .map(|_| path)
-            })
-            .is_some_and(|path| vault::SetupVault::open(&path, credential).is_ok());
-        if !vault_ok && !constant_time_eq(credential, &self.recovery_code) {
-            return Err((401, "Could not unlock this wizard session."));
+            .ok_or((422, "Enter the vault passphrase."))?;
+        let config = setup::signing_config(&self.root)
+            .map_err(|_| (500, "Could not load the setup vault configuration."))?;
+        if !session.authenticated {
+            // Migrate a legacy vault before deciding whether this is creation
+            // or unlock. No worker can hold this lock before first login.
+            let _migration = vault::lock(&config, true)
+                .map_err(|_| (409, "Could not prepare the setup vault for login."))?;
+        }
+        let path = config.state_path();
+        let exists = vault::regular_file_exists(&path)
+            .map_err(|_| (500, "Could not inspect the setup vault."))?;
+        if exists {
+            // Open only to verify the passphrase, then discard decrypted data.
+            // The recovery code is accepted after the first vault login only.
+            if vault::SetupVault::open(&path, credential).is_err()
+                && !(session.authenticated && constant_time_eq(credential, &self.recovery_code))
+            {
+                return Err((401, "Could not unlock the setup vault."));
+            }
+        } else {
+            let confirmation = input
+                .get("confirmation")
+                .and_then(Value::as_str)
+                .ok_or((422, "Confirm the new vault passphrase."))?;
+            if credential.chars().count() < 12 {
+                return Err((422, "Use at least 12 characters for the vault passphrase."));
+            }
+            if !constant_time_eq(credential, confirmation) {
+                return Err((422, "Vault passphrases differ."));
+            }
+            vault::create_browser_vault(&config, credential)
+                .map_err(|_| {
+                    (
+                        409,
+                        "Could not create the setup vault. Refresh to check whether it now exists.",
+                    )
+                })?;
+            self.created_vault = true;
         }
         session.locked = false;
+        session.authenticated = true;
         session.last_seen = Instant::now();
         self.revision += 1;
         Ok(())
@@ -408,7 +439,12 @@ impl Server {
     fn snapshot(&self) -> Value {
         if self.session.as_ref().is_some_and(|session| session.locked) {
             let status = if self.closing { self.status } else { "locked" };
+            let vault_mode = setup::signing_config(&self.root)
+                .ok()
+                .and_then(|config| vault::browser_vault_exists(&config).ok())
+                .map_or("create", |exists| if exists { "unlock" } else { "create" });
             return json!({"revision":self.revision,"phase":self.phase,"status":status,
+                "vaultMode":vault_mode,"initial":self.session.as_ref().is_some_and(|session| !session.authenticated),
                 "prompt":null,"notes":[],"context":{},"artifacts":[],"moduleArtifacts":{},"actions":[]});
         }
         let repository = fs::read_to_string(self.root.join(".project/setup/config.yaml"))
@@ -590,7 +626,8 @@ impl Server {
                         bearer: bearer.clone(),
                         csrf: csrf.clone(),
                         last_seen: Instant::now(),
-                        locked: false,
+                        locked: true,
+                        authenticated: false,
                     });
                     return Response::json(200, json!({"session":bearer,"csrf":csrf}));
                 }
@@ -610,6 +647,13 @@ impl Server {
                         Ok(()) => Response::json(200, self.snapshot()),
                         Err((code, message)) => Response::json_error(code, message),
                     };
+                }
+                if path == "/api/lock" {
+                    if let Some(session) = &mut self.session {
+                        session.locked = true;
+                        self.revision += 1;
+                    }
+                    return Response::json(200, self.snapshot());
                 }
                 if self.session.as_ref().is_some_and(|session| session.locked)
                     && path != "/api/close"
@@ -1142,7 +1186,7 @@ mod tests {
         }
     }
 
-    fn login(server: &mut Server) -> (String, String) {
+    fn login_unverified(server: &mut Server) -> (String, String) {
         let response = server.handle(
             request(
                 "POST",
@@ -1158,6 +1202,58 @@ mod tests {
             value["session"].as_str().unwrap().into(),
             value["csrf"].as_str().unwrap().into(),
         )
+    }
+
+    fn login(server: &mut Server) -> (String, String) {
+        let credentials = login_unverified(server);
+        // Most existing tests exercise operations after the vault gate. The
+        // handshake itself is covered by the dedicated vault tests below.
+        let session = server.session.as_mut().unwrap();
+        session.locked = false;
+        session.authenticated = true;
+        credentials
+    }
+
+    #[test]
+    fn startup_requires_vault_creation_and_passphrase_on_return() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".project/setup")).unwrap();
+        let suffix = root.path().file_name().unwrap().to_string_lossy();
+        let repository = format!("testing/cli{suffix}");
+        fs::write(root.path().join(discovery::CONFIG), format!("repository: {repository}\n")).unwrap();
+        let config = setup::signing_config(root.path()).unwrap();
+        let (sender, updates) = mpsc::channel();
+        let mut server = Server::new(root.path().to_path_buf(), sender, updates,
+            "launch-secret".into(), "recovery-secret".into());
+        let (bearer, csrf) = login_unverified(&mut server);
+        let state = server.snapshot();
+        assert_eq!(state["status"], "locked");
+        assert_eq!(state["vaultMode"], "create");
+        assert_eq!(state["initial"], true);
+        let send = |server: &mut Server, path: &str, value| server.handle(
+            request("POST", path, value, Some((&bearer, &csrf))), HOST).status;
+        assert_eq!(send(&mut server, "/api/start", json!({"action":"setup"})), 423);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"too short","confirmation":"too short"})), 422);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"a long passphrase","confirmation":"different"})), 422);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"recovery-secret"})), 422);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"a long passphrase","confirmation":"a long passphrase"})), 200);
+        assert!(config.state_path().is_file());
+        assert_eq!(send(&mut server, "/api/lock", json!({})), 200);
+        assert_eq!(server.snapshot()["status"], "locked");
+        assert_eq!(server.snapshot()["initial"], false);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"incorrect passphrase"})), 401);
+        assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"a long passphrase"})), 200);
+        let (sender, updates) = mpsc::channel();
+        let mut reopened = Server::new(root.path().to_path_buf(), sender, updates,
+            "another-link".into(), "another-recovery".into());
+        let response = reopened.handle(request("POST", "/api/session", json!({"token":"another-link"}), None), HOST);
+        let identity: Value = serde_json::from_slice(&response.body).unwrap();
+        let new_bearer = identity["session"].as_str().unwrap();
+        let new_csrf = identity["csrf"].as_str().unwrap();
+        assert_eq!(reopened.snapshot()["vaultMode"], "unlock");
+        assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"another-recovery"}), Some((new_bearer,new_csrf))), HOST).status, 401);
+        assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"a long passphrase"}), Some((new_bearer,new_csrf))), HOST).status, 200);
+        fs::remove_dir_all(config.state_dir.join(config.project_name())).unwrap();
     }
 
     #[test]
@@ -1506,6 +1602,12 @@ mod tests {
             keys: Vec::new(),
             key_status: None,
         });
+        server.session.as_mut().unwrap().last_seen =
+            Instant::now() - Duration::from_secs(19 * 60);
+        let before = server.handle(
+            request("GET", "/api/state", json!({}), Some((&bearer, &csrf))), HOST);
+        let before: Value = serde_json::from_slice(&before.body).unwrap();
+        assert_ne!(before["status"], "locked");
         server.session.as_mut().unwrap().last_seen =
             Instant::now() - IDLE_LIMIT - Duration::from_secs(1);
         let response = server.handle(

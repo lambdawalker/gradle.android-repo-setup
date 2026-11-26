@@ -176,7 +176,7 @@ fn available_operations(
         .collect()
 }
 
-pub(crate) fn run(root: &Path) -> Result<()> {
+pub(crate) fn run(root: &Path, vault_created_at_handoff: bool) -> Result<()> {
     vault::interactive()?;
     crate::ui::phase("modules");
     let Some(modules) = crate::discovery::select(root)? else {
@@ -188,7 +188,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
     let has_libraries = modules.values().any(|m| m.selected && m.kind.is_library());
     let available = available_operations(has_apps, has_libraries);
     let config = signing_config(root)?;
-    let mut first_run = !config.state_path().exists()
+    let mut first_run = (vault_created_at_handoff || !config.state_path().exists())
         && !root
             .join(".project/setup/workflow-generation.json")
             .exists();

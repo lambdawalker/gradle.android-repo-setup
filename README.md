@@ -250,13 +250,14 @@ explicit confirmation steps. Headless and CI commands continue to use the CLI
 directly.
 
 The browser uses the existing encrypted setup vault and signing environment
-scope. If there is no vault, the wizard creates one before showing the action
-tabs, requiring a new password and confirmation. An existing
-vault must be unlocked with its current password. Saved secret values are
+scope. The site opens with a vault dialog: enter the existing passphrase, or
+create and confirm one if there is no vault. The same dialog asks for the
+passphrase again when the page is reopened. Saved secret values are
 not returned to the browser. Choose **Use vault value** when prompted to keep an
 existing value; an empty replacement is not a general reuse signal. After
-30 minutes without operator activity, enter the saved vault password or the
-CLI-printed recovery code to unlock the browser session. An operation already
+20 minutes without operator activity, enter the saved vault passphrase or the
+CLI-printed recovery code to unlock the browser session. The recovery code
+cannot replace the first vault login. An operation already
 running can finish while the session is locked; new actions wait for unlock.
 The browser does not reveal saved secrets or newly generated passwords. When
 creating an APK keystore in the browser, enter and back up your own store and

@@ -91,6 +91,8 @@ function clearPreparedValues() {
   settingsDrafts.clear();
   draftExecution = null;
   for (const input of $("workspace").querySelectorAll('input[type="password"]')) input.value = "";
+  $("vault-credential").value = "";
+  $("vault-confirmation").value = "";
 }
 
 const actionFields = {
@@ -191,58 +193,94 @@ function showNotice(title, message) {
   $("notice-dialog").showModal();
 }
 let locked = false;
-let unlockInput;
-function showLock() {
+let vaultMode = "unlock";
+let vaultWorkerPromptId = null;
+function obscureLockedWorkspace(value) {
+  for (const id of ["workspace", "action-bar"]) {
+    $(id).inert = value;
+    $(id).classList.toggle("vault-locked", value);
+  }
+}
+function vaultProblem(message) {
+  $("vault-error").textContent = message;
+  $("vault-error").hidden = !message;
+}
+function closeVaultDialog() {
+  $("vault-credential").value = "";
+  $("vault-confirmation").value = "";
+  vaultProblem("");
+  if ($("vault-dialog").open) $("vault-dialog").close();
+  vaultWorkerPromptId = null;
+}
+function openVaultDialog(title, description, mode, confirm = false) {
+  if ($("notice-dialog").open) $("notice-dialog").close();
+  vaultMode = mode;
+  $("vault-title").textContent = title;
+  $("vault-description").textContent = description;
+  $("vault-credential").value = "";
+  $("vault-credential").autocomplete = confirm ? "new-password" : "current-password";
+  $("vault-confirmation").value = "";
+  $("vault-confirm-group").hidden = !confirm;
+  $("vault-confirmation").required = confirm;
+  $("vault-submit").textContent = confirm ? "Create vault" : mode === "worker" ? "Continue" : "Unlock";
+  vaultProblem("");
+  if (!$("vault-dialog").open) $("vault-dialog").showModal();
+  $("vault-credential").focus();
+}
+function showLock(data) {
   if (locked) return;
   locked = true;
+  obscureLockedWorkspace(true);
   pauseCountdown();
   clearPreparedValues();
-  const dialog = $("notice-dialog");
-  if (dialog.open) dialog.close();
-  $("notice-title").textContent = "Wizard locked";
-  const body = $("notice-body");
-  body.replaceChildren(el("p", "Enter the local vault passphrase or the recovery code printed in the launching terminal to continue."));
-  const form = field("Unlock credential", "", true);
-  unlockInput = form.input;
-  unlockInput.addEventListener("keydown", event => {
-    if (event.key === "Enter") { event.preventDefault(); unlockWizard(); }
-  });
-  body.append(form.wrapper);
-  const problem = el("p", "", "problem");
-  problem.id = "unlock-error";
-  problem.setAttribute("role", "alert");
-  problem.hidden = true;
-  body.append(problem);
-  $("notice-close").textContent = "Unlock";
-  dialog.showModal();
-  unlockInput.focus();
+  vaultWorkerPromptId = null;
+  const creating = data.vaultMode === "create";
+  openVaultDialog(creating ? "Create local vault" : data.initial ? "Unlock local vault" : "Wizard locked",
+    creating ? "Choose a vault passphrase of at least 12 characters. It encrypts saved setup answers on this device." :
+      data.initial ? "Enter your vault passphrase before the wizard inspects this repository." :
+        "Enter your vault passphrase to continue. The recovery code printed in the launching terminal can also unlock an idle session.",
+    creating ? "create" : "unlock", creating);
 }
 async function unlockWizard() {
   if (!locked || pending) return;
-  const credential = unlockInput.value;
-  unlockInput.value = "";
+  const credential = $("vault-credential").value;
+  const confirmation = $("vault-confirmation").value;
+  if (vaultMode === "create" && (credential.length < 12 || confirmation !== credential)) {
+    vaultProblem(credential.length < 12 ? "Use at least 12 characters." : "The passphrases do not match.");
+    $("vault-credential").focus();
+    return;
+  }
+  if (!credential) { vaultProblem("Enter the vault passphrase."); $("vault-credential").focus(); return; }
+  $("vault-credential").value = "";
+  $("vault-confirmation").value = "";
   pending = true;
-  $("notice-close").disabled = true;
+  $("vault-submit").disabled = true;
+  let start = false;
   try {
-    const data = await request("/api/unlock", "POST", {credential});
+    const data = await request("/api/unlock", "POST", vaultMode === "create" ? {credential, confirmation} : {credential});
     locked = false;
-    $("notice-dialog").close();
-    $("notice-close").textContent = "Close";
+    closeVaultDialog();
+    obscureLockedWorkspace(false);
     lastRevision = Number(data.revision);
     renderState(data);
+    start = data.status === "idle";
   } catch (error) {
-    const problem = $("unlock-error");
-    problem.textContent = error.message;
-    problem.hidden = false;
-    unlockInput.focus();
+    vaultProblem(error.message);
+    $("vault-credential").focus();
   } finally {
     pending = false;
-    $("notice-close").disabled = false;
+    $("vault-submit").disabled = false;
     updateFooter();
   }
+  if (start) await startSetup();
 }
-$("notice-close").addEventListener("click", () => locked ? unlockWizard() : $("notice-dialog").close());
-$("notice-dialog").addEventListener("cancel", event => { if (locked) event.preventDefault(); });
+$("notice-close").addEventListener("click", () => $("notice-dialog").close());
+$("vault-dialog").addEventListener("cancel", event => event.preventDefault());
+$("vault-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (locked) unlockWizard();
+  else if (vaultWorkerPromptId != null) answerVaultPrompt();
+});
 
 async function request(path, method = "GET", value = null) {
   const headers = {Authorization: "Bearer " + session};
@@ -260,7 +298,7 @@ async function request(path, method = "GET", value = null) {
     error.unauthorized = true;
     throw error;
   }
-  if (response.status === 409) throw new Error("This question changed. Review the current step and try again.");
+  if (response.status === 409 && path === "/api/answer") throw new Error("This question changed. Review the current step and try again.");
   if (!response.ok) {
     const body = (await response.text()).trim();
     let message = body;
@@ -268,6 +306,43 @@ async function request(path, method = "GET", value = null) {
     throw new Error(message || "The local wizard is unavailable.");
   }
   return response.status === 204 ? null : response.json();
+}
+
+function isVaultPrompt(prompt) {
+  return prompt?.kind === "text" && prompt.secret &&
+    /^(Create vault password|Confirm vault password|Unlock local setup vault)/.test(prompt.label || "");
+}
+function showVaultPrompt(prompt) {
+  vaultWorkerPromptId = prompt.id;
+  const creating = prompt.label.startsWith("Create vault password");
+  openVaultDialog(prompt.label, creating ? "Choose at least 12 characters for the local encrypted vault." :
+    prompt.label.startsWith("Confirm vault password") ? "Repeat the vault passphrase to confirm it." :
+      "Enter the vault passphrase for this setup action.", "worker");
+}
+async function answerVaultPrompt() {
+  const prompt = state?.prompt;
+  if (locked || pending || !isVaultPrompt(prompt) || vaultWorkerPromptId !== prompt.id) return;
+  const value = $("vault-credential").value;
+  if (!value || prompt.label.startsWith("Create vault password") && value.length < 12) {
+    vaultProblem(value ? "Use at least 12 characters." : "Enter the vault passphrase.");
+    $("vault-credential").focus();
+    return;
+  }
+  $("vault-credential").value = "";
+  pending = true;
+  $("vault-submit").disabled = true;
+  try {
+    await request("/api/answer", "POST", {id: prompt.id, value});
+    closeVaultDialog();
+    await refresh();
+  } catch (error) {
+    vaultProblem(error.message);
+    $("vault-credential").focus();
+  } finally {
+    pending = false;
+    $("vault-submit").disabled = false;
+    updateFooter();
+  }
 }
 
 let lastActivity = 0;
@@ -530,6 +605,14 @@ function chooseTabFor(prompt) {
 }
 function renderPrompt(prompt) {
   stopCountdown();
+  if (isVaultPrompt(prompt)) {
+    $("action-content").replaceChildren(loadingState("Vault passphrase required", "Complete the secure dialog to continue setup."));
+    $("settings-content").replaceChildren(el("p", "Enter the vault passphrase in the dialog.", "empty-state"));
+    $("back-button").hidden = true;
+    $("continue-button").hidden = true;
+    showVaultPrompt(prompt);
+    return;
+  }
   if (prompt.kind === "menu") {
     lastMenuOptions = prompt.options || [];
     draftExecution = null;
@@ -724,9 +807,9 @@ $("close-button").addEventListener("click", async () => {
 function finishClose() {
   if (locked) {
     locked = false;
-    $("notice-dialog").close();
-    $("notice-close").textContent = "Close";
   }
+  closeVaultDialog();
+  obscureLockedWorkspace(false);
   forgetSession();
   session = "";
   csrf = "";
@@ -770,6 +853,7 @@ function updateFooter() {
     return;
   }
   if (!prompt) { primary.hidden = true; $("back-button").hidden = true; return; }
+  if (isVaultPrompt(prompt)) { primary.hidden = true; $("back-button").hidden = true; return; }
   primary.hidden = false;
   const container = ["menu", "modules"].includes(prompt.kind) ? $("action-content") : $("settings-content");
   const choices = prompt.kind === "menu" ? selectedMenuCards().length : container.querySelectorAll('input[type="checkbox"]:checked').length;
@@ -1037,17 +1121,19 @@ function renderOverview(data) {
 function renderState(data) {
   state = data;
   if (data.status === "closed") { finishClose(); return; }
+  if (vaultWorkerPromptId != null && !isVaultPrompt(data.prompt)) closeVaultDialog();
   if (data.status === "finished" || data.status === "error") { clearPreparedValues(); lastMenuOptions = null; }
   if (data.status === "locked") {
-    showLock();
-    $("footer-status").textContent = "Wizard locked after inactivity";
+    showLock(data);
+    $("footer-status").textContent = data.vaultMode === "create" ? "Create a vault passphrase to begin" :
+      data.initial ? "Unlock the vault to begin" : "Wizard locked after 20 minutes of inactivity";
     updateFooter();
     return;
   }
   if (locked) {
     locked = false;
-    $("notice-dialog").close();
-    $("notice-close").textContent = "Close";
+    closeVaultDialog();
+    obscureLockedWorkspace(false);
   }
   if (data.status === "closing") {
     closingRequested = true;
@@ -1119,6 +1205,7 @@ function renderState(data) {
     $("pause-button").textContent = "Resume";
     updateCountdownLabel();
   }
+  if (isVaultPrompt(data.prompt) && !$("vault-dialog").open) showVaultPrompt(data.prompt);
 }
 async function refresh() {
   if (closed || !session) return;
@@ -1154,14 +1241,16 @@ async function bootstrap() {
     csrf = previous.csrf;
     requireResumeOnRestore = true;
     try {
+      // Reloading this tab always requires the vault passphrase again before
+      // restoring its prior setup question.
+      await request("/api/lock", "POST", {});
       await refresh();
-      $("close-button").disabled = false;
       poll();
       return;
     } catch (error) {
       if (!error.unauthorized) {
-        setProblem("Connection interrupted. Retrying the saved local session…");
-        poll();
+        setProblem("Connection interrupted. Retrying the vault lock…");
+        setTimeout(bootstrap, 1000);
         return;
       }
       forgetSession();
@@ -1186,10 +1275,8 @@ async function bootstrap() {
     session = credentials.session;
     csrf = credentials.csrf;
     rememberSession();
-    $("close-button").disabled = false;
-    // Discover modules and show their available actions as soon as the local
-    // session opens; the browser has no separate module-selection screen.
-    await startSetup();
+    // The server starts locked. Discovery begins only after this vault gate.
+    await refresh();
     poll();
   } catch (error) { setProblem(error.message); }
 }

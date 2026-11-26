@@ -397,7 +397,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .path
                 .trim_end_matches(':')
         ),
-        Command::Setup { command: None } => ui::run(|| setup::run(&root))?,
+        Command::Setup { command: None } => ui::run(|| setup::run(&root, false))?,
         Command::Setup {
             command: Some(SetupCommand::Check),
         } => setup_check::run(&root)?,

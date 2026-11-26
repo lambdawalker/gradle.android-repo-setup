@@ -75,5 +75,18 @@
   </main>
   <footer class="action-bar" id="action-bar"><p id="footer-status" role="status">Connecting to the local setup wizard…</p><div class="footer-actions"><button id="back-button" class="button outline" type="button" hidden>Back / Cancel</button><button id="pause-button" class="button outline" type="button" hidden>Pause</button><button id="continue-button" class="button primary" type="button" disabled>Continue</button><button id="close-button" class="button outline" type="button" disabled>Close wizard</button></div></footer>
   <dialog id="notice-dialog" aria-labelledby="notice-title"><div class="dialog-heading"><h2 id="notice-title">Details</h2></div><div id="notice-body" class="dialog-body"></div><div class="dialog-actions"><button id="notice-close" class="button primary" type="button">Close</button></div></dialog>
+  <dialog id="vault-dialog" aria-labelledby="vault-title" aria-describedby="vault-description">
+    <div class="dialog-heading"><h2 id="vault-title">Unlock local vault</h2></div>
+    <form id="vault-form" autocomplete="off">
+      <div class="dialog-body vault-body">
+        <p id="vault-description"></p>
+        <label for="vault-credential">Vault passphrase</label>
+        <input id="vault-credential" type="password" autocomplete="off" spellcheck="false" maxlength="4096" required>
+        <div id="vault-confirm-group" hidden><label for="vault-confirmation">Confirm vault passphrase</label><input id="vault-confirmation" type="password" autocomplete="off" spellcheck="false" maxlength="4096"></div>
+        <p id="vault-error" class="problem" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions"><button id="vault-submit" class="button primary" type="submit">Unlock</button></div>
+    </form>
+  </dialog>
 </body>
 </html>
