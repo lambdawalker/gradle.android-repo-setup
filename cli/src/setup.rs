@@ -148,6 +148,21 @@ fn update_workflows(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn available_operations(
+    has_apps: bool,
+    has_libraries: bool,
+) -> Vec<(&'static str, &'static str, &'static str)> {
+    OPERATIONS
+        .iter()
+        .copied()
+        .filter(|(id, _, _)| match *id {
+            "key" | "local" | "github" => has_apps,
+            "publishing" => has_libraries,
+            _ => true,
+        })
+        .collect()
+}
+
 pub(crate) fn run(root: &Path) -> Result<()> {
     vault::interactive()?;
     crate::ui::phase("modules");
@@ -158,15 +173,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
         .values()
         .any(|m| m.selected && m.kind == crate::discovery::Kind::Application);
     let has_libraries = modules.values().any(|m| m.selected && m.kind.is_library());
-    let available = OPERATIONS
-        .iter()
-        .copied()
-        .filter(|(id, _, _)| match *id {
-            "key" | "local" | "github" => has_apps,
-            "publishing" => has_libraries,
-            _ => true,
-        })
-        .collect::<Vec<_>>();
+    let available = available_operations(has_apps, has_libraries);
     let config = signing_config(root)?;
     crate::ui::phase("actions");
     loop {
@@ -208,5 +215,26 @@ pub(crate) fn run(root: &Path) -> Result<()> {
             publishing::setup(root, None, None)?;
         }
         return Ok(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_kinds_expose_stable_action_ids_in_terminal_order() {
+        let ids = |apps, libraries| {
+            available_operations(apps, libraries)
+                .into_iter()
+                .map(|(id, _, _)| id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(true, false), ["key", "local", "github", "workflows"]);
+        assert_eq!(ids(false, true), ["publishing", "workflows"]);
+        assert_eq!(
+            ids(true, true),
+            ["key", "local", "github", "publishing", "workflows"]
+        );
     }
 }

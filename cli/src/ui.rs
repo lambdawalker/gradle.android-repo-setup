@@ -65,6 +65,12 @@ pub(crate) struct ModuleChoice {
     pub description: String,
     pub selected: bool,
 }
+#[derive(Clone)]
+pub(crate) struct OperationChoice {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
 enum Question {
     Text {
         label: String,
@@ -73,7 +79,7 @@ enum Question {
     },
     Confirm(String),
     Menu {
-        operations: Vec<(String, String)>,
+        operations: Vec<OperationChoice>,
         first_run: bool,
     },
     Modules(Vec<ModuleChoice>),
@@ -157,7 +163,11 @@ pub fn menu(operations: &[(&str, &str, &str)], first_run: bool) -> Result<Menu> 
     match request(Question::Menu {
         operations: operations
             .iter()
-            .map(|(_, label, help)| (label.to_string(), help.to_string()))
+            .map(|(id, label, help)| OperationChoice {
+                id: id.to_string(),
+                label: label.to_string(),
+                description: help.to_string(),
+            })
             .collect(),
         first_run,
     })? {

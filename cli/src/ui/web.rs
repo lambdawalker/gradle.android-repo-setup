@@ -559,8 +559,9 @@ impl Pending {
                 first_run,
             } => json!({
                 "id":id,"kind":"menu","label":"Choose setup operations","firstRun":first_run,
-                "options":operations.iter().enumerate().map(|(index,(label,description))| json!({
-                    "value":index.to_string(),"label":label,"description":description,"selected":first_run,
+                "options":operations.iter().enumerate().map(|(index,operation)| json!({
+                    "value":index.to_string(),"id":operation.id,"label":operation.label,
+                    "description":operation.description,"selected":first_run,
                 })).collect::<Vec<_>>(),
             }),
             Question::Modules(entries) => json!({
@@ -1015,6 +1016,41 @@ mod tests {
             value["session"].as_str().unwrap().into(),
             value["csrf"].as_str().unwrap().into(),
         )
+    }
+
+    #[test]
+    fn menu_options_expose_stable_ids_without_changing_answer_indices() {
+        let (reply, _) = mpsc::channel();
+        let pending = Pending {
+            id: 7,
+            question: Question::Menu {
+                operations: vec![
+                    crate::ui::OperationChoice {
+                        id: "publishing".into(),
+                        label: "Publishing environments".into(),
+                        description: "Review credentials".into(),
+                    },
+                    crate::ui::OperationChoice {
+                        id: "workflows".into(),
+                        label: "GitHub workflows".into(),
+                        description: "Generate files".into(),
+                    },
+                ],
+                first_run: true,
+            },
+            reply,
+            keys: Vec::new(),
+            key_status: None,
+        };
+        let options = pending.public()["options"].clone();
+        assert_eq!(options[0]["value"], "0");
+        assert_eq!(options[0]["id"], "publishing");
+        assert_eq!(options[1]["value"], "1");
+        assert_eq!(options[1]["id"], "workflows");
+        assert!(matches!(
+            pending.parse_answer(&json!([0, 1])).unwrap(),
+            Answer::Menu(Menu::Setup(indices)) if indices == vec![0, 1]
+        ));
     }
 
     #[test]

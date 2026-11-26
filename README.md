@@ -225,10 +225,10 @@ The browser presents the same repository setup operations as the terminal:
 APK signing key, local Gradle signing, APK signing environment, publishing
 environments, and GitHub workflows. Available operations depend on the
 discovered application and library modules. After Gradle discovery, the header
-shows a tab for each Android or JVM module, alongside the repository tab. A
-module tab shows that module's type, directory and setup selection; the module
-checkboxes control which modules are configured. Setup operations still run for
-the repository and its selected modules. The workspace groups **Actions**,
+shows one tab for each discovered Android or JVM module. The Actions panel
+shows the operations applicable to the active module; shared operations such as
+GitHub workflows retain one repository-wide selection. The module checkboxes
+control which modules are configured. The workspace groups **Actions**,
 **Settings**, **Overview**, and **Process output** beside progress and, when
 available, generated-file details. Select steps, review their target and
 changes, and respond to confirmations in the wizard. Launching the site alone

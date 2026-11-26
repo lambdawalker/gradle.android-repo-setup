@@ -315,6 +315,7 @@ function renderChoice(prompt, multiple) {
     input.name = "setup-choice";
     input.value = option.value;
     input.checked = Boolean(option.selected);
+    if (prompt.kind === "menu") choice.dataset.operationId = option.id || "";
     const title = el("span", option.label, "action-title");
     const description = el("span", option.description || "", "action-description");
     choice.append(input, title, description);
@@ -343,9 +344,15 @@ function renderPrompt(prompt) {
 
   if (prompt.kind === "menu" || prompt.kind === "modules") {
     const note = el("p", prompt.kind === "menu" ?
-      "Select independent setup operations. Review their effects before running them." :
+      "Choose setup operations for the active module. Selected operations run once for the repository and its selected modules." :
       "Choose the modules and apps this repository should configure. Header tabs show module details; use these checkboxes to change the setup selection.", "prompt-help");
-    container.append(note, renderChoice(prompt, true));
+    container.append(note);
+    if (prompt.kind === "menu") {
+      const scope = el("p", "", "action-scope");
+      scope.id = "action-scope";
+      container.append(scope);
+    }
+    container.append(renderChoice(prompt, true));
     const secondary = el("div", "", "secondary-actions");
     if (prompt.kind === "menu") {
       for (const [label, value] of [["What will this do?", "help"], ["View vault", "view-vault"], ["Remake vault", "remake-vault"]]) {
@@ -357,7 +364,11 @@ function renderPrompt(prompt) {
       container.append(secondary);
     }
     card.textContent = prompt.kind === "menu" ? "Setup selected tasks" : "Continue";
-    container.addEventListener("change", () => { updateFooter(); if (prompt.kind === "modules") syncModuleSelection(); });
+    container.addEventListener("change", () => {
+      updateFooter();
+      if (prompt.kind === "modules") syncModuleSelection();
+      else { renderMenuScope(); renderOverview(state); }
+    });
   } else if (prompt.kind === "text") {
     const input = field(title, prompt.default, Boolean(prompt.secret));
     container.append(input.wrapper);
@@ -408,6 +419,7 @@ function renderPrompt(prompt) {
   container.append(error);
   chooseTabFor(prompt);
   highlightModuleChoice();
+  renderMenuScope();
   updateFooter();
   startCountdown(prompt);
   requireResumeOnRestore = false;
@@ -581,8 +593,7 @@ function renderContext(data) {
     link.textContent = "/" + repository;
     link.hidden = false;
   } else link.hidden = true;
-  $("project-tab").textContent = repository.split("/").at(-1) || "Repository setup";
-  document.title = "Setup: " + $("project-tab").textContent;
+  document.title = "Setup: " + (repository.split("/").at(-1) || "Android repository");
 }
 function moduleKind(kind) {
   return ({library: "Android library", application: "Android app", "jvm-library": "JVM library"})[kind] || "Module";
@@ -594,6 +605,26 @@ function moduleSetupAreas(module) {
   return module.kind === "application" ? "APK signing, local signing, signing environment and workflows" :
     "Publishing environments and workflows";
 }
+function operationAppliesToModule(id, module) {
+  if (!module?.selected) return false;
+  if (["key", "local", "github"].includes(id)) return module.kind === "application";
+  if (id === "publishing") return ["library", "jvm-library"].includes(module.kind);
+  return true; // Workflows and future repository-wide operations are shared.
+}
+function renderMenuScope() {
+  if (state?.prompt?.kind !== "menu") return;
+  const scope = $("action-scope");
+  if (!scope) return;
+  const module = availableModules.find(item => item.id === activeModule);
+  const cards = [...$("action-content").querySelectorAll(".action-card")];
+  for (const card of cards) card.hidden = Boolean(module) && !operationAppliesToModule(card.dataset.operationId, module);
+  const selected = cards.filter(card => card.querySelector('input[type="checkbox"]:checked'));
+  const other = selected.filter(card => card.hidden).map(card => card.querySelector(".action-title").textContent);
+  const count = `${selected.length} repository ${selected.length === 1 ? "action" : "actions"} selected`;
+  scope.textContent = !module ? `${count}. Choose a module tab to see its actions.` : !module.selected ?
+    `${module.path} is not selected for setup. ${count} on other modules.` :
+    `Showing ${module.path}. ${count}.${other.length ? ` Also selected on other module tabs: ${other.join(", ")}.` : ""} Shared actions run once for the repository.`;
+}
 function renderModuleDetail() {
   if (selectedDetail) return;
   const module = availableModules.find(item => item.id === activeModule);
@@ -604,7 +635,7 @@ function renderModuleDetail() {
 }
 function markModuleTabs() {
   for (const tab of $("module-tabs").children) {
-    const selected = (tab.dataset.moduleId || null) === activeModule;
+    const selected = tab.dataset.moduleId === activeModule;
     if (selected) tab.setAttribute("aria-current", "true");
     else tab.removeAttribute("aria-current");
     const module = availableModules.find(item => item.id === tab.dataset.moduleId);
@@ -616,12 +647,9 @@ function markModuleTabs() {
   }
 }
 function selectModule(id, focus = false) {
-  if (id !== null && !availableModules.some(module => module.id === id)) return;
+  if (!availableModules.some(module => module.id === id)) return;
   activeModule = id;
-  try {
-    if (id === null) sessionStorage.removeItem(moduleFocusKey);
-    else sessionStorage.setItem(moduleFocusKey, id);
-  } catch { /* The current tab can keep its module focus in memory. */ }
+  try { sessionStorage.setItem(moduleFocusKey, id); } catch { /* Keep module focus in memory. */ }
   selectedDetail = null;
   markModuleTabs();
   if (focus) [...$("module-tabs").children].find(tab => (tab.dataset.moduleId || null) === id)?.focus();
@@ -630,6 +658,7 @@ function selectModule(id, focus = false) {
     renderOverview(state);
   }
   highlightModuleChoice();
+  renderMenuScope();
   renderModuleDetail();
 }
 function highlightModuleChoice() {
@@ -642,7 +671,8 @@ function highlightModuleChoice() {
   }
 }
 function renderModuleTabs(data) {
-  const source = data.prompt?.kind === "modules" ? data.prompt.options : data.context?.modules;
+  const source = data.prompt?.kind === "modules" ? data.prompt.options :
+    data.phase === "modules" && data.status === "running" ? [] : data.context?.modules;
   const modules = (Array.isArray(source) ? source : []).filter(module =>
     module && typeof (module.id || module.name) === "string" && typeof module.path === "string")
     .map(module => ({id: module.id || module.name, path: module.path, kind: module.kind,
@@ -651,21 +681,21 @@ function renderModuleTabs(data) {
   if (key === moduleTabsKey) return;
   moduleTabsKey = key;
   availableModules = modules;
-  if (activeModule && !modules.some(module => module.id === activeModule)) {
-    activeModule = null;
-    try { sessionStorage.removeItem(moduleFocusKey); } catch { /* Storage may be disabled. */ }
+  if (!modules.some(module => module.id === activeModule) ||
+      data.prompt?.kind === "menu" && !modules.find(module => module.id === activeModule)?.selected) {
+    activeModule = modules.find(module => module.selected)?.id || modules[0]?.id || null;
   }
   const nav = $("module-tabs");
-  const focused = nav.contains(document.activeElement) ? document.activeElement.dataset.moduleId || null : undefined;
-  const project = $("project-tab");
-  nav.replaceChildren(project, ...modules.map(module => {
+  const focused = nav.contains(document.activeElement) ? document.activeElement.dataset.moduleId : undefined;
+  nav.hidden = modules.length === 0;
+  nav.replaceChildren(...modules.map(module => {
     const tab = el("button", module.path, "module-tab");
     tab.type = "button";
     tab.dataset.moduleId = module.id;
     return tab;
   }));
   markModuleTabs();
-  if (focused !== undefined) [...nav.children].find(tab => (tab.dataset.moduleId || null) === focused)?.focus();
+  if (focused !== undefined) [...nav.children].find(tab => tab.dataset.moduleId === focused)?.focus();
   if (!selectedDetail) renderModuleDetail();
 }
 function syncModuleSelection() {
@@ -679,7 +709,7 @@ function syncModuleSelection() {
 }
 $("module-tabs").addEventListener("click", event => {
   const tab = event.target.closest(".module-tab");
-  if (tab && $("module-tabs").contains(tab)) selectModule(tab.dataset.moduleId || null);
+  if (tab && $("module-tabs").contains(tab)) selectModule(tab.dataset.moduleId);
 });
 $("module-tabs").addEventListener("keydown", event => {
   const tabs = [...$("module-tabs").children];
@@ -688,7 +718,7 @@ $("module-tabs").addEventListener("keydown", event => {
   const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 :
     event.key === "ArrowLeft" ? (current + tabs.length - 1) % tabs.length :
     event.key === "ArrowRight" ? (current + 1) % tabs.length : -1;
-  if (next >= 0) { event.preventDefault(); selectModule(tabs[next].dataset.moduleId || null, true); }
+  if (next >= 0) { event.preventDefault(); selectModule(tabs[next].dataset.moduleId, true); }
 });
 function renderArtifacts(data) {
   const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
@@ -752,7 +782,11 @@ function renderOverview(data) {
     add("Setup selection", module.selected ? "Included in repository setup." : "Not selected for repository setup. Select it in the module checklist to include it.");
     add("Relevant setup areas", moduleSetupAreas(module));
   }
-  const selected = data.prompt?.kind === "menu" ? (data.prompt.options || []).filter(option => option.selected).map(option => option.label) : [];
+  const selectedValues = data.prompt?.kind === "menu" && promptId === data.prompt.id ?
+    new Set([...$("action-content").querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value)) : null;
+  const selected = data.prompt?.kind === "menu" ? (data.prompt.options || [])
+    .filter(option => selectedValues ? selectedValues.has(option.value) : option.selected)
+    .map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
   if (data.status === "error") add("Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
   if (data.status === "finished") add("Setup finished", "Review the generated files and the process output.");
