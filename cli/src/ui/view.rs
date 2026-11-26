@@ -67,6 +67,7 @@ pub(super) fn Wizard(mut hooks: Hooks, props: &mut WizardProps) -> impl Into<Any
                             }
                         }
                         Update::Clipboard(..) => {}
+                        Update::Phase(..) => {}
                     }
                 }
                 if model.read().timeout.is_some() {

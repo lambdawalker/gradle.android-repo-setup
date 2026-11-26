@@ -136,6 +136,12 @@ enum Command {
 #[derive(Subcommand)]
 enum SetupCommand {
     Check,
+    /// Open the local browser setup wizard.
+    Web {
+        /// Print the one-time local URL without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 #[derive(Subcommand)]
 enum BootstrapCommand {
@@ -395,6 +401,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Setup {
             command: Some(SetupCommand::Check),
         } => setup_check::run(&root)?,
+        Command::Setup {
+            command: Some(SetupCommand::Web { no_open }),
+        } => ui::web::run(&root, no_open)?,
         Command::Bootstrap { command } => match command {
             BootstrapCommand::Generate { overwrite } => bootstrap::run(&root, false, overwrite)?,
             BootstrapCommand::Check => bootstrap::run(&root, true, false)?,

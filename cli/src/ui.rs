@@ -5,6 +5,7 @@ mod mouse_input;
 #[cfg(any(windows, test))]
 mod terminal;
 mod view;
+pub(crate) mod web;
 use crate::gpg::SigningKey;
 use anyhow::{anyhow, bail, Result};
 use iocraft::prelude::*;
@@ -18,6 +19,7 @@ thread_local! { static CLIENT: RefCell<Option<Client>> = const { RefCell::new(No
 struct Client {
     sink: mpsc::Sender<Update>,
     notes: String,
+    web: bool,
 }
 enum Update {
     Question(Question, String, mpsc::Sender<Answer>),
@@ -25,6 +27,7 @@ enum Update {
     Finished(String, bool),
     Keys(u64, Result<Vec<SigningKey>>),
     Clipboard(u64, usize, Result<String, String>),
+    Phase(&'static str),
 }
 
 pub enum Answer {
@@ -77,6 +80,18 @@ pub fn active() -> bool {
     CLIENT.with(|client| client.borrow().is_some())
 }
 
+pub fn browser_active() -> bool {
+    CLIENT.with(|client| client.borrow().as_ref().is_some_and(|client| client.web))
+}
+
+pub fn phase(value: &'static str) {
+    CLIENT.with(|client| {
+        if let Some(client) = client.borrow().as_ref() {
+            let _ = client.sink.send(Update::Phase(value));
+        }
+    });
+}
+
 pub fn message(value: String) {
     CLIENT.with(|client| {
         let mut client = client.borrow_mut();
@@ -117,10 +132,10 @@ pub fn prompt(label: &str, default: Option<&str>, secret: bool) -> Result<String
     }
 }
 pub fn confirm(label: &str) -> Result<bool> {
-    Ok(matches!(
-        request(Question::Confirm(label.into()))?,
-        Answer::Confirm(true)
-    ))
+    match request(Question::Confirm(label.into()))? {
+        Answer::Confirm(value) => Ok(value),
+        _ => bail!("Setup cancelled. Accepted answers remain in the vault."),
+    }
 }
 pub fn use_saved(label: &str) -> Result<bool> {
     match request(Question::Saved(label.into()))? {
@@ -191,6 +206,7 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
                 *client.borrow_mut() = Some(Client {
                     sink: worker_send.clone(),
                     notes: String::new(),
+                    web: false,
                 })
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))

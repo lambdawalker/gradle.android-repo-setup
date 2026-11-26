@@ -61,13 +61,17 @@ fn read_password(label: &str, allow_generate: bool, saved: Option<&str>) -> Resu
             return Ok((saved.to_owned(), false));
         }
     }
-    let hint = if allow_generate {
+    let hint = if allow_generate && !crate::ui::browser_active() {
         " [Enter to generate]"
     } else {
         ""
     };
     loop {
         let value = secret_prompt(&format!("{label}{hint}"))?;
+        if value.is_empty() && allow_generate && crate::ui::browser_active() {
+            setup_message!("Enter a password for browser setup. Automatic generation and reveal are available in the terminal wizard.");
+            continue;
+        }
         if value.is_empty() && allow_generate {
             return Ok((generate_password()?, true));
         }
@@ -538,7 +542,10 @@ fn local_properties_path(value: &str) -> String {
         (rest.to_owned(), true)
     } else {
         let windows_drive = value.as_bytes().get(1) == Some(&b':')
-            && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic);
         let unc = value.starts_with(r"\\");
         (value.to_owned(), windows_drive || unc)
     };
@@ -575,12 +582,18 @@ fn local_properties_content(existing: &str, passwords: &SigningPasswords) -> Res
     let mut managed = false;
     for line in normalized.lines() {
         if line == LOCAL_PROPERTIES_BEGIN {
-            ensure!(!managed, "local.properties contains nested managed signing blocks.");
+            ensure!(
+                !managed,
+                "local.properties contains nested managed signing blocks."
+            );
             managed = true;
             continue;
         }
         if line == LOCAL_PROPERTIES_END {
-            ensure!(managed, "local.properties contains an unmatched managed signing block end.");
+            ensure!(
+                managed,
+                "local.properties contains an unmatched managed signing block end."
+            );
             managed = false;
             continue;
         }
@@ -924,7 +937,9 @@ mod tests {
         assert!(rendered.contains("sdk.dir=C:\\\\Android\\Sdk\n"));
         assert!(rendered.contains("custom=value\n"));
         assert!(!rendered.contains("ANDROID_KEYSTORE_PATH=old.jks"));
-        assert!(rendered.contains("ANDROID_KEYSTORE_PATH=C:/Users/David/.projects/demo/secrets/release key.jks"));
+        assert!(rendered.contains(
+            "ANDROID_KEYSTORE_PATH=C:/Users/David/.projects/demo/secrets/release key.jks"
+        ));
         assert!(rendered.contains("ANDROID_KEYSTORE_PASSWORD=store\\ pass\\:\\=\\#\\!"));
         assert!(rendered.contains("ANDROID_KEY_ALIAS=release\\:key"));
         assert!(rendered.contains("ANDROID_KEY_PASSWORD=different\\ key"));
@@ -947,7 +962,10 @@ mod tests {
             local_properties_path(r"C:\Users\David\release.jks"),
             "C:/Users/David/release.jks",
         );
-        assert_eq!(local_properties_path("/home/david/release.jks"), "/home/david/release.jks");
+        assert_eq!(
+            local_properties_path("/home/david/release.jks"),
+            "/home/david/release.jks"
+        );
     }
 
     #[test]

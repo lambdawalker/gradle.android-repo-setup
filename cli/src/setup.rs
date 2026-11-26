@@ -41,7 +41,7 @@ const OPERATIONS: [(&str, &str, &str); 5] = [
     ),
 ];
 
-fn signing_config(root: &Path) -> Result<vault::SetupConfig> {
+pub(crate) fn signing_config(root: &Path) -> Result<vault::SetupConfig> {
     let config: Config = serde_yaml_ng::from_str(&fs::read_to_string(
         root.join(".project/setup/config.yaml"),
     )?)?;
@@ -100,12 +100,7 @@ pub(crate) fn sign(root: &Path, options: SigningOptions) -> Result<()> {
                     .filter(|step| operations.contains(step))
                     .collect::<Vec<_>>();
                 if (!signing.is_empty() || operations.contains(&"local"))
-                    && !sign_with_config(
-                        root,
-                        &config,
-                        &signing,
-                        operations.contains(&"local"),
-                    )?
+                    && !sign_with_config(root, &config, &signing, operations.contains(&"local"))?
                 {
                     return Ok(());
                 }
@@ -155,6 +150,7 @@ fn update_workflows(root: &Path) -> Result<()> {
 
 pub(crate) fn run(root: &Path) -> Result<()> {
     vault::interactive()?;
+    crate::ui::phase("modules");
     let Some(modules) = crate::discovery::select(root)? else {
         return Ok(());
     };
@@ -172,6 +168,7 @@ pub(crate) fn run(root: &Path) -> Result<()> {
         })
         .collect::<Vec<_>>();
     let config = signing_config(root)?;
+    crate::ui::phase("actions");
     loop {
         let first_run = !config.state_path().exists()
             && !root
@@ -191,23 +188,23 @@ pub(crate) fn run(root: &Path) -> Result<()> {
         };
         let operations = selected.iter().map(|&i| available[i].0).collect::<Vec<_>>();
         if operations.contains(&"workflows") {
+            crate::ui::phase("workflows");
             update_workflows(root)?;
         }
         let signing = ["key", "github"]
             .into_iter()
             .filter(|step| operations.contains(step))
             .collect::<Vec<_>>();
+        if !signing.is_empty() || operations.contains(&"local") {
+            crate::ui::phase("signing");
+        }
         if (!signing.is_empty() || operations.contains(&"local"))
-            && !sign_with_config(
-                root,
-                &config,
-                &signing,
-                operations.contains(&"local"),
-            )?
+            && !sign_with_config(root, &config, &signing, operations.contains(&"local"))?
         {
             return Ok(());
         }
         if operations.contains(&"publishing") {
+            crate::ui::phase("publishing");
             publishing::setup(root, None, None)?;
         }
         return Ok(());
