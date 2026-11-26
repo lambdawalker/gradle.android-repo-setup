@@ -120,14 +120,6 @@ const actionNotes = {
   workflows: "No credentials are required. Changes to existing workflow files require your confirmation.",
 };
 
-$("sidebar-menu").addEventListener("click", () => {
-  const hidden = $("workspace").classList.toggle("sidebar-hidden");
-  const label = hidden ? "Show repository panels" : "Hide repository panels";
-  $("sidebar-menu").setAttribute("aria-expanded", String(!hidden));
-  $("sidebar-menu").setAttribute("aria-label", label);
-  $("sidebar-menu").title = label;
-});
-
 const mainMenuButton = $("main-menu-button");
 const mainMenuPanel = $("main-menu-panel");
 const mainMenuWrap = mainMenuButton.parentElement;
@@ -177,7 +169,7 @@ mainMenuPanel.addEventListener("keydown", event => {
   if (event.key === "Tab") {
     event.preventDefault();
     closeMainMenu();
-    (event.shiftKey ? mainMenuButton : $("sidebar-menu")).focus();
+    (event.shiftKey ? mainMenuButton : $("module-tabs").querySelector("button:not(:disabled)") || $("theme")).focus();
     return;
   }
   const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 :
@@ -196,7 +188,9 @@ document.addEventListener("focusin", event => {
 });
 $("menu-toggle-panels").addEventListener("click", () => {
   closeMainMenu();
-  $("sidebar-menu").click();
+  const hidden = $("workspace").classList.toggle("sidebar-hidden");
+  $("menu-toggle-panels").textContent = hidden ? "Show repository panels" : "Hide repository panels";
+  mainMenuButton.focus();
 });
 $("menu-close-wizard").addEventListener("click", () => {
   closeMainMenu();
