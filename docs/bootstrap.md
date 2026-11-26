@@ -12,7 +12,7 @@ opening a tab. Keep the launcher running while using the site. The browser
 serves only on loopback and uses the same encrypted vault and repository
 configuration as terminal setup; it does not change the generated
 launcher or CI entry points. Keep its printed one-time link and session
-recovery code private. If the session locks after 30 minutes without operator
+recovery code private. If the session locks after 20 minutes without operator
 activity, unlock it with the vault password or that recovery code. For the
 workspace and credential behavior, see the
 [browser setup wizard](../README.md#browser-setup-wizard).

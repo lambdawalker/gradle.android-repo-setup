@@ -215,7 +215,7 @@ Pass `--no-open` after `web` to print the local address without trying to open
 a browser, for example `sh ./setup.sh setup web --no-open` or
 `setup.bat setup web --no-open`. The printed link works once. Keep the session
 recovery code printed beside it private; it can unlock this wizard if it locks
-after 30 minutes without operator activity. Keep the CLI running while using
+after 20 minutes without operator activity. Keep the CLI running while using
 the wizard; closing it ends the local session. The site runs on loopback and
 is separate from any documentation site or deployed application. Refreshing
 the same browser tab resumes its session using tab-scoped browser storage; a
@@ -252,7 +252,9 @@ directly.
 The browser uses the existing encrypted setup vault and signing environment
 scope. The site opens with a vault dialog: enter the existing passphrase, or
 create and confirm one if there is no vault. The same dialog asks for the
-passphrase again when the page is reopened. Saved secret values are
+passphrase again when the page is reopened. The **File** menu has a **Vault**
+section to view the masked saved entries or remake the local vault; these
+actions remain available after a setup run finishes. Saved secret values are
 not returned to the browser. Choose **Use vault value** when prompted to keep an
 existing value; an empty replacement is not a general reuse signal. After
 20 minutes without operator activity, enter the saved vault passphrase or the
