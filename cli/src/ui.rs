@@ -55,6 +55,16 @@ pub struct Field {
     pub value: String,
     pub secret: bool,
 }
+#[derive(Clone)]
+pub(crate) struct ModuleChoice {
+    pub id: String,
+    pub path: String,
+    pub kind: crate::discovery::Kind,
+    pub directory: String,
+    pub label: String,
+    pub description: String,
+    pub selected: bool,
+}
 enum Question {
     Text {
         label: String,
@@ -66,7 +76,7 @@ enum Question {
         operations: Vec<(String, String)>,
         first_run: bool,
     },
-    Modules(Vec<(String, String, bool)>),
+    Modules(Vec<ModuleChoice>),
     Key,
     Form {
         title: String,
@@ -155,7 +165,7 @@ pub fn menu(operations: &[(&str, &str, &str)], first_run: bool) -> Result<Menu> 
         _ => Ok(Menu::Exit),
     }
 }
-pub fn select_modules(entries: Vec<(String, String, bool)>) -> Result<Option<Vec<usize>>> {
+pub fn select_modules(entries: Vec<ModuleChoice>) -> Result<Option<Vec<usize>>> {
     match request(Question::Modules(entries))? {
         Answer::Menu(Menu::Setup(selected)) => Ok(Some(selected)),
         _ => Ok(None),

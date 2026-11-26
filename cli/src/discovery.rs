@@ -319,22 +319,24 @@ pub(crate) fn select(root: &Path) -> Result<Option<Modules>> {
     );
     let entries = modules
         .iter()
-        .map(|(id, m)| {
-            (
-                format!(
-                    "{} — {}",
-                    m.path,
-                    if m.kind.is_jvm() {
-                        "JVM library"
-                    } else if m.kind.is_library() {
-                        "Android library"
-                    } else {
-                        "App"
-                    }
-                ),
-                format!("{} · {id}", m.directory),
-                m.selected,
-            )
+        .map(|(id, m)| crate::ui::ModuleChoice {
+            id: id.clone(),
+            path: m.path.clone(),
+            kind: m.kind.clone(),
+            directory: m.directory.clone(),
+            label: format!(
+                "{} — {}",
+                m.path,
+                if m.kind.is_jvm() {
+                    "JVM library"
+                } else if m.kind.is_library() {
+                    "Android library"
+                } else {
+                    "App"
+                }
+            ),
+            description: format!("{} · {id}", m.directory),
+            selected: m.selected,
         })
         .collect();
     let Some(indices) = crate::ui::select_modules(entries)? else {

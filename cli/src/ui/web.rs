@@ -565,8 +565,10 @@ impl Pending {
             }),
             Question::Modules(entries) => json!({
                 "id":id,"kind":"modules","label":"Select libraries and apps",
-                "options":entries.iter().enumerate().map(|(index,(label,description,selected))| json!({
-                    "value":index.to_string(),"label":label,"description":description,"selected":selected,
+                "options":entries.iter().enumerate().map(|(index,entry)| json!({
+                    "value":index.to_string(),"label":entry.label,"description":entry.description,
+                    "selected":entry.selected,"id":entry.id,"path":entry.path,
+                    "kind":entry.kind,"directory":entry.directory,
                 })).collect::<Vec<_>>(),
             }),
             Question::Saved(label) => json!({
@@ -1013,6 +1015,101 @@ mod tests {
             value["session"].as_str().unwrap().into(),
             value["csrf"].as_str().unwrap().into(),
         )
+    }
+
+    #[test]
+    fn discovered_modules_are_structured_before_the_selection_is_saved() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".project/setup")).unwrap();
+        fs::write(
+            root.path().join(discovery::CONFIG),
+            "repository: example/project\ntooling_ref: v0.1.28\nmodules: {}\n",
+        )
+        .unwrap();
+        let (sender, updates) = mpsc::channel();
+        let mut server = Server::new(
+            root.path().to_path_buf(),
+            sender,
+            updates,
+            "launch-secret".into(),
+            "recovery-secret".into(),
+        );
+        let (reply, _) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 1,
+            question: Question::Modules(vec![
+                crate::ui::ModuleChoice {
+                    id: "libs--vision".into(),
+                    path: ":libs:vision".into(),
+                    kind: discovery::Kind::Library,
+                    directory: "components/vision".into(),
+                    label: ":libs:vision — Android library".into(),
+                    description: "components/vision · libs--vision".into(),
+                    selected: true,
+                },
+                crate::ui::ModuleChoice {
+                    id: "demo".into(),
+                    path: ":demo".into(),
+                    kind: discovery::Kind::Application,
+                    directory: "mobile".into(),
+                    label: ":demo — App".into(),
+                    description: "mobile · demo".into(),
+                    selected: false,
+                },
+            ]),
+            reply,
+            keys: Vec::new(),
+            key_status: None,
+        });
+        let unsaved = server.snapshot();
+        assert_eq!(unsaved["context"]["modules"], json!([]));
+        let options = &unsaved["prompt"]["options"];
+        assert_eq!(options[0]["id"], "libs--vision");
+        assert_eq!(options[0]["path"], ":libs:vision");
+        assert_eq!(options[0]["kind"], "library");
+        assert_eq!(options[0]["directory"], "components/vision");
+        assert_eq!(options[0]["selected"], true);
+        assert_eq!(options[1]["id"], "demo");
+        assert_eq!(options[1]["kind"], "application");
+        assert_eq!(options[1]["selected"], false);
+        assert!(matches!(
+            server.pending.as_ref().unwrap().parse_answer(&json!([0])).unwrap(),
+            Answer::Menu(Menu::Setup(indices)) if indices == vec![0]
+        ));
+
+        let saved = discovery::Modules::from([
+            (
+                "libs--vision".into(),
+                discovery::Module {
+                    path: ":libs:vision".into(),
+                    directory: "components/vision".into(),
+                    kind: discovery::Kind::Library,
+                    selected: true,
+                    namespace: None,
+                    application_ids: vec![],
+                    screenshots: false,
+                },
+            ),
+            (
+                "demo".into(),
+                discovery::Module {
+                    path: ":demo".into(),
+                    directory: "mobile".into(),
+                    kind: discovery::Kind::Application,
+                    selected: false,
+                    namespace: None,
+                    application_ids: vec![],
+                    screenshots: false,
+                },
+            ),
+        ]);
+        discovery::save(root.path(), &saved).unwrap();
+        let context = server.snapshot()["context"]["modules"].clone();
+        assert_eq!(context[0]["name"], "demo");
+        assert_eq!(context[0]["selected"], false);
+        assert_eq!(context[1]["name"], "libs--vision");
+        assert_eq!(context[1]["kind"], "library");
+        assert_eq!(context[1]["selected"], true);
     }
 
     #[test]

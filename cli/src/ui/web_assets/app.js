@@ -75,6 +75,10 @@ let timer = null;
 let deadline = 0;
 let paused = false;
 let artifactSignature = "";
+const moduleFocusKey = "android-repo-setup-module-focus-v1";
+let activeModule = (() => { try { return sessionStorage.getItem(moduleFocusKey) || null; } catch { return null; } })();
+let availableModules = [];
+let moduleTabsKey = "";
 
 const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
 function activateTab(tab, focus = false) {
@@ -340,7 +344,7 @@ function renderPrompt(prompt) {
   if (prompt.kind === "menu" || prompt.kind === "modules") {
     const note = el("p", prompt.kind === "menu" ?
       "Select independent setup operations. Review their effects before running them." :
-      "Choose the modules and apps this repository should configure.", "prompt-help");
+      "Choose the modules and apps this repository should configure. Header tabs show module details; use these checkboxes to change the setup selection.", "prompt-help");
     container.append(note, renderChoice(prompt, true));
     const secondary = el("div", "", "secondary-actions");
     if (prompt.kind === "menu") {
@@ -353,7 +357,7 @@ function renderPrompt(prompt) {
       container.append(secondary);
     }
     card.textContent = prompt.kind === "menu" ? "Setup selected tasks" : "Continue";
-    container.addEventListener("change", updateFooter);
+    container.addEventListener("change", () => { updateFooter(); if (prompt.kind === "modules") syncModuleSelection(); });
   } else if (prompt.kind === "text") {
     const input = field(title, prompt.default, Boolean(prompt.secret));
     container.append(input.wrapper);
@@ -403,6 +407,7 @@ function renderPrompt(prompt) {
   error.hidden = true;
   container.append(error);
   chooseTabFor(prompt);
+  highlightModuleChoice();
   updateFooter();
   startCountdown(prompt);
   requireResumeOnRestore = false;
@@ -558,10 +563,14 @@ function renderContext(data) {
   const repository = String(context.repository || "");
   const root = String(context.root || "");
   const parts = [["Repository", repository || "Current checkout"], ["Local path", root || "Current directory"]];
-  if (Array.isArray(context.modules) && context.modules.length) {
-    const modules = context.modules.filter(module => typeof module === "string" || module.selected !== false)
-      .map(module => typeof module === "string" ? module : module.name || module.path || module.directory || "Module");
-    parts.push(["Modules", modules.length ? modules.join(", ") : "No modules selected"]);
+  if (availableModules.length) {
+    const selected = availableModules.filter(module => module.selected).map(module => module.path);
+    parts.push(["Modules", selected.length ? selected.join(", ") : "No modules selected"]);
+  }
+  const focused = availableModules.find(module => module.id === activeModule);
+  if (focused) {
+    parts.push(["Focused module", focused.path], ["Type", moduleKind(focused.kind)],
+      ["Directory", focused.directory || "."], ["Setup selection", focused.selected ? "Included" : "Not selected"]);
   }
   const list = $("context-list");
   list.replaceChildren();
@@ -575,6 +584,112 @@ function renderContext(data) {
   $("project-tab").textContent = repository.split("/").at(-1) || "Repository setup";
   document.title = "Setup: " + $("project-tab").textContent;
 }
+function moduleKind(kind) {
+  return ({library: "Android library", application: "Android app", "jvm-library": "JVM library"})[kind] || "Module";
+}
+function moduleDescription(module) {
+  return `${module.path} — ${moduleKind(module.kind)} · ${module.directory || "."} · ${module.selected ? "Included in setup" : "Not selected for setup"}`;
+}
+function moduleSetupAreas(module) {
+  return module.kind === "application" ? "APK signing, local signing, signing environment and workflows" :
+    "Publishing environments and workflows";
+}
+function renderModuleDetail() {
+  if (selectedDetail) return;
+  const module = availableModules.find(item => item.id === activeModule);
+  $("detail-content").replaceChildren(module ?
+    el("h3", module.path) : el("h3", "Repository setup"),
+    el("p", module ? `${moduleKind(module.kind)} · ${module.directory || "."}\n${module.selected ? "Included in repository setup." : "Not selected for repository setup."}\nRelevant setup areas: ${moduleSetupAreas(module)}. Operations run for the repository and its selected modules.` :
+      "Discover modules, select the ones to configure, then review repository setup operations."));
+}
+function markModuleTabs() {
+  for (const tab of $("module-tabs").children) {
+    const selected = (tab.dataset.moduleId || null) === activeModule;
+    if (selected) tab.setAttribute("aria-current", "true");
+    else tab.removeAttribute("aria-current");
+    const module = availableModules.find(item => item.id === tab.dataset.moduleId);
+    if (module) {
+      tab.title = moduleDescription(module);
+      tab.setAttribute("aria-label", moduleDescription(module));
+      tab.classList.toggle("unselected", !module.selected);
+    }
+  }
+}
+function selectModule(id, focus = false) {
+  if (id !== null && !availableModules.some(module => module.id === id)) return;
+  activeModule = id;
+  try {
+    if (id === null) sessionStorage.removeItem(moduleFocusKey);
+    else sessionStorage.setItem(moduleFocusKey, id);
+  } catch { /* The current tab can keep its module focus in memory. */ }
+  selectedDetail = null;
+  markModuleTabs();
+  if (focus) [...$("module-tabs").children].find(tab => (tab.dataset.moduleId || null) === id)?.focus();
+  if (state) {
+    renderContext(state);
+    renderOverview(state);
+  }
+  highlightModuleChoice();
+  renderModuleDetail();
+}
+function highlightModuleChoice() {
+  const options = state?.prompt?.kind === "modules" ? state.prompt.options || [] : [];
+  const option = options.find(item => item.id === activeModule);
+  for (const input of $("action-content").querySelectorAll('input[name="setup-choice"]')) {
+    const focused = Boolean(option && input.value === option.value);
+    input.closest(".action-card")?.classList.toggle("focused-module", focused);
+    if (focused) input.closest(".action-card")?.scrollIntoView({block: "nearest"});
+  }
+}
+function renderModuleTabs(data) {
+  const source = data.prompt?.kind === "modules" ? data.prompt.options : data.context?.modules;
+  const modules = (Array.isArray(source) ? source : []).filter(module =>
+    module && typeof (module.id || module.name) === "string" && typeof module.path === "string")
+    .map(module => ({id: module.id || module.name, path: module.path, kind: module.kind,
+      directory: module.directory, selected: module.selected !== false, value: module.value}));
+  const key = JSON.stringify(modules);
+  if (key === moduleTabsKey) return;
+  moduleTabsKey = key;
+  availableModules = modules;
+  if (activeModule && !modules.some(module => module.id === activeModule)) {
+    activeModule = null;
+    try { sessionStorage.removeItem(moduleFocusKey); } catch { /* Storage may be disabled. */ }
+  }
+  const nav = $("module-tabs");
+  const focused = nav.contains(document.activeElement) ? document.activeElement.dataset.moduleId || null : undefined;
+  const project = $("project-tab");
+  nav.replaceChildren(project, ...modules.map(module => {
+    const tab = el("button", module.path, "module-tab");
+    tab.type = "button";
+    tab.dataset.moduleId = module.id;
+    return tab;
+  }));
+  markModuleTabs();
+  if (focused !== undefined) [...nav.children].find(tab => (tab.dataset.moduleId || null) === focused)?.focus();
+  if (!selectedDetail) renderModuleDetail();
+}
+function syncModuleSelection() {
+  if (state?.prompt?.kind !== "modules") return;
+  const selected = new Set([...$("action-content").querySelectorAll('input[name="setup-choice"]:checked')].map(input => input.value));
+  for (const module of availableModules) module.selected = selected.has(module.value);
+  markModuleTabs();
+  renderContext(state);
+  renderOverview(state);
+  renderModuleDetail();
+}
+$("module-tabs").addEventListener("click", event => {
+  const tab = event.target.closest(".module-tab");
+  if (tab && $("module-tabs").contains(tab)) selectModule(tab.dataset.moduleId || null);
+});
+$("module-tabs").addEventListener("keydown", event => {
+  const tabs = [...$("module-tabs").children];
+  const current = tabs.indexOf(document.activeElement);
+  if (current < 0) return;
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 :
+    event.key === "ArrowLeft" ? (current + tabs.length - 1) % tabs.length :
+    event.key === "ArrowRight" ? (current + 1) % tabs.length : -1;
+  if (next >= 0) { event.preventDefault(); selectModule(tabs[next].dataset.moduleId || null, true); }
+});
 function renderArtifacts(data) {
   const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
   const signature = JSON.stringify(artifacts);
@@ -631,6 +746,12 @@ function renderOverview(data) {
     content.append(card);
   };
   add("Current step", data.prompt?.label || data.phase || "Ready to start");
+  const module = availableModules.find(item => item.id === activeModule);
+  if (module) {
+    add("Focused module", `${module.path} · ${moduleKind(module.kind)}\n${module.directory || "."}`);
+    add("Setup selection", module.selected ? "Included in repository setup." : "Not selected for repository setup. Select it in the module checklist to include it.");
+    add("Relevant setup areas", moduleSetupAreas(module));
+  }
   const selected = data.prompt?.kind === "menu" ? (data.prompt.options || []).filter(option => option.selected).map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
   if (data.status === "error") add("Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
@@ -660,6 +781,7 @@ function renderState(data) {
   const status = $("action-state");
   status.textContent = ({idle: "Ready", running: "In progress", finished: "Complete", error: "Needs attention", closing: "Stopping"})[data.status] || data.status || "Connecting";
   status.className = "state-badge " + (data.status === "running" ? "running" : data.status === "finished" ? "complete" : data.status === "error" ? "failed" : "");
+  renderModuleTabs(data);
   renderContext(data);
   renderProgress(data);
   renderArtifacts(data);

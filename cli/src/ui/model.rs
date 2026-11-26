@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::ModuleChoice;
 use super::{Answer, Field, KeyChoice, Menu, Question, SigningKey, Update};
 use anyhow::Result;
 use iocraft::prelude::*;
@@ -226,10 +228,10 @@ impl Model {
                 }
             }
             Question::Modules(entries) => Screen::Menu {
-                checked: entries.iter().map(|e| e.2).collect(),
+                checked: entries.iter().map(|entry| entry.selected).collect(),
                 operations: entries
                     .into_iter()
-                    .map(|(label, help, _)| (label, help))
+                    .map(|entry| (entry.label, entry.description))
                     .collect(),
                 modules: true,
             },
@@ -695,8 +697,24 @@ mod regressions {
     #[test]
     fn module_menu_restores_selection_and_cancels_without_saving() {
         let entries = vec![
-            (":library".into(), "Library".into(), true),
-            (":app".into(), "App".into(), false),
+            ModuleChoice {
+                id: "library".into(),
+                path: ":library".into(),
+                kind: crate::discovery::Kind::Library,
+                directory: "library".into(),
+                label: ":library".into(),
+                description: "Library".into(),
+                selected: true,
+            },
+            ModuleChoice {
+                id: "app".into(),
+                path: ":app".into(),
+                kind: crate::discovery::Kind::Application,
+                directory: "app".into(),
+                label: ":app".into(),
+                description: "App".into(),
+                selected: false,
+            },
         ];
         let (mut state, rx) = show(Question::Modules(entries.clone()));
         assert!(!state
