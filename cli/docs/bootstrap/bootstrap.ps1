@@ -29,14 +29,24 @@ if (!(Test-Path -LiteralPath $exe)) {
     } else {
       $previousTarget = $env:CARGO_TARGET_DIR
       try {
-        $env:CARGO_TARGET_DIR = Join-Path $stage 'target'
+        # Keep build artifacts for this pin across repositories without reusing
+        # a final executable compiled from another Git revision.
+        $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+        if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'Could not locate the local build cache directory' }
+        $buildCache = Join-Path $localAppData 'android-repo-setup'
+        $targetRoot = Join-Path $buildCache 'cargo-target'
+        $buildTarget = Join-Path $targetRoot $pin
+        foreach ($path in @($buildCache, $targetRoot, $buildTarget)) {
+          if ((Test-Path -LiteralPath $path) -and ((Get-Item -Force -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Refusing symlink: $path" }
+        }
+        New-Item -ItemType Directory -Force $buildTarget | Out-Null
+        $env:CARGO_TARGET_DIR = $buildTarget
         & cargo install --locked --root $stage --git https://github.com/lambdawalker/gradle.android-repo-setup.git --rev $pin android-repo-docs
         if ($LASTEXITCODE -ne 0) { throw 'Cargo installation failed' }
       } finally { $env:CARGO_TARGET_DIR = $previousTarget }
     }
     $version = & (Join-Path $stage 'bin/android-repo-docs.exe') --version
     if ($LASTEXITCODE -ne 0 -or ($pin.StartsWith('v') -and $version -cne "android-repo-docs $($pin.Substring(1))") -or $version -notmatch '^android-repo-docs ') { throw 'Downloaded CLI version mismatch' }
-    Remove-Item (Join-Path $stage 'target') -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $destination) { throw 'Invalid existing cache; remove it and retry' }
     Move-Item $stage $destination
   } finally { if (Test-Path $stage) { Remove-Item $stage -Recurse -Force } }

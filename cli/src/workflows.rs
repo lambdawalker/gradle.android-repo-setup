@@ -484,7 +484,25 @@ pub(crate) fn update(root: &Path, mode: Mode) -> Result<bool> {
     update_with_ref(root, mode, None)
 }
 
+pub(crate) fn update_module(root: &Path, mode: Mode, module_id: &str) -> Result<bool> {
+    let modules = crate::discovery::load(root)?.context("No saved module inventory")?;
+    ensure!(
+        modules.get(module_id).is_some_and(|module| module.selected),
+        "Unknown or excluded workflow module: {module_id}"
+    );
+    update_scoped(root, mode, None, Some(module_id))
+}
+
 pub(crate) fn update_with_ref(root: &Path, mode: Mode, reference: Option<&str>) -> Result<bool> {
+    update_scoped(root, mode, reference, None)
+}
+
+fn update_scoped(
+    root: &Path,
+    mode: Mode,
+    reference: Option<&str>,
+    module_id: Option<&str>,
+) -> Result<bool> {
     ensure!(
         reference.is_none() || mode == Mode::Overwrite,
         "Updating the tooling pin requires overwrite mode"
@@ -499,8 +517,12 @@ pub(crate) fn update_with_ref(root: &Path, mode: Mode, reference: Option<&str>) 
         reject_symlink(path)?;
     }
     if mode == Mode::Check {
-        let drift = compare_and_apply(root, &output, &manifest, mode)?;
-        return Ok(update_inventory(root, mode)? || drift);
+        let drift = compare_and_apply(root, &output, &manifest, mode, module_id)?;
+        return Ok(if module_id.is_some() {
+            drift
+        } else {
+            update_inventory(root, mode)? || drift
+        });
     }
 
     let lock_file = OpenOptions::new()
@@ -513,8 +535,12 @@ pub(crate) fn update_with_ref(root: &Path, mode: Mode, reference: Option<&str>) 
     if let Some(reference) = reference {
         set_tooling_ref(root, reference)?;
     }
-    let drift = compare_and_apply(root, &output, &manifest, mode)?;
-    Ok(update_inventory(root, mode)? || drift)
+    let drift = compare_and_apply(root, &output, &manifest, mode, module_id)?;
+    Ok(if module_id.is_some() {
+        drift
+    } else {
+        update_inventory(root, mode)? || drift
+    })
 }
 
 fn update_inventory(root: &Path, mode: Mode) -> Result<bool> {
@@ -545,7 +571,27 @@ fn shell_path(value: &str) -> String {
     }
 }
 
-fn compare_and_apply(root: &Path, output: &Path, manifest: &Path, mode: Mode) -> Result<bool> {
+fn module_workflow_names(module_id: &str) -> [String; 5] {
+    [
+        format!("publish-{module_id}.yml"),
+        format!("build-signed-{module_id}-apk.yml"),
+        format!("screenshots-{module_id}.yml"),
+        format!("verify-release-tooling-{module_id}.yml"),
+        format!("reconcile-failed-jitpack-{module_id}.yml"),
+    ]
+}
+
+fn module_workflow_name(name: &str, module_id: &str) -> bool {
+    module_workflow_names(module_id).iter().any(|candidate| candidate == name)
+}
+
+fn compare_and_apply(
+    root: &Path,
+    output: &Path,
+    manifest: &Path,
+    mode: Mode,
+    module_id: Option<&str>,
+) -> Result<bool> {
     let mut hashes: BTreeMap<String, String> = match read_optional(manifest)? {
         Some(text) => serde_json::from_str(&text).context("Invalid workflow hash manifest")?,
         None => BTreeMap::new(),
@@ -554,13 +600,22 @@ fn compare_and_apply(root: &Path, output: &Path, manifest: &Path, mode: Mode) ->
     let rendered = render(root)?;
     let desired: std::collections::BTreeSet<_> =
         rendered.iter().map(|(name, _)| name.clone()).collect();
+    let all_module_files: std::collections::BTreeSet<_> = if module_id.is_some() {
+        crate::discovery::load(root)?
+            .unwrap_or_default()
+            .keys()
+            .flat_map(|id| module_workflow_names(id))
+            .collect()
+    } else {
+        Default::default()
+    };
     let mut obsolete = Vec::new();
     for (name, old_hash) in &hashes {
         ensure!(
             Path::new(name).file_name().and_then(|v| v.to_str()) == Some(name.as_str()),
             "Invalid workflow manifest filename"
         );
-        if !desired.contains(name) {
+        if !desired.contains(name) && module_id.is_none_or(|id| module_workflow_name(name, id)) {
             let path = output.join(name);
             if let Some(text) = read_optional(&path)? {
                 ensure!(hash(&text) == *old_hash, "Obsolete workflow {name} has local changes; archive or remove it explicitly before regenerating");
@@ -570,6 +625,16 @@ fn compare_and_apply(root: &Path, output: &Path, manifest: &Path, mode: Mode) ->
         }
     }
     for (name, content) in rendered {
+        if let Some(id) = module_id {
+            // Module-specific workflows may be replaced only for this module.
+            // Shared workflows are created when missing, never overwritten by
+            // a single module's action. Other modules' files are untouched.
+            if !module_workflow_name(&name, id)
+                && (all_module_files.contains(&name) || output.join(&name).exists())
+            {
+                continue;
+            }
+        }
         let path = output.join(&name);
         let previous = read_optional(&path)?;
         if previous.as_deref() == Some(content.as_str())
@@ -607,7 +672,9 @@ fn compare_and_apply(root: &Path, output: &Path, manifest: &Path, mode: Mode) ->
             fs::remove_file(path)?;
             hashes.remove(name);
         }
-        hashes.retain(|name, _| desired.contains(name));
+        if module_id.is_none() {
+            hashes.retain(|name, _| desired.contains(name));
+        }
     }
     if !changes.is_empty() || !obsolete.is_empty() || !manifest.exists() {
         replace(manifest, &serde_json::to_string_pretty(&hashes)?)?;
@@ -721,4 +788,38 @@ fn documentation_tool_workflow(root: &Path, template: &str, rendered: &str) -> R
         output = output.replace("          git diff --cached --binary > workflow-update.patch", "          git add .project/docs/config.yaml\n          if [[ -f .project/docs/bootstrap.ps1 ]]; then\n            git add docs.sh docs.bat .project/docs/bootstrap.ps1 .gitignore\n          fi\n          git diff --cached --binary > workflow-update.patch");
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+
+    #[test]
+    fn module_update_keeps_other_modules_and_existing_shared_workflows() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let setup = root.path().join(".project/setup");
+        fs::create_dir_all(&setup)?;
+        let mut config: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(include_str!("../tests/fixtures/config.yaml"))?;
+        config["android_modules"] = serde_yaml_ng::from_str(
+            "app: {path: ':app', directory: app, kind: application}\nlib: {path: ':lib', directory: lib, kind: library}\n",
+        )?;
+        fs::write(setup.join("config.yaml"), serde_yaml_ng::to_string(&config)?)?;
+
+        update_module(root.path(), Mode::OnlyMissing, "app")?;
+        let workflows = root.path().join(".github/workflows");
+        let app = workflows.join("build-signed-app-apk.yml");
+        let library = workflows.join("publish-lib.yml");
+        let shared = workflows.join("unit-tests.yml");
+        ensure!(app.is_file() && shared.is_file() && !library.exists());
+        let original_app = fs::read_to_string(&app)?;
+        fs::write(&shared, "# locally maintained shared workflow\n")?;
+
+        update_module(root.path(), Mode::Overwrite, "lib")?;
+        ensure!(library.is_file());
+        ensure!(fs::read_to_string(&app)? == original_app);
+        ensure!(fs::read_to_string(&shared)? == "# locally maintained shared workflow\n");
+        ensure!(!update_module(root.path(), Mode::Check, "app")?);
+        Ok(())
+    }
 }

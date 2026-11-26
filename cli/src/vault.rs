@@ -167,6 +167,22 @@ pub fn regular_file_exists(path: &Path) -> Result<bool> {
     }
 }
 
+pub(crate) fn browser_vault_exists(config: &SetupConfig) -> Result<bool> {
+    let path = config.state_path();
+    if regular_file_exists(&path)? {
+        return Ok(true);
+    }
+    if config.vault_path.is_some() {
+        return Ok(false);
+    }
+    let legacy = config
+        .state_dir
+        .join(config.repository.to_ascii_lowercase().replace('/', "--"))
+        .join("secrets")
+        .join(path.file_name().unwrap());
+    regular_file_exists(&legacy)
+}
+
 fn file_options() -> OpenOptions {
     #[cfg(unix)]
     {
@@ -509,6 +525,9 @@ impl SetupVault {
 }
 
 pub fn interactive() -> Result<()> {
+    if crate::ui::browser_active() {
+        return Ok(());
+    }
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal(),
         "Run this wizard in an interactive terminal without redirection."
@@ -555,6 +574,13 @@ pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVa
     }
 }
 
+pub(crate) fn create_browser_vault(config: &SetupConfig, password: &str) -> Result<()> {
+    let _lock = lock(config, true)?;
+    let path = config.state_path();
+    ensure!(!regular_file_exists(&path)?, "A setup vault already exists.");
+    SetupVault::create(&path, password)?.save()
+}
+
 pub fn view(config: &SetupConfig) -> Result<bool> {
     interactive()?;
     ensure!(
@@ -578,6 +604,9 @@ pub fn view(config: &SetupConfig) -> Result<bool> {
     };
     setup_message!("Saved setup vault · read-only");
     setup_message!("{}", vault.formatted(false)?);
+    if crate::ui::browser_active() {
+        return Ok(true);
+    }
     setup_message!("Revealing displays passwords, tokens, and saved keys.");
     if confirm("I am in a private terminal. Reveal vault secrets?")? {
         private_screen(|| {
@@ -593,7 +622,11 @@ pub fn remake(config: &SetupConfig) -> Result<bool> {
     interactive()?;
     let _lock = lock(config, true)?;
     setup_message!("Remaking the local vault clears its saved credentials and setup progress. The APK keystore file will not be deleted. GitHub environment secrets will remain.");
-    setup_message!("If the vault holds your only copy of a password you still need, recover it with View vault first.");
+    if crate::ui::browser_active() {
+        setup_message!("If the vault holds your only copy of a password, use the terminal wizard to reveal and save it before replacing the vault.");
+    } else {
+        setup_message!("If the vault holds your only copy of a password you still need, recover it with View vault first.");
+    }
     if !confirm("Replace the local vault?")? {
         return Ok(false);
     }

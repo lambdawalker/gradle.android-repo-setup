@@ -317,24 +317,37 @@ pub(crate) fn select(root: &Path) -> Result<Option<Modules>> {
         !modules.is_empty(),
         "No Android library, application, or JVM library plugins found in this Gradle build."
     );
+    // The browser exposes each discovered module as a tab with its applicable
+    // setup actions. Keep the saved selection and proceed directly to those
+    // actions; the terminal still offers its explicit module checklist.
+    if crate::ui::browser_active() {
+        ensure!(
+            modules.values().any(|module| module.selected),
+            "No modules are selected for setup. Run android-repo-setup select-modules to include at least one."
+        );
+        save(root, &modules)?;
+        return Ok(Some(modules));
+    }
     let entries = modules
         .iter()
-        .map(|(id, m)| {
-            (
-                format!(
-                    "{} — {}",
-                    m.path,
-                    if m.kind.is_jvm() {
-                        "JVM library"
-                    } else if m.kind.is_library() {
-                        "Android library"
-                    } else {
-                        "App"
-                    }
-                ),
-                format!("{} · {id}", m.directory),
-                m.selected,
-            )
+        .map(|(id, m)| crate::ui::ModuleChoice {
+            id: id.clone(),
+            path: m.path.clone(),
+            kind: m.kind.clone(),
+            directory: m.directory.clone(),
+            label: format!(
+                "{} — {}",
+                m.path,
+                if m.kind.is_jvm() {
+                    "JVM library"
+                } else if m.kind.is_library() {
+                    "Android library"
+                } else {
+                    "App"
+                }
+            ),
+            description: format!("{} · {id}", m.directory),
+            selected: m.selected,
         })
         .collect();
     let Some(indices) = crate::ui::select_modules(entries)? else {

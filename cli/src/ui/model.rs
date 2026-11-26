@@ -1,4 +1,6 @@
 use super::{Answer, Field, KeyChoice, Menu, Question, SigningKey, Update};
+#[cfg(test)]
+use super::{ModuleChoice, OperationChoice};
 use anyhow::Result;
 use iocraft::prelude::*;
 use std::{
@@ -6,6 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+#[cfg(test)]
+fn operation(id: &str, label: &str, description: &str) -> OperationChoice {
+    OperationChoice {
+        id: id.into(),
+        label: label.into(),
+        description: description.into(),
+    }
+}
 
 /// Cursor offsets are UTF-8 boundaries between extended grapheme clusters.
 /// The buffer is never formatted with Debug or passed to an unmasked widget.
@@ -220,16 +231,19 @@ impl Model {
             } => {
                 let checked = vec![first_run; operations.len()];
                 Screen::Menu {
-                    operations,
+                    operations: operations
+                        .into_iter()
+                        .map(|operation| (operation.label, operation.description))
+                        .collect(),
                     checked,
                     modules: false,
                 }
             }
             Question::Modules(entries) => Screen::Menu {
-                checked: entries.iter().map(|e| e.2).collect(),
+                checked: entries.iter().map(|entry| entry.selected).collect(),
                 operations: entries
                     .into_iter()
-                    .map(|(label, help, _)| (label, help))
+                    .map(|entry| (entry.label, entry.description))
                     .collect(),
                 modules: true,
             },
@@ -695,8 +709,24 @@ mod regressions {
     #[test]
     fn module_menu_restores_selection_and_cancels_without_saving() {
         let entries = vec![
-            (":library".into(), "Library".into(), true),
-            (":app".into(), "App".into(), false),
+            ModuleChoice {
+                id: "library".into(),
+                path: ":library".into(),
+                kind: crate::discovery::Kind::Library,
+                directory: "library".into(),
+                label: ":library".into(),
+                description: "Library".into(),
+                selected: true,
+            },
+            ModuleChoice {
+                id: "app".into(),
+                path: ":app".into(),
+                kind: crate::discovery::Kind::Application,
+                directory: "app".into(),
+                label: ":app".into(),
+                description: "App".into(),
+                selected: false,
+            },
         ];
         let (mut state, rx) = show(Question::Modules(entries.clone()));
         assert!(!state
@@ -716,7 +746,7 @@ mod regressions {
     fn first_run_and_returning_menu_and_vault_actions() {
         for first_run in [false, true] {
             let (mut state, rx) = show(Question::Menu {
-                operations: vec![("Sign".into(), "Create a key".into())],
+                operations: vec![operation("sign", "Sign", "Create a key")],
                 first_run,
             });
             let Screen::Menu { checked, .. } = &state.screen else {
@@ -749,7 +779,7 @@ mod regressions {
     #[test]
     fn help_and_form_validation_do_not_answer_until_accepted() {
         let (mut state, rx) = show(Question::Menu {
-            operations: vec![("Sign".into(), "Create a key".into())],
+            operations: vec![operation("sign", "Sign", "Create a key")],
             first_run: true,
         });
         state.activate(Control::Action(Action::Help));
@@ -838,7 +868,7 @@ mod editing_regressions {
         let mut model = Model::new();
         model.show(
             Question::Menu {
-                operations: vec![("A".into(), "Details".into()); 7],
+                operations: vec![operation("a", "A", "Details"); 7],
                 first_run: true,
             },
             String::new(),

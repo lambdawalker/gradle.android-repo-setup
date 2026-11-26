@@ -192,10 +192,82 @@ Run the resulting `android-repo-setup` executable from an Android checkout, or
 pass `--project <path>` before the command. On Windows the binary has an
 `.exe` extension. It reads the existing `.project/setup/config.yaml`.
 
-Running `android-repo-setup` opens the [iocraft](https://github.com/ccbrown/iocraft) deployment wizard. It includes
-APK signing, GitHub signing and publishing environments, workflow previews,
-and vault viewing and recreation. The standalone `signing` and
-`setup_github_environments` commands use the same interface.
+Running `android-repo-setup` opens the [iocraft](https://github.com/ccbrown/iocraft)
+terminal setup wizard. It includes APK signing, GitHub signing and publishing
+environments, workflow previews, and vault viewing and recreation. The
+standalone `signing` and `setup_github_environments` commands use the same
+terminal interface.
+
+### Browser setup wizard
+
+From an Android repository, start the local browser wizard with the installed
+CLI or its maintained launcher:
+
+```sh
+android-repo-setup setup web
+sh ./setup.sh setup web       # Linux and macOS
+```
+
+On Windows, run `setup.bat setup web`. The launcher uses the repository's
+configured CLI pin. The CLI opens a local browser tab when a desktop browser is
+available and prints an address to open manually if automatic opening fails.
+Pass `--no-open` after `web` to print the local address without trying to open
+a browser, for example `sh ./setup.sh setup web --no-open` or
+`setup.bat setup web --no-open`. The printed link works once. Keep the session
+recovery code printed beside it private; it can unlock this wizard if it locks
+after 20 minutes without operator activity. Keep the CLI running while using
+the wizard; closing it ends the local session. The site runs on loopback and
+is separate from any documentation site or deployed application. Refreshing
+the same browser tab resumes its session using tab-scoped browser storage; a
+new tab cannot reuse the consumed launch link.
+
+The browser presents the same repository setup operations as the terminal:
+APK signing key, local Gradle signing, APK signing environment, publishing
+environments, and GitHub workflows. Available operations depend on the
+discovered application and library modules. After Gradle discovery, the header
+shows one tab for each discovered Android or JVM module. The Actions panel
+shows the operations applicable to the active module. **Setup selected tasks**
+submits only the checked actions visible on that module tab. Module workflow
+files are updated for that module; shared workflow prerequisites may be created
+when missing. The keystore, app signing associations, local.properties,
+publishing environments and credentials are shared by the repository. Opening
+the private link
+starts Gradle discovery and saves the discovered module inventory, retaining
+previously excluded modules. The browser proceeds directly to the module action
+tabs; use `android-repo-setup select-modules` to change which modules are included.
+The workspace groups **Actions**,
+**Settings**, **Overview**, and **Process output** beside progress and, when
+available, module-specific APK, AAR, JAR and workflow details. The Settings tab
+groups advance inputs by action for the active module. Prepared values remain
+in browser-tab memory and are supplied only when the chosen operation requests
+them; conditional choices and confirmations still appear during setup. Select
+steps, review their target and
+changes, and respond to confirmations in the wizard. Starting the chosen setup
+operations can create missing workflow files before asking whether to replace
+modified ones.
+Workflow replacements and signing or publishing changes retain the CLI's
+explicit confirmation steps. Headless and CI commands continue to use the CLI
+directly.
+
+The browser uses the existing encrypted setup vault and signing environment
+scope. The site opens with a vault dialog: enter the existing passphrase, or
+create and confirm one if there is no vault. The same dialog asks for the
+passphrase again when the page is reopened. The main menu (☰) has a **Vault**
+section to view the masked saved entries or remake the local vault; these
+actions remain available after a setup run finishes. Saved secret values are
+not returned to the browser. Choose **Use vault value** when prompted to keep an
+existing value; an empty replacement is not a general reuse signal. After
+20 minutes without operator activity, enter the saved vault passphrase or the
+CLI-printed recovery code to unlock the browser session. The recovery code
+cannot replace the first vault login. An operation already
+running can finish while the session is locked; new actions wait for unlock.
+The browser does not reveal saved secrets or newly generated passwords. When
+creating an APK keystore in the browser, enter and back up your own store and
+key passwords. For automatically generated APK passwords,
+use the terminal wizard, which can show them for a private backup. Maven/OpenPGP
+key creation also requests the operator's passphrase. Treat the printed local
+launch address as private. Do not expose the local wizard over a network or
+share its session.
 
 ### Public Android signing associations
 

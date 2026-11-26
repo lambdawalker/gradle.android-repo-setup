@@ -5,6 +5,7 @@ mod mouse_input;
 #[cfg(any(windows, test))]
 mod terminal;
 mod view;
+pub(crate) mod web;
 use crate::gpg::SigningKey;
 use anyhow::{anyhow, bail, Result};
 use iocraft::prelude::*;
@@ -18,6 +19,7 @@ thread_local! { static CLIENT: RefCell<Option<Client>> = const { RefCell::new(No
 struct Client {
     sink: mpsc::Sender<Update>,
     notes: String,
+    web: bool,
 }
 enum Update {
     Question(Question, String, mpsc::Sender<Answer>),
@@ -25,6 +27,7 @@ enum Update {
     Finished(String, bool),
     Keys(u64, Result<Vec<SigningKey>>),
     Clipboard(u64, usize, Result<String, String>),
+    Phase(&'static str),
 }
 
 pub enum Answer {
@@ -37,6 +40,10 @@ pub enum Answer {
 }
 pub enum Menu {
     Setup(Vec<usize>),
+    ScopedSetup {
+        module_id: String,
+        selected: Vec<usize>,
+    },
     ViewVault,
     RemakeVault,
     Exit,
@@ -52,6 +59,22 @@ pub struct Field {
     pub value: String,
     pub secret: bool,
 }
+#[derive(Clone)]
+pub(crate) struct ModuleChoice {
+    pub id: String,
+    pub path: String,
+    pub kind: crate::discovery::Kind,
+    pub directory: String,
+    pub label: String,
+    pub description: String,
+    pub selected: bool,
+}
+#[derive(Clone)]
+pub(crate) struct OperationChoice {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
 enum Question {
     Text {
         label: String,
@@ -60,10 +83,10 @@ enum Question {
     },
     Confirm(String),
     Menu {
-        operations: Vec<(String, String)>,
+        operations: Vec<OperationChoice>,
         first_run: bool,
     },
-    Modules(Vec<(String, String, bool)>),
+    Modules(Vec<ModuleChoice>),
     Key,
     Form {
         title: String,
@@ -75,6 +98,18 @@ enum Question {
 
 pub fn active() -> bool {
     CLIENT.with(|client| client.borrow().is_some())
+}
+
+pub fn browser_active() -> bool {
+    CLIENT.with(|client| client.borrow().as_ref().is_some_and(|client| client.web))
+}
+
+pub fn phase(value: &'static str) {
+    CLIENT.with(|client| {
+        if let Some(client) = client.borrow().as_ref() {
+            let _ = client.sink.send(Update::Phase(value));
+        }
+    });
 }
 
 pub fn message(value: String) {
@@ -117,10 +152,10 @@ pub fn prompt(label: &str, default: Option<&str>, secret: bool) -> Result<String
     }
 }
 pub fn confirm(label: &str) -> Result<bool> {
-    Ok(matches!(
-        request(Question::Confirm(label.into()))?,
-        Answer::Confirm(true)
-    ))
+    match request(Question::Confirm(label.into()))? {
+        Answer::Confirm(value) => Ok(value),
+        _ => bail!("Setup cancelled. Accepted answers remain in the vault."),
+    }
 }
 pub fn use_saved(label: &str) -> Result<bool> {
     match request(Question::Saved(label.into()))? {
@@ -132,7 +167,11 @@ pub fn menu(operations: &[(&str, &str, &str)], first_run: bool) -> Result<Menu> 
     match request(Question::Menu {
         operations: operations
             .iter()
-            .map(|(_, label, help)| (label.to_string(), help.to_string()))
+            .map(|(id, label, help)| OperationChoice {
+                id: id.to_string(),
+                label: label.to_string(),
+                description: help.to_string(),
+            })
             .collect(),
         first_run,
     })? {
@@ -140,7 +179,7 @@ pub fn menu(operations: &[(&str, &str, &str)], first_run: bool) -> Result<Menu> 
         _ => Ok(Menu::Exit),
     }
 }
-pub fn select_modules(entries: Vec<(String, String, bool)>) -> Result<Option<Vec<usize>>> {
+pub fn select_modules(entries: Vec<ModuleChoice>) -> Result<Option<Vec<usize>>> {
     match request(Question::Modules(entries))? {
         Answer::Menu(Menu::Setup(selected)) => Ok(Some(selected)),
         _ => Ok(None),
@@ -191,6 +230,7 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
                 *client.borrow_mut() = Some(Client {
                     sink: worker_send.clone(),
                     notes: String::new(),
+                    web: false,
                 })
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))

@@ -16,7 +16,7 @@ android-repo-docs bootstrap generate
 
 The `--tooling-ref` pin must identify a release or commit containing `android-repo-docs`. The docs and setup pins are independent. A setup tag from before the docs executable was introduced cannot install the docs executable.
 
-Commit `.project/docs/config.yaml`, `docs.sh`, `docs.bat`, and `.project/docs/bootstrap.ps1`. On Linux/macOS use `sh ./docs.sh`; on Windows use `docs.bat`. The launchers install the pinned executable into an ignored project cache, verify release checksums or build the exact pinned source, and make the executable available to child commands for the duration of the invocation. They do not modify the caller's PATH.
+Commit `.project/docs/config.yaml`, `docs.sh`, `docs.bat`, and `.project/docs/bootstrap.ps1`. On Linux/macOS use `sh ./docs.sh`; on Windows use `docs.bat`. The launchers install the pinned executable into an ignored project cache, verify release checksums or build the exact pinned source, and make the executable available to child commands for the duration of the invocation. Source builds reuse Cargo intermediate artifacts across repositories using the same pin from the per-user cache described in [shared bootstrap](bootstrap.md); a new pin requires its own build. They do not modify the caller's PATH.
 
 ## Daily use
 
