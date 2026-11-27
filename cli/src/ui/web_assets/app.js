@@ -152,6 +152,9 @@ function syncMainMenu() {
     item.title = reason;
     item.setAttribute("aria-description", reason);
   }
+  const note = $("menu-bitwarden-note");
+  note.disabled = !session || pending || closed || closingRequested || locked || disconnected || state?.status === "locked";
+  note.title = note.disabled ? "Unlock the wizard to save filled fields" : "Save filled setup fields to Bitwarden";
   $("menu-close-wizard").disabled = !session || closed || closingRequested || locked || disconnected || state?.status === "closing" || state?.status === "locked";
   if (!mainMenuPanel.hidden && !mainMenuWrap.contains(document.activeElement)) closeMainMenu();
 }
@@ -215,6 +218,7 @@ async function runVaultMenuAction(action) {
 }
 $("menu-view-vault").addEventListener("click", () => runVaultMenuAction("view-vault"));
 $("menu-remake-vault").addEventListener("click", () => runVaultMenuAction("remake-vault"));
+$("menu-bitwarden-note").addEventListener("click", openBitwardenDialog);
 
 const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
 function activateTab(tab, focus = false) {
@@ -324,6 +328,7 @@ function openVaultDialog(title, description, mode, confirm = false) {
 function showLock(data) {
   if (locked) return;
   locked = true;
+  closeBitwardenDialog(true);
   obscureLockedWorkspace(true);
   pauseCountdown();
   clearPreparedValues();
@@ -588,14 +593,39 @@ function renderSettingsGroups(data) {
     groups.append(el("p", "This module is excluded from setup. Use the terminal module selector to include it.", "empty-state"));
     return;
   }
-  const withFields = applicable.map(option => ({option, fields: fieldsForAction(option.id, data)}))
-    .filter(({fields}) => fields.length);
-  if (!withFields.length) {
+  const allFields = applicable.map(option => ({option, fields: fieldsForAction(option.id, data)}));
+  const byDraftKey = new Map();
+  for (const {option, fields} of allFields) {
+    for (const item of fields) {
+      const key = draftKey(module.id, item.draftAction || option.id, item.key);
+      if (!byDraftKey.has(key)) byDraftKey.set(key, {item: {...item, draftAction: item.draftAction || option.id}, actions: new Set()});
+      const entry = byDraftKey.get(key);
+      entry.actions.add(option.id);
+      // Prefer the original action's help over conditional wording from an
+      // action that may reuse the same credential.
+      if ((item.draftAction || option.id) === option.id) entry.item = {...item, draftAction: option.id};
+    }
+  }
+  const commonFields = [...byDraftKey.values()].filter(entry => entry.actions.size > 1).map(entry => entry.item);
+  const withFields = allFields.map(({option, fields}) => {
+    const seen = new Set();
+    return {option, fields: fields.filter(item => {
+      const key = draftKey(module.id, item.draftAction || option.id, item.key);
+      if (byDraftKey.get(key).actions.size > 1 || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })};
+  }).filter(({fields}) => fields.length);
+  if (!commonFields.length && !withFields.length) {
     groups.append(el("p", `No advance inputs for ${module.path}. The wizard will ask for confirmations when needed.`, "empty-state"));
     return;
   }
   groups.append(el("p", `Prepare ${module.path} values here. Blank fields are requested by the wizard only if needed. Prepared values stay in this tab's memory until setup ends; saved vault values are never shown.`, "settings-note"));
-  for (const {option, fields} of withFields) {
+  const sections = commonFields.length ? [
+    {option: {id: "common", label: "Common fields", description: "Used by multiple setup actions for this module."}, fields: commonFields},
+    ...withFields,
+  ] : withFields;
+  for (const {option, fields} of sections) {
     const group = el("section", "", "settings-group");
     group.dataset.operationId = option.id;
     group.append(el("h2", option.label), el("p", actionNotes[option.id] || option.description || ""));
@@ -648,6 +678,166 @@ function preparedAnswers(moduleId, selectedActions) {
   }
   return answers;
 }
+function filledBitwardenEntries() {
+  const labels = new Map();
+  const options = lastMenuOptions || Object.keys(actionNotes).map(id => ({id, label: id}));
+  for (const module of availableModules) {
+    for (const option of options) {
+      if (!operationAppliesToModule(option.id, module)) continue;
+      for (const item of fieldsForAction(option.id, state)) {
+        const key = draftKey(module.id, item.draftAction || option.id, item.key);
+        if (!labels.has(key)) labels.set(key, {module: module.path, label: item.label, action: option.label, actions: new Set()});
+        const metadata = labels.get(key);
+        metadata.actions.add(option.id);
+        if ((item.draftAction || option.id) === option.id) metadata.action = option.label;
+      }
+    }
+  }
+  const entries = [];
+  const seen = new Map();
+  const append = entry => {
+    const key = `${entry.module}\u0000${entry.label.toLowerCase().trim()}`;
+    if (seen.has(key)) entries[seen.get(key)] = entry;
+    else { seen.set(key, entries.length); entries.push(entry); }
+  };
+  for (const [key, value] of settingsDrafts) {
+    if (!value) continue;
+    const [moduleId, actionId, fieldKey] = key.split("\u0000");
+    if (fieldKey?.startsWith("confirm-")) continue;
+    const metadata = labels.get(key);
+    const module = availableModules.find(item => item.id === moduleId);
+    append({module: metadata?.module || module?.path || moduleId,
+      action: metadata?.actions.size > 1 ? "Common fields" : metadata?.action || actionId,
+      label: metadata?.label || fieldKey, value});
+  }
+  const prompt = state?.prompt;
+  if ((prompt?.kind === "text" || prompt?.kind === "form") && !isVaultPrompt(prompt)) {
+    const inputs = [...$("settings-content").querySelectorAll(".form-field input")];
+    for (const [index, input] of inputs.entries()) {
+      const label = prompt.kind === "form" ? prompt.fields?.[index]?.label : prompt.label;
+      if (!input.value || !label || /^confirm(?:ation)?\b/i.test(label)) continue;
+      append({module: availableModules.find(item => item.id === activeModule)?.path || "Repository",
+        action: "Current setup question", label, value: input.value});
+    }
+  }
+  return entries;
+}
+
+let bitwardenBusy = false;
+let bitwardenAccount = "";
+let bitwardenCreated = false;
+function bitwardenProblem(message) {
+  $("bitwarden-error").textContent = message;
+  $("bitwarden-error").hidden = !message;
+}
+function bitwardenControls() {
+  $("bitwarden-cancel").disabled = bitwardenBusy;
+  $("bitwarden-check").disabled = bitwardenBusy || bitwardenCreated;
+  $("bitwarden-create").disabled = bitwardenBusy || bitwardenCreated || !bitwardenAccount;
+  $("bitwarden-note-name").disabled = bitwardenBusy;
+  $("bitwarden-session-key").disabled = bitwardenBusy;
+}
+function closeBitwardenDialog(force = false) {
+  if (bitwardenBusy && !force) return;
+  const dialog = $("bitwarden-dialog");
+  if (dialog.open) dialog.close();
+  $("bitwarden-session-key").value = "";
+  bitwardenAccount = "";
+  bitwardenCreated = false;
+  bitwardenProblem("");
+}
+function openBitwardenDialog() {
+  closeMainMenu();
+  if (!session || pending || closed || closingRequested || locked || disconnected || bitwardenBusy) return;
+  const entries = filledBitwardenEntries();
+  if (!entries.length) {
+    setFooterStatus("Enter setup values in Settings before creating a Bitwarden note", "warning");
+    return;
+  }
+  bitwardenAccount = "";
+  bitwardenCreated = false;
+  $("bitwarden-cancel").textContent = "Cancel";
+  $("bitwarden-check").hidden = false;
+  $("bitwarden-create").hidden = false;
+  $("bitwarden-note-name").value = `Android setup · ${state?.context?.repository || "repository"}`;
+  $("bitwarden-session-key").value = "";
+  $("bitwarden-count").textContent = `${entries.length} filled field${entries.length === 1 ? "" : "s"} across module tabs.`;
+  $("bitwarden-account").textContent = "Check the target account before creating the note.";
+  bitwardenProblem("");
+  bitwardenControls();
+  $("bitwarden-dialog").showModal();
+  $("bitwarden-note-name").focus();
+}
+$("bitwarden-dialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  closeBitwardenDialog();
+});
+$("bitwarden-cancel").addEventListener("click", () => closeBitwardenDialog());
+$("bitwarden-session-key").addEventListener("input", () => {
+  bitwardenAccount = "";
+  $("bitwarden-account").textContent = "Check the target account again after changing the session key.";
+  bitwardenControls();
+});
+$("bitwarden-check").addEventListener("click", async () => {
+  if (bitwardenBusy || bitwardenCreated || locked || disconnected) return;
+  bitwardenBusy = true;
+  bitwardenProblem("");
+  $("bitwarden-account").textContent = "Checking Bitwarden CLI account…";
+  bitwardenControls();
+  try {
+    const result = await request("/api/bitwarden-status", "POST", {sessionKey: $("bitwarden-session-key").value});
+    if (!$("bitwarden-dialog").open || locked || closed) return;
+    if (result.status !== "unlocked" || !result.email) throw new Error("Unlock the Bitwarden CLI and check the account again.");
+    bitwardenAccount = result.email;
+    $("bitwarden-account").textContent = `Target Bitwarden account: ${result.email}`;
+  } catch (error) {
+    if (!session) closeBitwardenDialog(true);
+    else if ($("bitwarden-dialog").open && !locked && !closed) {
+      $("bitwarden-account").textContent = "Account not verified.";
+      bitwardenProblem(error.message);
+    }
+  } finally {
+    bitwardenBusy = false;
+    if ($("bitwarden-dialog").open) bitwardenControls();
+  }
+});
+$("bitwarden-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (bitwardenBusy || bitwardenCreated || !bitwardenAccount || locked || disconnected) return;
+  const name = $("bitwarden-note-name").value.trim();
+  const entries = filledBitwardenEntries();
+  if (!name || !entries.length) {
+    bitwardenProblem(entries.length ? "Enter a note name." : "The filled fields were cleared. Enter them again before creating a note.");
+    return;
+  }
+  bitwardenBusy = true;
+  bitwardenProblem("");
+  const expectedEmail = bitwardenAccount;
+  $("bitwarden-account").textContent = `Creating note in ${expectedEmail}…`;
+  bitwardenControls();
+  try {
+    const result = await request("/api/bitwarden-note", "POST", {
+      sessionKey: $("bitwarden-session-key").value, expectedEmail, name, entries,
+    });
+    if (!$("bitwarden-dialog").open || locked || closed) return;
+    $("bitwarden-session-key").value = "";
+    $("bitwarden-account").textContent = `Created “${result.name || name}” in ${expectedEmail}${result.id ? ` (item ${result.id})` : ""}.`;
+    bitwardenCreated = true;
+    $("bitwarden-cancel").textContent = "Close";
+    $("bitwarden-check").hidden = true;
+    $("bitwarden-create").hidden = true;
+    setFooterStatus("Bitwarden secure note created", "success");
+  } catch (error) {
+    if (!session) closeBitwardenDialog(true);
+    else if ($("bitwarden-dialog").open && !locked && !closed) {
+      $("bitwarden-account").textContent = `Target Bitwarden account: ${expectedEmail}`;
+      bitwardenProblem(disconnected ? "Connection interrupted. Check Bitwarden for the note before retrying." : error.message);
+    }
+  } finally {
+    bitwardenBusy = false;
+    if ($("bitwarden-dialog").open) bitwardenControls();
+  }
+});
 function validatePreparedPasswords(moduleId, selectedActions) {
   if (!selectedActions.includes("key") && !selectedActions.includes("github")) return true;
   for (const [password, confirmation, label] of [
@@ -895,6 +1085,7 @@ function finishClose() {
     locked = false;
   }
   closeVaultDialog();
+  closeBitwardenDialog(true);
   obscureLockedWorkspace(false);
   forgetSession();
   session = "";
