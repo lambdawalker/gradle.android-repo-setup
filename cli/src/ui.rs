@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Result};
 use iocraft::prelude::*;
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     sync::{mpsc, Arc, Mutex, Once},
 };
 use zeroize::Zeroizing;
@@ -22,6 +23,9 @@ struct Client {
     notes: String,
     web: bool,
     browser_vault: Option<Arc<Mutex<BrowserVault>>>,
+    // Some(empty) means the browser submitted a scoped setup form. In that
+    // mode blank fields reuse existing vault values without extra questions.
+    prepared: Option<BTreeMap<String, Zeroizing<String>>>,
 }
 // Shared by the local HTTP session and its worker. Locking the browser
 // session revokes the worker's ability to reuse a vault passphrase that has
@@ -67,6 +71,7 @@ pub enum Menu {
     ScopedSetup {
         module_id: String,
         selected: Vec<usize>,
+        prepared: BTreeMap<String, Zeroizing<String>>,
     },
     ViewVault,
     RemakeVault,
@@ -193,7 +198,47 @@ fn request(question: Question) -> Result<Answer> {
     receive.recv().map_err(|_| anyhow!("Setup closed."))
 }
 
+pub(crate) fn prepare_browser_answers(answers: BTreeMap<String, Zeroizing<String>>) {
+    CLIENT.with(|client| {
+        let mut client = client.borrow_mut();
+        if let Some(client) = client.as_mut().filter(|client| client.web) {
+            client.prepared = Some(answers);
+        }
+    });
+}
+
+pub(crate) fn has_prepared_answer(label: &str) -> bool {
+    CLIENT.with(|client| {
+        let client = client.borrow();
+        client.as_ref().and_then(|client| client.prepared.as_ref())
+            .is_some_and(|answers| answers.contains_key(label))
+    })
+}
+
+fn prepared_key(label: &str) -> &str {
+    // The saved-value question has a shorter name than its actual text input.
+    if label == "Android application IDs" {
+        "Android application IDs (comma-separated installed package names)"
+    } else {
+        label
+    }
+}
+
 pub fn prompt(label: &str, default: Option<&str>, secret: bool) -> Result<String> {
+    let prepared = CLIENT.with(|client| {
+        let mut client = client.borrow_mut();
+        client.as_mut()?.prepared.as_mut()?.remove(label)
+    });
+    if let Some(value) = prepared {
+        // Worker generated vault passphrases and review prompts must never be
+        // supplied by an advance form. The HTTP layer also restricts labels.
+        if !label.starts_with("Unlock local setup vault")
+            && !label.starts_with("Create vault password")
+            && !label.starts_with("Confirm vault password")
+        {
+            return Ok(if secret { value.to_string() } else { value.trim().to_owned() });
+        }
+    }
     match request(Question::Text {
         label: label.into(),
         default: default.map(str::to_owned),
@@ -210,6 +255,12 @@ pub fn confirm(label: &str) -> Result<bool> {
     }
 }
 pub fn use_saved(label: &str) -> Result<bool> {
+    let prepared_choice = CLIENT.with(|client| {
+        let client = client.borrow();
+        let staged = client.as_ref()?.prepared.as_ref()?;
+        Some(!staged.contains_key(prepared_key(label)))
+    });
+    if let Some(reuse) = prepared_choice { return Ok(reuse); }
     match request(Question::Saved(label.into()))? {
         Answer::Text(value) => Ok(value == "reuse"),
         _ => bail!("Setup cancelled."),
@@ -284,6 +335,7 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
                     notes: String::new(),
                     web: false,
                     browser_vault: None,
+                    prepared: None,
                 })
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
@@ -333,4 +385,37 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
         terminal_result?;
         result
     })
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_browser_answers_replace_staged_values_and_reuse_blank_saved_values() -> Result<()> {
+        let (sink, updates) = mpsc::channel();
+        CLIENT.with(|client| *client.borrow_mut() = Some(Client {
+            sink, notes: String::new(), web: true, browser_vault: None, prepared: None,
+        }));
+        prepare_browser_answers(BTreeMap::from([
+            ("Keystore password".into(), Zeroizing::new("secret phrase".into())),
+            ("Confirm keystore password".into(), Zeroizing::new("secret phrase".into())),
+            ("Android application IDs (comma-separated installed package names)".into(),
+                Zeroizing::new(" org.example.app ".into())),
+            ("maven-central / MAVEN_CENTRAL_USERNAME new value".into(),
+                Zeroizing::new("new username".into())),
+        ]));
+        assert!(!use_saved("Keystore password")?);
+        assert!(!use_saved("Android application IDs")?);
+        assert!(use_saved("GitHub token")?);
+        assert!(has_prepared_answer("maven-central / MAVEN_CENTRAL_USERNAME new value"));
+        assert!(!has_prepared_answer("other / MAVEN_CENTRAL_USERNAME new value"));
+        assert_eq!(prompt("Keystore password", None, true)?, "secret phrase");
+        assert_eq!(prompt("Confirm keystore password", None, true)?, "secret phrase");
+        assert_eq!(prompt("Android application IDs (comma-separated installed package names)", None, false)?, "org.example.app");
+        assert!(use_saved("Keystore password")?);
+        assert!(matches!(updates.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        CLIENT.with(|client| { client.borrow_mut().take(); });
+        Ok(())
+    }
 }

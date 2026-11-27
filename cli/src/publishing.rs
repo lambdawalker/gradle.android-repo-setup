@@ -282,6 +282,12 @@ struct Setting<'a> {
     default: &'static str,
 }
 
+impl Setting<'_> {
+    fn input_label(&self) -> String {
+        format!("{} / {} new value", self.environment, self.name)
+    }
+}
+
 fn settings_for(entry: &Destination) -> Vec<Setting<'_>> {
     if entry.publisher == "jitpack" {
         return Vec::new();
@@ -313,7 +319,7 @@ pub(crate) fn settings_catalog(root: &Path) -> Result<Vec<Value>> {
             "name": setting.name,
             "required": setting.required,
             "secret": setting.kind == Kind::Secret,
-            "inputLabel": format!("{} / {} new value", setting.environment, setting.name),
+            "inputLabel": setting.input_label(),
         })).collect::<Vec<_>>(),
     })).collect())
 }
@@ -572,7 +578,13 @@ fn select_vault(config: &vault::SetupConfig) -> Result<Option<vault::SetupVault>
     }
 }
 
-fn should_reuse(label: &str, source: &str) -> Result<bool> {
+fn should_reuse(label: &str, source: &str, input_label: &str) -> Result<bool> {
+    // The browser has already offered a full Settings form. A staged
+    // replacement must take precedence over both vault and environment
+    // candidates, without asking the same question a second time.
+    if crate::ui::has_prepared_answer(input_label) {
+        return Ok(false);
+    }
     if source == "encrypted vault" {
         vault::use_saved(label)
     } else {
@@ -593,7 +605,7 @@ fn connect(repository: &str, vault: Option<&vault::SetupVault>) -> Result<(GitHu
         .map(|token| ("encrypted vault", token))
         .or_else(|| from_environment.map(|token| ("local environment", token)));
     let token = match candidate {
-        Some((source, token)) if should_reuse("GitHub token", source)? => token,
+        Some((source, token)) if should_reuse("GitHub token", source, "GitHub access token")? => token,
         _ => vault::secret_prompt("GitHub access token")?,
     };
     let token = token.trim().to_owned();
@@ -684,7 +696,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
             );
         }
         if let Some((source, value)) = resolve_value(setting, vault.as_ref(), &secrets) {
-            if should_reuse(setting.name, source)? {
+            if should_reuse(setting.name, source, &setting.input_label())? {
                 save_values(vault.as_mut(), &[(setting, &value)])?;
                 changes.insert(index, value);
                 index += 1;
@@ -725,7 +737,7 @@ pub(crate) fn setup(root: &Path, repository: Option<&str>, config: Option<&Path>
             continue;
         }
         loop {
-            let input_label = format!("{} / {} new value", setting.environment, setting.name);
+            let input_label = setting.input_label();
             let entered = match setting.kind {
                 Kind::Secret => vault::secret_prompt(&input_label)?,
                 Kind::Variable => vault::prompt(&input_label, None)?,
