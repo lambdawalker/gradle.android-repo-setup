@@ -1,7 +1,7 @@
 //! Local browser renderer for the existing setup worker. All setup decisions stay in Rust.
 use super::{Answer, BrowserVault, Client, KeyChoice, Menu, Question, Update, CLIENT, PRIVATE_WORKER};
 use crate::{
-    discovery, publishing,
+    discovery, publishing, signing,
     gpg::{self, SigningKey},
     setup, vault,
 };
@@ -506,6 +506,7 @@ impl Server {
                     notes: String::new(),
                     web: true,
                     browser_vault,
+                    prepared: None,
                 });
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -773,7 +774,9 @@ impl Server {
                     if selected.iter().any(|&index| !operation_applies_to_module(&operations[index].id, &module.kind)) {
                         return Err((422, "An action is not available for the chosen module.".into()));
                     }
-                    Answer::Menu(Menu::ScopedSetup { module_id: module_id.into(), selected })
+                    let actions = selected.iter().map(|&index| operations[index].id.as_str()).collect::<Vec<_>>();
+                    let prepared = parse_prepared(&self.root, input, &actions)?;
+                    Answer::Menu(Menu::ScopedSetup { module_id: module_id.into(), selected, prepared })
                 } else {
                     Answer::Menu(Menu::Setup(selected))
                 }
@@ -798,6 +801,57 @@ impl Server {
             return false;
         }
         true
+    }
+
+    // Supply signing form defaults once, over the authenticated local session.
+    // Existing secrets remain in the encrypted vault and are only reported as
+    // available booleans; newly generated values are never added to /api/state.
+    fn signing_defaults(&self, input: &Value) -> std::result::Result<Value, (u16, &'static str)> {
+        if self.closing || self.status != "running"
+            || !self.pending.as_ref().is_some_and(|pending| matches!(&pending.question, Question::Menu { .. }))
+        {
+            return Err((409, "Select the app setup actions before loading signing defaults."));
+        }
+        let module_id = input.get("module").and_then(Value::as_str)
+            .ok_or((422, "Choose an app module."))?;
+        let modules = discovery::load(&self.root)
+            .map_err(|_| (500, "Could not load Android modules."))?
+            .ok_or((409, "Discover modules before loading signing defaults."))?;
+        if !modules.get(module_id).is_some_and(|module| module.selected && module.kind == discovery::Kind::Application) {
+            return Err((422, "Choose an included app module."));
+        }
+        let path = match input.get("path") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(path)) if path.len() <= 4096 && !path.chars().any(char::is_control) => Some(path.as_str()),
+            _ => return Err((422, "Enter a valid keystore path.")),
+        };
+        let config = setup::signing_config(&self.root)
+            .map_err(|_| (500, "Could not load signing configuration."))?;
+        let session = self.session.as_ref().ok_or((401, "No local session."))?;
+        let browser_vault = session.browser_vault.lock()
+            .map_err(|_| (500, "Could not access the local vault session."))?;
+        let credential = browser_vault.credential.as_ref()
+            .ok_or((409, "Enter the setup vault passphrase to load signing defaults."))?;
+        let saved = vault::SetupVault::open(&config.state_path(), credential)
+            .map_err(|_| (409, "Could not read the setup vault. Unlock it again."))?;
+        let saved_alias = saved.state.alias.as_deref()
+            .or_else(|| saved.state.signing_passwords.as_ref().map(|passwords| passwords.alias.as_str()));
+        let defaults = signing::browser_keystore_defaults(
+            &self.root, &config, path, saved.state.keystore.as_deref(),
+            saved_alias, &saved.state.android_application_ids,
+        ).map_err(|_| (422, "Could not prepare defaults for that keystore path."))?;
+        let saved_passwords = saved.state.signing_passwords.as_ref()
+            .filter(|passwords| defaults.exists
+                && Path::new(&passwords.keystore) == Path::new(&defaults.path)
+                && passwords.alias == defaults.alias);
+        Ok(json!({
+            "keystorePath":defaults.path,"keystoreExists":defaults.exists,
+            "alias":defaults.alias,"storePassword":defaults.store_password,
+            "keyPassword":defaults.key_password,"applicationIds":defaults.application_ids,
+            "savedGitHubToken":saved.state.github_token.as_ref().is_some_and(|token| !token.is_empty()),
+            "savedStorePassword":saved_passwords.is_some_and(|passwords| !passwords.store.is_empty()),
+            "savedKeyPassword":saved_passwords.is_some_and(|passwords| passwords.key.as_ref().is_some_and(|key| !key.is_empty())),
+        }))
     }
 
     fn bitwarden_status(&self, input: &Value) -> std::result::Result<Value, BitwardenError> {
@@ -949,6 +1003,10 @@ impl Server {
                     return Response::json_error(423, "Unlock the local session to continue.");
                 }
                 match path {
+                    "/api/signing-defaults" => match self.signing_defaults(&input) {
+                        Ok(defaults) => Response::json(200, defaults),
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
                     "/api/bitwarden-status" => match self.bitwarden_status(&input) {
                         Ok(account) => {
                             if let Some(session) = &mut self.session { session.last_seen = Instant::now(); }
@@ -1037,6 +1095,57 @@ fn operation_applies_to_module(id: &str, kind: &discovery::Kind) -> bool {
         "workflows" => true,
         _ => false,
     }
+}
+
+// Only setup text fields shown by the selected module's Settings form may be
+// staged. In particular, no advance answer can satisfy a vault passphrase or
+// a destructive confirmation.
+fn prepared_labels(root: &Path, actions: &[&str]) -> BTreeSet<String> {
+    let mut allowed = BTreeSet::new();
+    if actions.iter().any(|id| matches!(*id, "key" | "github")) {
+        for label in [
+            "Keystore path", "Signing key alias", "Keystore password",
+            "Confirm keystore password", "Key password", "Confirm key password",
+            "Android application IDs (comma-separated installed package names)",
+        ] { allowed.insert(label.to_owned()); }
+    }
+    if actions.contains(&"github") { allowed.insert("GitHub token".into()); }
+    if actions.contains(&"publishing") {
+        allowed.insert("GitHub access token".into());
+        if let Ok(destinations) = publishing::settings_catalog(root) {
+            for destination in destinations {
+                for field in destination["fields"].as_array().into_iter().flatten() {
+                    if let Some(label) = field["inputLabel"].as_str() {
+                        allowed.insert(label.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    allowed
+}
+
+fn parse_prepared(
+    root: &Path, input: &Value, actions: &[&str],
+) -> std::result::Result<BTreeMap<String, Zeroizing<String>>, (u16, String)> {
+    let Some(value) = input.get("prepared") else { return Ok(BTreeMap::new()); };
+    let entries = value.as_object().ok_or((422, "Invalid prepared form.".into()))?;
+    if entries.len() > 80 { return Err((422, "Too many prepared fields.".into())); }
+    let allowed = prepared_labels(root, actions);
+    let mut prepared = BTreeMap::new();
+    let mut total = 0usize;
+    for (label, value) in entries {
+        let text = value.as_str().ok_or((422, "Invalid prepared form value.".into()))?;
+        total = total.saturating_add(label.len()).saturating_add(text.len());
+        if !allowed.contains(label) || label.len() > 160 || label.chars().any(char::is_control)
+            || text.is_empty() || text.len() > 48 * 1024 || total > 96 * 1024
+            || text.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n'))
+        {
+            return Err((422, "Invalid or oversized prepared setup field.".into()));
+        }
+        prepared.insert(label.clone(), Zeroizing::new(text.to_owned()));
+    }
+    Ok(prepared)
 }
 
 impl Pending {
@@ -1747,6 +1856,87 @@ esac
     }
 
     #[test]
+    fn signing_defaults_require_an_unlocked_app_and_keep_saved_secrets_private() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join(".project/setup"))?;
+        let repository = format!("testing/browser-defaults-{}", root.path().file_name().unwrap().to_string_lossy());
+        fs::write(root.path().join(discovery::CONFIG), format!(
+            "repository: {repository}\nandroid_modules:\n  app:\n    path: :app\n    directory: app\n    kind: application\n    application_ids: [com.example.demo]\n  library:\n    path: :library\n    directory: library\n    kind: library\n  excluded:\n    path: :excluded\n    directory: excluded\n    kind: application\n    selected: false\n"
+        ))?;
+        let config = setup::signing_config(root.path())?;
+        vault::create_browser_vault(&config, "fixture vault passphrase")?;
+        let (sender, updates) = mpsc::channel();
+        let mut server = Server::new(root.path().into(), sender, updates,
+            "launch-secret".into(), "recovery-secret".into());
+        let (bearer, csrf) = login_unverified(&mut server);
+        let new_path = outside.path().join("new-release.jks");
+        let input = json!({"module":"app","path":new_path});
+        let send = |server: &mut Server, payload: Value| server.handle(
+            request("POST", "/api/signing-defaults", payload, Some((&bearer, &csrf))), HOST);
+        assert_eq!(send(&mut server, input.clone()).status, 423);
+        assert_eq!(server.handle(request("POST", "/api/unlock",
+            json!({"credential":"fixture vault passphrase"}), Some((&bearer, &csrf))), HOST).status, 200);
+        assert_eq!(send(&mut server, input.clone()).status, 409);
+        let (reply, _received) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 1,
+            question: Question::Menu { operations: vec![], first_run: true },
+            reply, keys: Vec::new(), key_status: None,
+        });
+        server.status = "running";
+        for module in ["library", "excluded", "missing"] {
+            assert_eq!(send(&mut server, json!({"module":module})).status, 422);
+        }
+        assert_eq!(send(&mut server, json!({"module":"app","path":root.path().join("release.jks")})).status, 422);
+        let mut bad_csrf = request("POST", "/api/signing-defaults", input.clone(), Some((&bearer, &csrf)));
+        bad_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(bad_csrf, HOST).status, 403);
+        let response = send(&mut server, input);
+        assert_eq!(response.status, 200);
+        let defaults: Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(defaults["keystoreExists"], false);
+        assert_eq!(defaults["applicationIds"], json!(["com.example.demo"]));
+        for name in ["storePassword", "keyPassword"] {
+            let words = defaults[name].as_str().unwrap().split_whitespace().collect::<Vec<_>>();
+            assert_eq!(words.len(), 25);
+            assert!(words.iter().all(|word| word.chars().all(|ch| ch.is_ascii_lowercase())));
+        }
+        assert_ne!(defaults["storePassword"], defaults["keyPassword"]);
+        assert!(defaults["alias"].as_str().unwrap().chars().all(|ch| ch.is_ascii_lowercase()));
+        assert!(!server.snapshot().to_string().contains(defaults["storePassword"].as_str().unwrap()));
+
+        let existing_path = outside.path().join("existing.jks");
+        fs::write(&existing_path, b"fixture")?;
+        let mut saved = vault::SetupVault::open(&config.state_path(), "fixture vault passphrase")?;
+        saved.state.keystore = Some(existing_path.to_str().unwrap().into());
+        saved.state.alias = Some("savedalias".into());
+        saved.state.github_token = Some("saved-token-sentinel".into());
+        saved.state.signing_passwords = Some(vault::SigningPasswords {
+            keystore: existing_path.to_str().unwrap().into(), alias: "savedalias".into(),
+            store: "saved-store-sentinel".into(), key: Some("saved-key-sentinel".into()),
+        });
+        saved.save()?;
+        let response = send(&mut server, json!({"module":"app","path":existing_path}));
+        assert_eq!(response.status, 200);
+        let existing: Value = serde_json::from_slice(&response.body)?;
+        assert_eq!(existing["keystoreExists"], true);
+        assert_eq!(existing["alias"], "savedalias");
+        assert_eq!(existing["storePassword"], Value::Null);
+        assert_eq!(existing["keyPassword"], Value::Null);
+        for field in ["savedGitHubToken", "savedStorePassword", "savedKeyPassword"] {
+            assert_eq!(existing[field], true);
+        }
+        for secret in ["saved-token-sentinel", "saved-store-sentinel", "saved-key-sentinel"] {
+            assert!(!String::from_utf8_lossy(&response.body).contains(secret));
+        }
+        assert_eq!(server.handle(request("POST", "/api/lock", json!({}), Some((&bearer, &csrf))), HOST).status, 200);
+        assert_eq!(send(&mut server, json!({"module":"app"})).status, 423);
+        fs::remove_dir_all(config.state_dir.join(config.project_name()))?;
+        Ok(())
+    }
+
+    #[test]
     fn browser_worker_reuses_vault_until_lock_and_rotates_after_remake() -> Result<()> {
         let root = tempfile::tempdir()?;
         let config = vault::SetupConfig::new(
@@ -1770,6 +1960,7 @@ esac
         CLIENT.with(|client| *client.borrow_mut() = Some(Client {
             sink: sender, notes: String::new(), web: true,
             browser_vault: Some(browser_vault.clone()),
+            prepared: None,
         }));
 
         // Signing and publishing both call unlock_interactive. A browser
@@ -1873,12 +2064,26 @@ esac
             assert!(received.try_recv().is_err());
             assert_eq!(server.pending.as_ref().unwrap().id, 1);
         }
+        for label in ["Unlock local setup vault", "GitHub token"] {
+            let mut prepared = serde_json::Map::new();
+            prepared.insert(label.into(), json!("secret"));
+            let response = server.handle(request("POST", "/api/answer",
+                json!({"id":1,"module":"app","value":[0],"prepared":prepared}),
+                Some((&bearer, &csrf))), HOST);
+            assert_eq!(response.status, 422, "{label}");
+            assert!(received.try_recv().is_err());
+        }
         let response = server.handle(request("POST", "/api/answer",
-            json!({"id":1,"module":"app","value":[0,2]}), Some((&bearer, &csrf))), HOST);
+            json!({"id":1,"module":"app","value":[0,2],"prepared":{
+                "Keystore path":"/outside/release.jks", "Signing key alias":"inventedalias",
+                "Keystore password":"secret phrase", "Confirm keystore password":"secret phrase"
+            }}), Some((&bearer, &csrf))), HOST);
         assert_eq!(response.status, 200);
         assert!(matches!(received.recv().unwrap(),
-            Answer::Menu(Menu::ScopedSetup { module_id, selected })
-                if module_id == "app" && selected == vec![0, 2]));
+            Answer::Menu(Menu::ScopedSetup { module_id, selected, prepared })
+                if module_id == "app" && selected == vec![0, 2]
+                    && prepared["Signing key alias"].as_str() == "inventedalias"
+                    && prepared["Confirm keystore password"].as_str() == "secret phrase"));
     }
 
     #[test]

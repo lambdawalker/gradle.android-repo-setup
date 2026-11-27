@@ -28,31 +28,62 @@ const GITHUB_SECRET_LIMIT: usize = 48 * 1024;
 const KEYTOOL_ERROR: &str = "keytool failed. Check the JDK, keystore, alias, and passwords.";
 
 fn generate_password() -> Result<String> {
-    let groups: [&[u8]; 4] = [
-        b"abcdefghijklmnopqrstuvwxyz",
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        b"0123456789",
-        b"!@#$%^&*()-_=+[]{}:,.?",
-    ];
-    let alphabet = groups.concat();
-    let bound = 256 - 256 % alphabet.len();
+    (0..25).map(|_| made_up_word(1)).collect::<Result<Vec<_>>>()
+        .map(|words| words.join(" "))
+}
+
+// Each invented word has 34 * 8 * 20 equally likely syllable forms. Twenty-five
+// words give more than 300 bits of generator entropy. Rejection sampling
+// preserves that count without an embedded dictionary or modulo bias.
+const ONSETS: &[&str] = &[
+    "b", "c", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "r", "s",
+    "t", "v", "w", "z", "bl", "br", "cl", "cr", "dr", "fl", "fr", "gl",
+    "gr", "pl", "pr", "sk", "sl", "st", "tr", "tw",
+];
+const VOWELS: &[&str] = &["a", "e", "i", "o", "u", "ai", "ea", "oo"];
+const CODAS: &[&str] = &[
+    "b", "c", "d", "f", "g", "k", "l", "m", "n", "p", "r", "s", "t", "v",
+    "ck", "nd", "nt", "sh", "st", "th",
+];
+
+fn random_index(count: usize) -> Result<usize> {
+    const RANGE: usize = u16::MAX as usize + 1;
+    ensure!((1..=RANGE).contains(&count));
+    let limit = RANGE / count * count;
     loop {
-        let mut bytes = [0; 32];
+        let mut bytes = [0; 2];
         random_bytes(&mut bytes)?;
-        let value: Vec<_> = bytes
-            .into_iter()
-            .filter(|byte| usize::from(*byte) < bound)
-            .map(|byte| alphabet[usize::from(byte) % alphabet.len()])
-            .take(25)
-            .collect();
-        if value.len() == 25
-            && groups
-                .iter()
-                .all(|group| value.iter().any(|byte| group.contains(byte)))
-        {
-            return Ok(String::from_utf8(value)?);
+        let value = usize::from(u16::from_le_bytes(bytes));
+        if value < limit {
+            return Ok(value % count);
         }
     }
+}
+
+fn made_up_word(syllables: usize) -> Result<String> {
+    let mut word = String::new();
+    for _ in 0..syllables {
+        word.push_str(ONSETS[random_index(ONSETS.len())?]);
+        word.push_str(VOWELS[random_index(VOWELS.len())?]);
+        word.push_str(CODAS[random_index(CODAS.len())?]);
+    }
+    Ok(word)
+}
+
+pub(crate) struct GeneratedKeystoreDefaults {
+    pub alias: String,
+    pub store_password: String,
+    pub key_password: String,
+}
+
+pub(crate) fn generate_browser_keystore_defaults() -> Result<GeneratedKeystoreDefaults> {
+    let alias = made_up_word(3)?;
+    validate_alias(&alias)?;
+    Ok(GeneratedKeystoreDefaults {
+        alias,
+        store_password: generate_password()?,
+        key_password: generate_password()?,
+    })
 }
 
 fn read_password(label: &str, allow_generate: bool, saved: Option<&str>) -> Result<(String, bool)> {
@@ -69,7 +100,7 @@ fn read_password(label: &str, allow_generate: bool, saved: Option<&str>) -> Resu
     loop {
         let value = secret_prompt(&format!("{label}{hint}"))?;
         if value.is_empty() && allow_generate && crate::ui::browser_active() {
-            setup_message!("Enter a password for browser setup. Automatic generation and reveal are available in the terminal wizard.");
+            setup_message!("Enter a password for this setup step. The Settings form offers generated defaults for a new keystore.");
             continue;
         }
         if value.is_empty() && allow_generate {
@@ -276,20 +307,73 @@ fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn choose_keystore(
-    root: &Path,
-    config: &SetupConfig,
-    vault: &mut SetupVault,
-) -> Result<(PathBuf, String)> {
+fn suggested_keystore_path(config: &SetupConfig) -> Result<PathBuf> {
     let state_path = config.state_path();
-    let default_path = state_path.with_file_name(format!(
+    Ok(state_path.with_file_name(format!(
         "{}-{}.jks",
         config.alias(),
         state_path
             .file_stem()
             .and_then(OsStr::to_str)
             .context("Vault filename must be UTF-8.")?
-    ));
+    )))
+}
+
+pub(crate) struct BrowserKeystoreDefaults {
+    pub path: String,
+    pub exists: bool,
+    pub alias: String,
+    pub store_password: Option<String>,
+    pub key_password: Option<String>,
+    pub application_ids: Vec<String>,
+}
+
+/// Only public path/alias/ID metadata can be reused from an unlocked vault.
+/// Existing passwords are never returned to the browser. A new keystore gets
+/// fresh credentials; callers should request this once and hold the answers
+/// in their tab's memory rather than regenerating on every state poll.
+pub(crate) fn browser_keystore_defaults(
+    root: &Path,
+    config: &SetupConfig,
+    candidate_path: Option<&str>,
+    saved_path: Option<&str>,
+    saved_alias: Option<&str>,
+    saved_ids: &[String],
+) -> Result<BrowserKeystoreDefaults> {
+    let default_path = suggested_keystore_path(config)?;
+    let requested = candidate_path.filter(|path| !path.trim().is_empty())
+        .or_else(|| saved_path.filter(|path| !path.trim().is_empty()))
+        .map(Path::new)
+        .unwrap_or(&default_path);
+    let path = resolve_keystore(root, requested)?;
+    let exists = regular_file_exists(&path)?;
+    let matches_saved_path = saved_path
+        .and_then(|saved| resolve_keystore(root, Path::new(saved)).ok())
+        .is_some_and(|saved| saved == path);
+    let (alias, store_password, key_password) = if exists {
+        (saved_alias.filter(|alias| matches_saved_path && !alias.is_empty())
+            .map(str::to_owned).unwrap_or_else(|| config.alias()), None, None)
+    } else {
+        let generated = generate_browser_keystore_defaults()?;
+        (generated.alias, Some(generated.store_password), Some(generated.key_password))
+    };
+    validate_alias(&alias)?;
+    Ok(BrowserKeystoreDefaults {
+        path: path.to_str().context("Keystore path must be UTF-8.")?.to_owned(),
+        exists,
+        alias,
+        store_password,
+        key_password,
+        application_ids: associations::application_ids(root, saved_ids)?,
+    })
+}
+
+fn choose_keystore(
+    root: &Path,
+    config: &SetupConfig,
+    vault: &mut SetupVault,
+) -> Result<(PathBuf, String)> {
+    let default_path = suggested_keystore_path(config)?;
     let saved_path = vault
         .state
         .keystore
@@ -1055,6 +1139,7 @@ mod tests {
     #[test]
     fn signing_files_export_real_certificate_identity_on_create_and_reuse() -> Result<()> {
         let keytool = find_keytool()?;
+        let generated = generate_browser_keystore_defaults()?;
         let scratch = tempfile::tempdir()?;
         let config = SetupConfig::new(
             "owner/example".into(),
@@ -1071,9 +1156,9 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_owned(),
-            alias: "test".into(),
-            store: "fixture-store".into(),
-            key: Some("fixture-key".into()),
+            alias: generated.alias,
+            store: generated.store_password,
+            key: Some(generated.key_password),
         };
         let ids = vec!["com.example.app".into()];
         prepare_signing_files(&keytool, &config, &passwords, &ids, false)?;
@@ -1120,11 +1205,47 @@ mod tests {
     #[test]
     fn generated_passwords_meet_keytool_requirements() -> Result<()> {
         let password = generate_password()?;
-        assert_eq!(password.len(), 25);
-        assert!(password.bytes().any(|byte| byte.is_ascii_lowercase()));
-        assert!(password.bytes().any(|byte| byte.is_ascii_uppercase()));
-        assert!(password.bytes().any(|byte| byte.is_ascii_digit()));
-        assert!(password.bytes().any(|byte| !byte.is_ascii_alphanumeric()));
+        let parts = password.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(parts.len(), 25);
+        for word in &parts {
+            assert!(word.len() >= 3);
+            assert!(word.bytes().all(|byte| byte.is_ascii_lowercase()));
+        }
+        let entropy_bits = 25.0 * ((ONSETS.len() * VOWELS.len() * CODAS.len()) as f64).log2();
+        assert!(entropy_bits >= 300.0);
+        Ok(())
+    }
+
+    #[test]
+    fn browser_defaults_generate_only_for_a_new_keystore() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let state = tempfile::tempdir()?;
+        let config = SetupConfig::new(
+            "testing/browser-defaults".into(), "demo-apk-release".into(), "main".into(),
+            Some(state.path().to_path_buf()), None, Some("configured-alias".into()),
+        )?;
+        let new = browser_keystore_defaults(checkout.path(), &config, None, None, None, &[])?;
+        assert!(!new.exists);
+        validate_alias(&new.alias)?;
+        assert!(!new.alias.contains('-'));
+        assert_ne!(new.alias, config.alias());
+        assert_ne!(new.store_password, new.key_password);
+        for password in [&new.store_password, &new.key_password] {
+            assert_eq!(password.as_ref().unwrap().split_whitespace().count(), 25);
+        }
+        assert!(new.application_ids.is_empty());
+
+        let path = Path::new(&new.path);
+        fs::create_dir_all(parent(path))?;
+        fs::write(path, b"existing keystore fixture")?;
+        let existing = browser_keystore_defaults(
+            checkout.path(), &config, Some(&new.path), Some(&new.path), Some("saved-key"), &[],
+        )?;
+        assert!(existing.exists);
+        assert_eq!(existing.path, new.path);
+        assert_eq!(existing.alias, "saved-key");
+        assert!(existing.store_password.is_none());
+        assert!(existing.key_password.is_none());
         Ok(())
     }
 

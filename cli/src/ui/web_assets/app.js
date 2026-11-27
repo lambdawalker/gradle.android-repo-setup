@@ -87,9 +87,23 @@ const menuSelections = new Map();
 // Prepared values remain in this browser tab's memory. Secrets are never
 // written to sessionStorage or included in the state snapshot.
 const settingsDrafts = new Map();
+const generatedSigningDrafts = new Map();
+const signingDefaultsStatus = new Map();
+const signingDefaultsPending = new Map();
+const signingDefaultsTimers = new Map();
+let signingDefaultsSequence = 0;
+let reviewingModule = null;
+let reviewingSelection = "";
 let draftExecution = null;
 function clearPreparedValues() {
   settingsDrafts.clear();
+  generatedSigningDrafts.clear();
+  signingDefaultsStatus.clear();
+  signingDefaultsPending.clear();
+  for (const timer of signingDefaultsTimers.values()) clearTimeout(timer);
+  signingDefaultsTimers.clear();
+  reviewingModule = null;
+  reviewingSelection = "";
   draftExecution = null;
   for (const input of $("workspace").querySelectorAll('input[type="password"]')) input.value = "";
   $("vault-credential").value = "";
@@ -99,11 +113,9 @@ function clearPreparedValues() {
 const actionFields = {
   key: [
     {key: "keystore-path", label: "Keystore path", prompts: ["Keystore path"], help: "Outside the repository. Leave blank to use the saved or suggested path."},
-    {key: "signing-key-alias", label: "Signing key alias", prompts: ["Signing key alias"], help: "Leave blank to use the saved alias."},
-    {key: "keystore-password", label: "Keystore password", prompts: ["Keystore password"], secret: true, help: "At least six characters when creating a key."},
-    {key: "confirm-keystore-password", label: "Confirm keystore password", prompts: ["Confirm keystore password"], secret: true},
-    {key: "key-password", label: "Key password", prompts: ["Key password"], secret: true, help: "At least six characters when creating a key."},
-    {key: "confirm-key-password", label: "Confirm key password", prompts: ["Confirm key password"], secret: true},
+    {key: "signing-key-alias", label: "Signing key alias", prompts: ["Signing key alias"], help: "Verify this alias matches an existing keystore; a new keystore gets an invented alias."},
+    {key: "keystore-password", label: "Keystore password", prompts: ["Keystore password"], secret: true, help: "For a new keystore, a 25-word passphrase is generated. Save it in Bitwarden."},
+    {key: "key-password", label: "Key password", prompts: ["Key password"], secret: true, help: "For a new keystore, a separate 25-word passphrase is generated. Save it in Bitwarden."},
     {key: "application-ids", label: "Android application IDs", prompts: ["Android application IDs (comma-separated installed package names)"], help: "Comma-separated package names; leave blank to review discovered IDs later."},
   ],
   local: [],
@@ -560,18 +572,117 @@ function fieldsForAction(action, data) {
     help: "Used to inspect and configure GitHub publishing environments."}];
   for (const destination of data?.context?.publishing?.destinations || []) {
     for (const item of destination.fields || []) {
-      if (!item?.name || !item.secret) continue;
+      if (!item?.name || !item.inputLabel) continue;
       // A GPG identity is chosen and reviewed by the CLI; it is not a text
       // credential that can safely be staged in this form.
       if (["SIGNING_IN_MEMORY_KEY", "SIGNING_IN_MEMORY_KEY_PASSWORD"].includes(item.name)) continue;
       fields.push({key: `${destination.environment}/${item.name}`, label: `${destination.environment} / ${item.name}`,
-        prompts: [item.inputLabel], secret: true,
-        help: item.required ? "Required when this secret is absent in GitHub." : "Optional. Leave blank to preserve an existing value."});
+        prompts: [item.inputLabel], secret: Boolean(item.secret),
+        help: item.required ? `Required when this ${item.secret ? "secret" : "variable"} is absent in GitHub.` :
+          "Optional. Leave blank to preserve an existing value."});
     }
   }
   return fields;
 }
 function draftKey(moduleId, actionId, fieldKey) { return `${moduleId}\u0000${actionId}\u0000${fieldKey}`; }
+function setSigningDraft(moduleId, fieldKey, value, generated = false, replaceGenerated = false) {
+  if (!value) return;
+  const key = draftKey(moduleId, "key", fieldKey);
+  const previous = settingsDrafts.get(key);
+  if (previous && !(replaceGenerated && generatedSigningDrafts.get(key) === previous)) return;
+  settingsDrafts.set(key, value);
+  if (generated) generatedSigningDrafts.set(key, value);
+  for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
+    if (input.dataset.draftKey === key) input.value = value;
+  }
+}
+function clearGeneratedSigningPassword(moduleId, fieldKey) {
+  const key = draftKey(moduleId, "key", fieldKey);
+  if (settingsDrafts.get(key) === generatedSigningDrafts.get(key)) {
+    settingsDrafts.delete(key);
+    for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
+      if (input.dataset.draftKey === key) input.value = "";
+    }
+  }
+  generatedSigningDrafts.delete(key);
+}
+function signingDefaultsMessage(moduleId) {
+  const status = signingDefaultsStatus.get(moduleId);
+  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  if (!status || status.requestedPath !== path) return "Checking signing defaults for this app…";
+  if (status.error) return status.error;
+  return status.data.keystoreExists ?
+    "Existing keystore: verify the signing alias. Blank passwords reuse matching saved vault values when available." :
+    `New keystore: an invented alias and two 25-word passphrases are ready. Review and save them to Bitwarden.${
+      activeModule === moduleId && selectedMenuCards().some(card => card.dataset.operationId === "github") &&
+        !selectedMenuCards().some(card => card.dataset.operationId === "key") ?
+        " Select APK signing key too; GitHub signing alone requires an existing keystore." : ""}`;
+}
+function updateSigningDefaultsMessage(moduleId) {
+  if (activeModule !== moduleId) return;
+  const message = $("prepared-settings")?.querySelector(".signing-default-status");
+  if (message) {
+    message.textContent = signingDefaultsMessage(moduleId);
+    message.classList.toggle("signing-default-error", Boolean(signingDefaultsStatus.get(moduleId)?.error));
+  }
+}
+async function ensureSigningDefaults(moduleId, regenerate = false) {
+  if (!session || locked || disconnected || closed) return null;
+  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  const cached = signingDefaultsStatus.get(moduleId);
+  if (!regenerate && cached?.requestedPath === path && !cached.error) return cached.data;
+  const current = signingDefaultsPending.get(moduleId);
+  if (!regenerate && current?.path === path) return current.promise;
+  const sequence = ++signingDefaultsSequence;
+  const promise = (async () => {
+    try {
+      const data = await request("/api/signing-defaults", "POST", {module: moduleId, ...(path ? {path} : {})});
+      if (signingDefaultsPending.get(moduleId)?.sequence !== sequence ||
+          (settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "") !== path) return null;
+      const resolvedPath = String(data.keystorePath || "");
+      // Use the server's resolved absolute path even if the user entered a
+      // relative one. The saved-password availability flags describe this
+      // exact path, and the worker should receive the same value.
+      const pathKey = draftKey(moduleId, "key", "keystore-path");
+      if (resolvedPath) {
+        settingsDrafts.set(pathKey, resolvedPath);
+        if (!path || generatedSigningDrafts.get(pathKey) === path) generatedSigningDrafts.set(pathKey, resolvedPath);
+        for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
+          if (input.dataset.draftKey === pathKey) input.value = resolvedPath;
+        }
+      }
+      const normalized = {
+        ...data, keystorePath: resolvedPath,
+        applicationIds: Array.isArray(data.applicationIds) ? data.applicationIds.join(", ") : String(data.applicationIds || ""),
+      };
+      signingDefaultsStatus.set(moduleId, {requestedPath: resolvedPath || path, data: normalized});
+      setSigningDraft(moduleId, "signing-key-alias", String(data.alias || ""), true, regenerate || Boolean(cached && cached.requestedPath !== path));
+      setSigningDraft(moduleId, "application-ids", normalized.applicationIds, true);
+      if (data.keystoreExists) {
+        clearGeneratedSigningPassword(moduleId, "keystore-password");
+        clearGeneratedSigningPassword(moduleId, "key-password");
+      } else {
+        const replace = regenerate || Boolean(cached && cached.requestedPath !== path);
+        setSigningDraft(moduleId, "keystore-password", String(data.storePassword || ""), true, replace);
+        setSigningDraft(moduleId, "key-password", String(data.keyPassword || ""), true, replace);
+      }
+      updateSigningDefaultsMessage(moduleId);
+      return normalized;
+    } catch (error) {
+      if (signingDefaultsPending.get(moduleId)?.sequence === sequence) {
+        signingDefaultsStatus.set(moduleId, {requestedPath: path, error: error.message});
+        updateSigningDefaultsMessage(moduleId);
+      }
+      return null;
+    } finally {
+      if (signingDefaultsPending.get(moduleId)?.sequence === sequence) signingDefaultsPending.delete(moduleId);
+      updateFooter();
+    }
+  })();
+  signingDefaultsPending.set(moduleId, {path, sequence, promise});
+  updateFooter();
+  return promise;
+}
 function renderSettingsGroups(data) {
   // Prepared inputs belong to the action menu. During execution the worker
   // supplies a live question in this panel, so no staged form is shown twice.
@@ -591,7 +702,9 @@ function renderSettingsGroups(data) {
     groups.append(el("p", "Discovering modules and preparing settings…", "empty-state"));
     return;
   }
-  const applicable = options.filter(option => operationAppliesToModule(option.id, module));
+  const selectedValues = menuSelections.get(module.id);
+  const applicable = options.filter(option => operationAppliesToModule(option.id, module) &&
+    (reviewingModule !== module.id || !selectedValues || selectedValues.has(String(option.value))));
   if (!applicable.length) {
     groups.append(el("p", "This module is excluded from setup. Use the terminal module selector to include it.", "empty-state"));
     return;
@@ -623,7 +736,14 @@ function renderSettingsGroups(data) {
     groups.append(el("p", `No advance inputs for ${module.path}. The wizard will ask for confirmations when needed.`, "empty-state"));
     return;
   }
-  groups.append(el("p", `Prepare ${module.path} values here. Blank fields are requested by the wizard only if needed. Prepared values stay in this tab's memory until setup ends; saved vault values are never shown.`, "settings-note"));
+  groups.append(el("p", reviewingModule === module.id ?
+    `Review ${module.path} values for the selected tasks. Blank fields reuse matching saved vault values when available; fill any missing values before running. You can export entered and generated values to Bitwarden.` :
+    `Prepare ${module.path} values here. Blank fields reuse matching saved vault values when available. Values stay in this tab until the session locks or closes; saved vault values are never shown.`, "settings-note"));
+  if (module.kind === "application" && applicable.some(({id}) => id === "key" || id === "github")) {
+    const status = el("p", signingDefaultsMessage(module.id), "settings-note signing-default-status");
+    status.classList.toggle("signing-default-error", Boolean(signingDefaultsStatus.get(module.id)?.error));
+    groups.append(status);
+  }
   const sections = commonFields.length ? [
     {option: {id: "common", label: "Common fields", description: "Used by multiple setup actions for this module."}, fields: commonFields},
     ...withFields,
@@ -657,14 +777,34 @@ function renderSettingsGroups(data) {
       input.addEventListener("input", () => {
         if (input.value) settingsDrafts.set(key, input.value);
         else settingsDrafts.delete(key);
+        generatedSigningDrafts.delete(key);
         for (const other of groups.querySelectorAll(".settings-field input")) {
           if (other !== input && other.dataset.draftKey === key) other.value = input.value;
         }
+        if (item.key === "keystore-path") {
+          clearTimeout(signingDefaultsTimers.get(module.id));
+          signingDefaultsTimers.set(module.id, setTimeout(() => ensureSigningDefaults(module.id), 350));
+        }
       });
+      if (item.secret) {
+        const reveal = el("button", "Show", "field-reveal");
+        reveal.type = "button";
+        reveal.setAttribute("aria-label", `Show ${item.label}`);
+        reveal.addEventListener("click", () => {
+          const visible = input.type === "password";
+          input.type = visible ? "text" : "password";
+          reveal.textContent = visible ? "Hide" : "Show";
+          reveal.setAttribute("aria-label", `${visible ? "Hide" : "Show"} ${item.label}`);
+        });
+        wrapper.append(reveal);
+      }
       list.append(wrapper);
     }
     group.append(list);
     groups.append(group);
+  }
+  if (module.kind === "application" && applicable.some(({id}) => id === "key" || id === "github")) {
+    void ensureSigningDefaults(module.id);
   }
 }
 function preparedAnswers(moduleId, selectedActions) {
@@ -676,7 +816,13 @@ function preparedAnswers(moduleId, selectedActions) {
   for (const actionId of actions) {
     for (const item of fieldsForAction(actionId, state)) {
       const value = settingsDrafts.get(draftKey(moduleId, item.draftAction || actionId, item.key));
-      if (value) for (const promptLabel of item.prompts || []) answers.set(promptLabel, value);
+      if (value) {
+        for (const promptLabel of item.prompts || []) answers.set(promptLabel, value);
+        // One password input is enough. The CLI still asks for a confirmation
+        // when creating/changing the key, so supply the same staged value.
+        if (item.key === "keystore-password") answers.set("Confirm keystore password", value);
+        if (item.key === "key-password") answers.set("Confirm key password", value);
+      }
     }
   }
   return answers;
@@ -843,18 +989,53 @@ $("bitwarden-form").addEventListener("submit", async event => {
 });
 function validatePreparedPasswords(moduleId, selectedActions) {
   if (!selectedActions.includes("key") && !selectedActions.includes("github")) return true;
-  for (const [password, confirmation, label] of [
-    ["keystore-password", "confirm-keystore-password", "keystore"],
-    ["key-password", "confirm-key-password", "key"],
+  for (const [password, label] of [
+    ["keystore-password", "keystore"],
+    ["key-password", "key"],
   ]) {
     const entered = settingsDrafts.get(draftKey(moduleId, "key", password));
-    const repeated = settingsDrafts.get(draftKey(moduleId, "key", confirmation));
-    if (entered && repeated && entered !== repeated) {
-      setProblem(`The ${label} password and confirmation differ.`);
+    if (entered && (Array.from(entered).length < 6 || /[\x00-\x1f\x7f]/.test(entered))) {
+      setProblem(`The ${label} password needs at least six characters and no control characters.`);
       activateTab($("tab-settings"));
       return false;
     }
   }
+  return true;
+}
+function selectedMenuSignature() {
+  return selectedMenuCards().map(card => card.querySelector("input").value).sort().join(",");
+}
+function focusPreparedField(moduleId, actionId, fieldKey, message) {
+  activateTab($("tab-settings"));
+  setFooterStatus(message, "warning");
+  const key = draftKey(moduleId, actionId, fieldKey);
+  const input = [...$("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []]
+    .find(item => item.dataset.draftKey === key);
+  input?.focus();
+  return false;
+}
+function validateSelectedForm(moduleId, selectedActions) {
+  if (!validatePreparedPasswords(moduleId, selectedActions)) return false;
+  const has = (action, key) => Boolean(settingsDrafts.get(draftKey(moduleId, action, key))?.trim());
+  const data = signingDefaultsStatus.get(moduleId)?.data;
+  if (selectedActions.includes("github") && !has("github", "github-token") && !data?.savedGitHubToken) {
+    return focusPreparedField(moduleId, "github", "github-token", "Enter a GitHub token or use a saved vault token.");
+  }
+  if (!selectedActions.includes("key")) return true;
+  if (!data) {
+    return focusPreparedField(moduleId, "key", "keystore-path", "Signing defaults are not ready. Review the keystore path and try again.");
+  }
+  if (!has("key", "keystore-path")) return focusPreparedField(moduleId, "key", "keystore-path", "Enter a keystore path outside this repository.");
+  if (!has("key", "signing-key-alias")) return focusPreparedField(moduleId, "key", "signing-key-alias", "Enter a signing key alias.");
+  const pathMatches = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) === data.keystorePath;
+  const aliasMatches = settingsDrafts.get(draftKey(moduleId, "key", "signing-key-alias")) === data.alias;
+  if (!has("key", "keystore-password") && !(data.keystoreExists && pathMatches && aliasMatches && data.savedStorePassword)) {
+    return focusPreparedField(moduleId, "key", "keystore-password", "Enter the keystore passphrase or use a matching saved vault value.");
+  }
+  if (!has("key", "key-password") && !(data.keystoreExists && pathMatches && aliasMatches && data.savedKeyPassword)) {
+    return focusPreparedField(moduleId, "key", "key-password", "Enter the key passphrase or use a matching saved vault value.");
+  }
+  if (!has("key", "application-ids")) return focusPreparedField(moduleId, "key", "application-ids", "Enter at least one Android application ID.");
   return true;
 }
 function schedulePreparedAnswer(prompt) {
@@ -924,10 +1105,12 @@ function renderPrompt(prompt) {
     draftExecution = null;
     if (menuSelectionId !== prompt.id) {
       menuSelectionId = prompt.id;
+      reviewingModule = null;
+      reviewingSelection = "";
       menuSelections.clear();
       for (const module of availableModules) {
         menuSelections.set(module.id, new Set(lastMenuOptions.filter(option =>
-          option.selected && operationAppliesToModule(option.id, module)).map(option => option.value)));
+          option.selected && operationAppliesToModule(option.id, module)).map(option => String(option.value))));
       }
     }
   }
@@ -955,7 +1138,15 @@ function renderPrompt(prompt) {
     container.addEventListener("change", () => {
       updateFooter();
       if (prompt.kind === "modules") syncModuleSelection();
-      else { saveMenuSelection(); renderMenuCards(); renderOverview(state); }
+      else {
+        saveMenuSelection();
+        reviewingModule = null;
+        reviewingSelection = "";
+        renderMenuCards();
+        renderSettingsGroups(state);
+        renderOverview(state);
+        updateFooter();
+      }
     });
   } else if (prompt.kind === "text") {
     const input = field(title, prompt.default, Boolean(prompt.secret));
@@ -1036,7 +1227,28 @@ async function submitPrompt(action = "primary") {
   const menuModule = prompt.kind === "menu" && action === "primary" ? activeModule : null;
   if (prompt.kind === "menu" && !menuModule) draftExecution = null;
   const selectedActions = menuModule ? selectedMenuCards().map(card => card.dataset.operationId) : [];
-  if (menuModule && !validatePreparedPasswords(menuModule, selectedActions)) return;
+  const needsForm = menuModule && selectedActions.some(id => fieldsForAction(id, state).length);
+  if (needsForm && (reviewingModule !== menuModule || reviewingSelection !== selectedMenuSignature())) {
+    saveMenuSelection();
+    reviewingModule = menuModule;
+    reviewingSelection = selectedMenuSignature();
+    renderSettingsGroups(state);
+    activateTab($("tab-settings"));
+    setFooterStatus("Review all selected setup fields, then run the tasks.");
+    updateFooter();
+    return;
+  }
+  if (needsForm && (selectedActions.includes("key") || selectedActions.includes("github"))) {
+    pending = true;
+    updateFooter();
+    let defaults;
+    try { defaults = await ensureSigningDefaults(menuModule); }
+    finally { pending = false; updateFooter(); }
+    if (!defaults) {
+      return focusPreparedField(menuModule, "key", "keystore-path", "Could not inspect signing defaults. Check the keystore path and try again.");
+    }
+  }
+  if (needsForm && !validateSelectedForm(menuModule, selectedActions)) return;
   if (prompt.countdownSeconds && !prompt.secret) rememberPausedPrompt(prompt.id);
   stopCountdown();
   pending = true;
@@ -1044,7 +1256,9 @@ async function submitPrompt(action = "primary") {
   if (menuModule) draftExecution = {module: menuModule, answers: preparedAnswers(menuModule, selectedActions), used: new Set()};
   try {
     await request("/api/answer", "POST", action === "cancel" && prompt.kind !== "confirm" ?
-      {id: prompt.id, cancel: true} : {id: prompt.id, value, ...(menuModule ? {module: menuModule} : {})});
+      {id: prompt.id, cancel: true} : {id: prompt.id, value, ...(menuModule ? {
+        module: menuModule, prepared: Object.fromEntries(draftExecution.answers),
+      } : {})});
     forgetPausedPrompt();
     setFooterStatus("Continuing setup…");
     await refresh();
@@ -1153,7 +1367,15 @@ function updateFooter() {
   primary.hidden = false;
   const container = ["menu", "modules"].includes(prompt.kind) ? $("action-content") : $("settings-content");
   const choices = prompt.kind === "menu" ? selectedMenuCards().length : container.querySelectorAll('input[type="checkbox"]:checked').length;
+  if (prompt.kind === "menu") {
+    const selected = selectedMenuCards().map(card => card.dataset.operationId);
+    const hasFields = selected.some(id => fieldsForAction(id, state).length);
+    primary.textContent = hasFields && reviewingModule === activeModule && reviewingSelection === selectedMenuSignature() ?
+      "Run selected tasks" : "Setup selected tasks";
+  }
   primary.disabled = ["menu", "modules"].includes(prompt.kind) && choices === 0 ||
+    prompt.kind === "menu" && selectedMenuCards().some(card => ["key", "github"].includes(card.dataset.operationId)) &&
+      Boolean(signingDefaultsPending.get(activeModule)) ||
     prompt.kind === "confirm" && !container.querySelector('.confirmation input')?.checked ||
     prompt.kind === "key" && !container.querySelector('input[name="signing-key"]:checked');
 }
@@ -1408,7 +1630,7 @@ function renderOverview(data) {
   const selectedValues = data.prompt?.kind === "menu" && promptId === data.prompt.id ?
     new Set(selectedMenuCards().map(card => card.querySelector('input[type="checkbox"]').value)) : null;
   const selected = data.prompt?.kind === "menu" ? (data.prompt.options || [])
-    .filter(option => selectedValues ? selectedValues.has(option.value) : option.selected && operationAppliesToModule(option.id, module))
+    .filter(option => selectedValues ? selectedValues.has(String(option.value)) : option.selected && operationAppliesToModule(option.id, module))
     .map(option => option.label) : [];
   if (selected.length) add("Selected setup tasks", selected.join("\n"));
   if (data.status === "error") add(vaultLabel ? `${vaultLabel} needs attention` : "Setup needs attention", (data.notes || []).at(-1) || "Review process output for recovery steps.", true);
@@ -1420,7 +1642,12 @@ function renderState(data) {
   const vaultLabel = vaultActionLabel(data);
   if (data.status === "closed") { finishClose(); return; }
   if (vaultWorkerPromptId != null && !isVaultPrompt(data.prompt)) closeVaultDialog();
-  if (data.status === "finished" || data.status === "error") { clearPreparedValues(); lastMenuOptions = null; }
+  if (data.status === "finished" || data.status === "error") {
+    // Keep the filled form values in memory until the user exports a Bitwarden
+    // note or closes/locks the page. Discard only the per-run answer queue.
+    draftExecution = null;
+    lastMenuOptions = null;
+  }
   if (data.status === "locked") {
     showLock(data);
     setFooterStatus(data.vaultMode === "create" ? "Create a vault passphrase to begin" :

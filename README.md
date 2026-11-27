@@ -240,10 +240,13 @@ The workspace groups **Actions**,
 available, module-specific APK, AAR, JAR and workflow details. The Settings tab
 puts shared inputs in **Common fields** at the top, followed by action-specific
 inputs for the active module. Each input appears once, and actions without
-advance inputs do not add empty groups. Prepared values remain
-in browser-tab memory and are supplied only when the chosen operation requests
-them; conditional choices and confirmations still appear during setup. Select
-steps, review their target and
+advance inputs do not add empty groups. With actions selected, choose **Setup
+selected tasks** to review the complete form, then **Run selected tasks** to
+submit its values together. Existing public values are prefilled where possible;
+matching encrypted vault secrets can be reused without showing their contents.
+Prepared values remain in browser-tab memory until lock or close, including
+after a run, so they can be saved to Bitwarden. Conditional choices and
+confirmations still appear during setup. Select steps, review their target and
 changes, and respond to confirmations in the wizard. Starting the chosen setup
 operations can create missing workflow files before asking whether to replace
 modified ones.
@@ -259,18 +262,18 @@ for setup actions and vault viewing while the browser session is active. The
 main menu (☰) has a **Vault** section to view the masked saved entries or
 remake the local vault; these
 actions remain available after a setup run finishes. Saved secret values are
-not returned to the browser. Choose **Use vault value** when prompted to keep an
-existing value; an empty replacement is not a general reuse signal. After
+not returned to the browser. Blank matching secret inputs in the complete
+browser form reuse the saved vault values. After
 20 minutes without operator activity, enter the saved vault passphrase to
 restore access. The CLI-printed recovery code can unlock the browser session
 after its first login, but does not unlock the encrypted vault; an action that
 needs the vault will ask for its passphrase. An operation already running can
 finish while the session is locked; new actions wait for unlock.
-The browser does not reveal saved secrets or newly generated passwords. When
-creating an APK keystore in the browser, enter and back up your own store and
-key passwords. For automatically generated APK passwords,
-use the terminal wizard, which can show them for a private backup. Maven/OpenPGP
-key creation also requests the operator's passphrase. Treat the printed local
+For a missing APK keystore, the browser creates an invented key alias and two
+different 25-word passphrases from secure randomness. Review and save those
+values before locking or closing the tab. An existing keystore does not generate
+replacement passwords. Maven/OpenPGP key creation also requests the operator's
+passphrase. Treat the printed local
 launch address as private. Do not expose the local wizard over a network or
 share its session.
 

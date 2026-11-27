@@ -204,7 +204,7 @@ pub(crate) fn run(root: &Path, vault_created_at_handoff: bool) -> Result<()> {
         let menu = crate::ui::menu(&available, first_run)?;
         let (selected, module_id) = match menu {
             crate::ui::Menu::Setup(selected) => (selected, None),
-            crate::ui::Menu::ScopedSetup { module_id, selected } => {
+            crate::ui::Menu::ScopedSetup { module_id, selected, prepared } => {
                 ensure!(crate::ui::browser_active(), "Module-scoped setup requires the browser wizard.");
                 let module = modules.get(&module_id).context("Unknown setup module")?;
                 ensure!(module.selected, "The selected module is excluded from setup.");
@@ -218,6 +218,7 @@ pub(crate) fn run(root: &Path, vault_created_at_handoff: bool) -> Result<()> {
                         _ => false,
                     }, "The chosen operation does not apply to this module.");
                 }
+                crate::ui::prepare_browser_answers(prepared);
                 (selected, Some(module_id))
             }
             crate::ui::Menu::ViewVault => {
