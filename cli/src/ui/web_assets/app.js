@@ -304,6 +304,7 @@ function markDisconnected() {
   if (!disconnected) pauseCountdown();
   disconnected = true;
   closeMainMenu();
+  closeCopyJsonDialog(true);
   setFooterStatus("Connection to the local CLI interrupted. Retrying… Keep the launching terminal open.", "warning");
   $("vault-submit").disabled = true;
   $("vault-cancel").disabled = true;
