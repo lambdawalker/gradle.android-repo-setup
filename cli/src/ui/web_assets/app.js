@@ -87,6 +87,10 @@ const menuSelections = new Map();
 // Prepared values remain in this browser tab's memory. Secrets are never
 // written to sessionStorage or included in the state snapshot.
 const settingsDrafts = new Map();
+// Keep an OpenPGP form draft through same-prompt renders, and the most recent
+// accepted key form for export after the worker advances to another question.
+let openPgpFormDraft = null;
+let completedOpenPgpForm = null;
 // A saved-field catalog contains names only. It never contains vault values.
 let vaultSavedFields = null;
 let vaultFieldsRequest = 0;
@@ -104,6 +108,7 @@ let reviewingSelection = "";
 let draftExecution = null;
 function clearPreparedValues() {
   settingsDrafts.clear();
+  clearOpenPgpValues();
   clearVaultFieldStatus();
   generatedSigningDrafts.clear();
   preferredGeneratedDrafts.clear();
@@ -310,6 +315,7 @@ function markDisconnected() {
   if (closed || !session) return;
   if (!disconnected) pauseCountdown();
   disconnected = true;
+  clearOpenPgpValues();
   clearVaultFieldStatus();
   closeMainMenu();
   closeCopyJsonDialog(true);
@@ -573,6 +579,61 @@ function field(label, value, secret = false, help = "") {
   wrapper.append(caption);
   if (help) wrapper.append(el("small", help));
   return {wrapper, input};
+}
+function isOpenPgpSigningForm(prompt) {
+  return prompt?.kind === "form" && prompt.label === "Create a Maven Central signing key" &&
+    prompt.fields?.some(item => item.label === "New passphrase") &&
+    prompt.fields?.some(item => item.label === "Confirm passphrase");
+}
+function openPgpExportLabel(label) {
+  return label === "New passphrase" ? "maven-central / SIGNING_IN_MEMORY_KEY_PASSWORD" : label;
+}
+function clearOpenPgpValues() {
+  openPgpFormDraft = null;
+  completedOpenPgpForm = null;
+  for (const input of $("settings-content")?.querySelectorAll(".openpgp-passphrase-input") || []) input.value = "";
+}
+function openPgpRegenerateIcon() {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.classList.add("icon");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  const stroke = document.createElementNS(icon.namespaceURI, "path");
+  stroke.setAttribute("d", "M20 7v5h-5M4 17v-5h5M5.5 9A7 7 0 0 1 18 7l2 5M4 12l2 5a7 7 0 0 0 12.5-2");
+  icon.append(stroke);
+  return icon;
+}
+async function generateOpenPgpPassphrase(prompt, draft, button, initial = false) {
+  if (draft.generating || openPgpFormDraft !== draft || state?.prompt?.id !== prompt.id ||
+      locked || closed || disconnected || !session) return;
+  const previousNew = draft.values.get("New passphrase") || "";
+  const previousConfirm = draft.values.get("Confirm passphrase") || "";
+  draft.generating = true;
+  button.disabled = true;
+  button.classList.add("regenerating");
+  updateFooter();
+  try {
+    const result = await request("/api/openpgp-passphrase", "POST", {});
+    if (openPgpFormDraft !== draft || state?.prompt?.id !== prompt.id || locked || closed || disconnected ||
+        (draft.values.get("New passphrase") || "") !== previousNew ||
+        (draft.values.get("Confirm passphrase") || "") !== previousConfirm) return;
+    const passphrase = result?.passphrase;
+    if (typeof passphrase !== "string" || passphrase.trim().split(/\s+/).length !== 25) {
+      throw new Error("The new passphrase was incomplete. Try again.");
+    }
+    draft.values.set("New passphrase", passphrase);
+    draft.values.set("Confirm passphrase", passphrase);
+    for (const input of $("settings-content").querySelectorAll(".openpgp-passphrase-input")) input.value = passphrase;
+    if (!initial) setFooterStatus("Maven Central passphrase regenerated. Export it before this session locks.", "success");
+  } catch (error) {
+    if (!disconnected) setFooterStatus(`Could not generate the Maven Central passphrase: ${error.message}`, "warning");
+  } finally {
+    draft.generating = false;
+    const currentButton = draft.button || button;
+    currentButton.classList.remove("regenerating");
+    if (openPgpFormDraft === draft && state?.prompt?.id === prompt.id && !locked && !closed && !disconnected) currentButton.disabled = false;
+    updateFooter();
+  }
 }
 function visibleMenuCards() {
   return [...$("action-content").querySelectorAll(".action-card")].filter(card => !card.hidden);
@@ -1061,13 +1122,19 @@ function filledBitwardenEntries() {
       label: metadata?.label || fieldKey, value, shared: sharedFieldKey(actionId, fieldKey)});
   }
   const prompt = state?.prompt;
+  // The form vanishes after the worker accepts it. Keep its latest entered
+  // identity and passphrase available for a secure note or JSON export.
+  if (completedOpenPgpForm && !isOpenPgpSigningForm(prompt)) {
+    for (const entry of completedOpenPgpForm) append(entry);
+  }
   if ((prompt?.kind === "text" || prompt?.kind === "form") && !isVaultPrompt(prompt)) {
     const inputs = [...$("settings-content").querySelectorAll(".form-field input")];
     for (const [index, input] of inputs.entries()) {
       const label = prompt.kind === "form" ? prompt.fields?.[index]?.label : prompt.label;
       if (!input.value || !label || /^confirm(?:ation)?\b/i.test(label)) continue;
       append({module: availableModules.find(item => item.id === activeModule)?.path || "Repository",
-        action: "Current setup question", label, value: input.value});
+        action: isOpenPgpSigningForm(prompt) ? "Maven Central signing key" : "Current setup question",
+        label: isOpenPgpSigningForm(prompt) ? openPgpExportLabel(label) : label, value: input.value});
     }
   }
   return entries.map(({shared, ...entry}) => entry);
@@ -1471,8 +1538,51 @@ function renderPrompt(prompt) {
     input.input.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); submitPrompt("primary"); } });
   } else if (prompt.kind === "form") {
     const fields = el("div", "", "field-list");
-    for (const item of prompt.fields || []) fields.append(field(item.label, item.value, Boolean(item.secret), item.help).wrapper);
+    const openPgp = isOpenPgpSigningForm(prompt);
+    if (openPgp && openPgpFormDraft?.id !== prompt.id) {
+      openPgpFormDraft = {id: prompt.id, values: new Map(), requested: false, generating: false, button: null};
+    }
+    const draft = openPgp ? openPgpFormDraft : null;
+    for (const item of prompt.fields || []) {
+      const help = openPgp && item.label === "New passphrase" ?
+        "A 25-word passphrase is generated here. Edit it or use the button to generate another. At least 12 characters are required." : item.help;
+      const {wrapper, input} = field(item.label, item.value, Boolean(item.secret), help);
+      if (draft) {
+        if (!draft.values.has(item.label)) draft.values.set(item.label, item.value || "");
+        input.value = draft.values.get(item.label);
+        input.addEventListener("input", () => draft.values.set(item.label, input.value));
+        if (["New passphrase", "Confirm passphrase"].includes(item.label)) {
+          input.classList.add("openpgp-passphrase-input");
+        }
+        if (item.label === "New passphrase") {
+          const shell = el("span", "", "field-input-shell has-regenerate");
+          const caption = wrapper.querySelector("label");
+          input.id = `openpgp-passphrase-${prompt.id}`;
+          caption.textContent = item.label;
+          caption.htmlFor = input.id;
+          shell.append(input);
+          caption.after(shell);
+          const tools = el("span", "", "field-input-tools");
+          const regenerate = el("button", "", "field-regenerate");
+          regenerate.type = "button";
+          regenerate.setAttribute("aria-label", "Regenerate Maven Central signing passphrase");
+          regenerate.title = "Generate a new 25-word passphrase";
+          regenerate.append(openPgpRegenerateIcon());
+          regenerate.disabled = draft.generating;
+          regenerate.classList.toggle("regenerating", draft.generating);
+          regenerate.addEventListener("click", () => generateOpenPgpPassphrase(prompt, draft, regenerate));
+          tools.append(regenerate);
+          shell.append(tools);
+          draft.button = regenerate;
+        }
+      }
+      fields.append(wrapper);
+    }
     container.append(fields);
+    if (draft && !draft.requested && !draft.values.get("New passphrase") && !draft.values.get("Confirm passphrase")) {
+      draft.requested = true;
+      void generateOpenPgpPassphrase(prompt, draft, draft.button, true);
+    }
   } else if (prompt.kind === "confirm") {
     container.append(el("p", "Review the proposed change before you apply it.", "prompt-help"));
     const check = el("label", "", "confirmation");
@@ -1538,9 +1648,20 @@ function promptValue(prompt, action) {
 async function submitPrompt(action = "primary") {
   const prompt = state?.prompt;
   if (!prompt || pending || closed || disconnected) return;
+  if (isOpenPgpSigningForm(prompt) && openPgpFormDraft?.generating) return;
   const value = action === "cancel" && prompt.kind === "confirm" ? false : promptValue(prompt, action);
   if (action === "primary" && ((["menu", "modules"].includes(prompt.kind) && !value.length) ||
       (prompt.kind === "key" && !value) || (prompt.kind === "confirm" && !value))) return;
+  const openPgpPhraseIndex = isOpenPgpSigningForm(prompt) ?
+    prompt.fields.findIndex(item => item.label === "New passphrase") : -1;
+  const openPgpPhrase = openPgpPhraseIndex >= 0 && Array.isArray(value) ? value[openPgpPhraseIndex] : "";
+  const openPgpSubmission = action === "primary" && isOpenPgpSigningForm(prompt) &&
+    openPgpPhrase?.length >= 12 && openPgpPhrase ===
+      value[prompt.fields.findIndex(item => item.label === "Confirm passphrase")] ?
+    prompt.fields.map((item, index) => ({
+      module: availableModules.find(module => module.id === activeModule)?.path || "Repository",
+      action: "Maven Central signing key", label: openPgpExportLabel(item.label), value: value[index],
+    })).filter(item => item.value && item.label !== "Confirm passphrase") : null;
   const menuModule = prompt.kind === "menu" && action === "primary" ? activeModule : null;
   if (prompt.kind === "menu" && !menuModule) draftExecution = null;
   const selectedActions = menuModule ? selectedMenuCards().map(card => card.dataset.operationId) : [];
@@ -1576,6 +1697,7 @@ async function submitPrompt(action = "primary") {
       {id: prompt.id, cancel: true} : {id: prompt.id, value, ...(menuModule ? {
         module: menuModule, prepared: Object.fromEntries(draftExecution.answers),
       } : {})});
+    if (openPgpSubmission) completedOpenPgpForm = openPgpSubmission;
     forgetPausedPrompt();
     setFooterStatus("Continuing setup…");
     await refresh();
@@ -1692,6 +1814,7 @@ function updateFooter() {
       "Run selected tasks" : "Setup selected tasks";
   }
   primary.disabled = ["menu", "modules"].includes(prompt.kind) && choices === 0 ||
+    isOpenPgpSigningForm(prompt) && Boolean(openPgpFormDraft?.generating) ||
     prompt.kind === "menu" && regeneratingPasswords.size > 0 ||
     prompt.kind === "menu" && selectedMenuCards().some(card => ["key", "github"].includes(card.dataset.operationId)) &&
       Boolean(signingDefaultsPending.get(activeModule)) ||
@@ -2002,7 +2125,9 @@ function renderState(data) {
   const statusChanged = data.status !== lastStatus;
   const phaseChanged = data.phase !== lastPhase;
   if (promptChanged && promptId !== undefined) forgetPausedPrompt();
-  if (promptChanged || (statusChanged || phaseChanged) && !data.prompt || nextKeySignature !== keySignature && data.prompt?.kind === "key") {
+  if (promptChanged || (statusChanged || phaseChanged) && !data.prompt ||
+      nextKeySignature !== keySignature && data.prompt?.kind === "key" ||
+      isOpenPgpSigningForm(data.prompt) && !openPgpFormDraft) {
     const selectedKey = promptChanged ? "" : $("settings-content").querySelector('input[name="signing-key"]:checked')?.value || "";
     const existingTab = activeTab;
     keySignature = nextKeySignature;
