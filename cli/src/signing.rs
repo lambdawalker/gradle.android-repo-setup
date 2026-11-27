@@ -27,7 +27,7 @@ const SECRET_NAMES: [&str; 4] = [
 const GITHUB_SECRET_LIMIT: usize = 48 * 1024;
 const KEYTOOL_ERROR: &str = "keytool failed. Check the JDK, keystore, alias, and passwords.";
 
-fn generate_password() -> Result<String> {
+pub(crate) fn generate_password() -> Result<String> {
     (0..25).map(|_| made_up_word(1)).collect::<Result<Vec<_>>>()
         .map(|words| words.join(" "))
 }

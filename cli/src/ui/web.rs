@@ -935,6 +935,22 @@ impl Server {
         Ok(json!({"passphrase":passphrase}))
     }
 
+    // Generate a fresh passphrase only for the active OpenPGP creation form.
+    // Secret form defaults stay out of /api/state and are never stored here.
+    fn openpgp_passphrase(&self) -> std::result::Result<Value, (u16, &'static str)> {
+        if self.closing || self.status != "running"
+            || !self.pending.as_ref().is_some_and(|pending| matches!(
+                &pending.question,
+                Question::Form { title, .. } if title == "Create a Maven Central signing key"
+            ))
+        {
+            return Err((409, "Create a Maven Central signing key before generating its passphrase."));
+        }
+        let passphrase = signing::generate_password()
+            .map_err(|_| (500, "Could not generate an OpenPGP passphrase."))?;
+        Ok(json!({"passphrase":passphrase}))
+    }
+
     // Recheck the vault passphrase for every explicit clipboard export. The
     // session's cached login never authorizes revealing saved credentials.
     fn export_json(&self, input: &Value) -> std::result::Result<Value, (u16, &'static str)> {
@@ -1146,6 +1162,10 @@ impl Server {
                 }
                 match path {
                     "/api/signing-passphrase" => match self.signing_passphrase(&input) {
+                        Ok(value) => Response::json(200, value),
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
+                    "/api/openpgp-passphrase" => match self.openpgp_passphrase() {
                         Ok(value) => Response::json(200, value),
                         Err((code, message)) => Response::json_error(code, message),
                     },
@@ -2010,6 +2030,50 @@ esac
         assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"another-recovery"}), Some((new_bearer,new_csrf))), HOST).status, 401);
         assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"a long passphrase"}), Some((new_bearer,new_csrf))), HOST).status, 200);
         fs::remove_dir_all(config.state_dir.join(config.project_name())).unwrap();
+    }
+
+    #[test]
+    fn openpgp_passphrases_require_the_active_form_and_never_enter_state() -> Result<()> {
+        let mut server = server();
+        let (bearer, csrf) = login_unverified(&mut server);
+        let generate = |server: &mut Server| server.handle(request(
+            "POST", "/api/openpgp-passphrase", json!({}), Some((&bearer, &csrf)),
+        ), HOST);
+        assert_eq!(generate(&mut server).status, 423);
+        let session = server.session.as_mut().unwrap();
+        session.locked = false;
+        session.authenticated = true;
+        assert_eq!(generate(&mut server).status, 409);
+        let (reply, _received) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 42,
+            question: Question::Form {
+                title: "Other form".into(), fields: vec![], validate: |_| Ok(()),
+            },
+            reply, keys: Vec::new(), key_status: None,
+        });
+        server.status = "running";
+        assert_eq!(generate(&mut server).status, 409);
+        if let Some(Pending { question: Question::Form { title, .. }, .. }) = &mut server.pending {
+            *title = "Create a Maven Central signing key".into();
+        }
+        let mut bad_csrf = request("POST", "/api/openpgp-passphrase", json!({}), Some((&bearer, &csrf)));
+        bad_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(bad_csrf, HOST).status, 403);
+        let first = generate(&mut server);
+        let second = generate(&mut server);
+        assert_eq!(first.status, 200);
+        assert_eq!(second.status, 200);
+        let first: Value = serde_json::from_slice(&first.body)?;
+        let second: Value = serde_json::from_slice(&second.body)?;
+        let phrase = first["passphrase"].as_str().unwrap();
+        assert_eq!(phrase.split_whitespace().count(), 25);
+        assert!(phrase.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b' '));
+        assert_ne!(first, second);
+        assert!(!server.snapshot().to_string().contains(phrase));
+        assert_eq!(server.handle(request("POST", "/api/lock", json!({}), Some((&bearer, &csrf))), HOST).status, 200);
+        assert_eq!(generate(&mut server).status, 423);
+        Ok(())
     }
 
     #[test]

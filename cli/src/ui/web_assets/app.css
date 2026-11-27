@@ -155,6 +155,15 @@ h1, h2, h3, p { margin-top: 0; }
 .form-field label { font-size: 12px; font-weight: 600; }
 .form-field small { color: var(--muted); font-size: 11px; }
 .form-field input, .form-field select, .artifact-tools input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); font-size: 12px; }
+.form-field .field-input-shell { position: relative; display: block; min-width: 0; }
+.form-field .field-input-shell input { padding-right: 42px; }
+.form-field .field-input-tools { position: absolute; top: 50%; right: 4px; display: flex; transform: translateY(-50%); }
+.form-field .field-regenerate { display: grid; place-items: center; width: 27px; height: 27px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--blue); }
+.form-field .field-regenerate .icon { width: 15px; height: 15px; }
+.form-field .field-regenerate:hover:not(:disabled) { border-color: var(--blue); background: var(--selected); }
+.form-field .field-regenerate:disabled { color: var(--muted); opacity: .55; cursor: not-allowed; }
+.form-field .field-regenerate.regenerating .icon { animation: loading-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .form-field .field-regenerate.regenerating .icon { animation: none; } }
 .confirmation { display: flex; align-items: start; gap: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
 .confirmation input { width: 16px; height: 16px; flex: none; margin: 1px 0 0; accent-color: var(--blue); }
 .confirmation span { font-size: 12px; }
