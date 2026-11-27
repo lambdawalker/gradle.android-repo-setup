@@ -238,7 +238,9 @@ tabs; use `android-repo-setup select-modules` to change which modules are includ
 The workspace groups **Actions**,
 **Settings**, **Overview**, and **Process output** beside progress and, when
 available, module-specific APK, AAR, JAR and workflow details. The Settings tab
-groups advance inputs by action for the active module. Prepared values remain
+puts shared inputs in **Common fields** at the top, followed by action-specific
+inputs for the active module. Each input appears once, and actions without
+advance inputs do not add empty groups. Prepared values remain
 in browser-tab memory and are supplied only when the chosen operation requests
 them; conditional choices and confirmations still appear during setup. Select
 steps, review their target and
@@ -268,6 +270,17 @@ use the terminal wizard, which can show them for a private backup. Maven/OpenPGP
 key creation also requests the operator's passphrase. Treat the printed local
 launch address as private. Do not expose the local wizard over a network or
 share its session.
+
+To save the values you have entered, install and log in to the Bitwarden
+Password Manager CLI (`bw login`), then unlock it with `bw unlock --raw`.
+Choose **Create Bitwarden note** from the wizard's main menu. Paste the CLI
+session key into the dialog, or set `BW_SESSION` before starting the wizard.
+Check the displayed Bitwarden account and choose **Create note** to write a
+secure note. It includes filled Settings fields across module tabs and any
+current setup question, with repeated and confirmation fields omitted. Values
+already stored in the setup vault are never exported to the browser or note;
+fill them in explicitly if you want them in the note. The pasted session key
+is cleared when you close the dialog or after the note is created.
 
 ### Public Android signing associations
 

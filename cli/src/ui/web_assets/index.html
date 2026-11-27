@@ -32,6 +32,8 @@
             <button id="menu-remake-vault" type="button" role="menuitem" disabled>Remake vault</button>
           </div>
           <div class="menu-separator" role="separator"></div>
+          <button id="menu-bitwarden-note" type="button" role="menuitem" disabled>Create Bitwarden note…</button>
+          <div class="menu-separator" role="separator"></div>
           <button id="menu-toggle-panels" type="button" role="menuitem">Hide repository panels</button>
           <button id="menu-close-wizard" type="button" role="menuitem" disabled>Close wizard</button>
         </div>
@@ -101,6 +103,23 @@
         <p id="vault-error" class="problem" role="alert" hidden></p>
       </div>
       <div class="dialog-actions"><button id="vault-cancel" class="button outline" type="button" hidden>Cancel setup</button> <button id="vault-submit" class="button primary" type="submit">Unlock</button></div>
+    </form>
+  </dialog>
+  <dialog id="bitwarden-dialog" aria-labelledby="bitwarden-title" aria-describedby="bitwarden-description">
+    <div class="dialog-heading"><h2 id="bitwarden-title">Create Bitwarden secure note</h2></div>
+    <form id="bitwarden-form" autocomplete="off">
+      <div class="dialog-body bitwarden-body">
+        <p id="bitwarden-description">Save filled setup fields from all module tabs. Blank fields, password confirmations, and credentials already saved in the local vault are not included. Create this note before running setup; prepared fields are cleared when setup ends.</p>
+        <p id="bitwarden-count" class="bitwarden-count"></p>
+        <label for="bitwarden-note-name">Note name</label>
+        <input id="bitwarden-note-name" type="text" autocomplete="off" spellcheck="false" maxlength="120" required>
+        <label for="bitwarden-session-key">Bitwarden CLI session key (optional)</label>
+        <input id="bitwarden-session-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096">
+        <small>Install and log in to the Bitwarden CLI, then run <code>bw unlock --raw</code> and paste its session key here. Leave blank if the wizard inherited <code>BW_SESSION</code> from its terminal.</small>
+        <p id="bitwarden-account" role="status">Check the target account before creating the note.</p>
+        <p id="bitwarden-error" class="problem" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions"><button id="bitwarden-cancel" class="button outline" type="button">Cancel</button> <button id="bitwarden-check" class="button outline" type="button">Check account</button> <button id="bitwarden-create" class="button primary" type="submit" disabled>Create note</button></div>
     </form>
   </dialog>
 </body>

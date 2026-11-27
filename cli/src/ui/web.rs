@@ -6,13 +6,14 @@ use crate::{
     setup, vault,
 };
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -22,6 +23,8 @@ const BODY_LIMIT: usize = 128 * 1024;
 const LOG_LIMIT: usize = 512 * 1024;
 const IDLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 const BOOTSTRAP_LIMIT: Duration = Duration::from_secs(10 * 60);
+const BITWARDEN_TIMEOUT: Duration = Duration::from_secs(30);
+const BITWARDEN_NOTE_LIMIT: usize = 6 * 1024;
 
 struct Request {
     method: String,
@@ -157,8 +160,154 @@ fn module_artifacts(root: &Path, id: &str, module: &discovery::Module) -> Vec<Va
     artifacts
 }
 
+type BitwardenError = (u16, &'static str);
+
+fn installed_bitwarden(root: &Path) -> PathBuf {
+    let project = fs::canonicalize(root).ok();
+    let current_directory = std::env::current_dir().ok().and_then(|path| fs::canonicalize(path).ok());
+    let Some(path) = std::env::var_os("PATH") else { return PathBuf::new() };
+    for directory in std::env::split_paths(&path).filter(|path| path.is_absolute()) {
+        // npm installs bw.cmd on Windows; the standalone download is bw.exe.
+        // Arguments below are fixed literals, and note content is sent on stdin.
+        let names: &[&str] = if cfg!(windows) { &["bw.exe", "bw.cmd"] } else { &["bw"] };
+        for name in names {
+            let Ok(candidate) = fs::canonicalize(directory.join(name)) else { continue };
+            if fs::metadata(&candidate).is_ok_and(|entry| entry.is_file())
+                && !project.as_ref().is_some_and(|project| candidate.starts_with(project))
+                && !current_directory.as_ref().is_some_and(|cwd| candidate.starts_with(cwd))
+            {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::new()
+}
+
+fn bitwarden_session(input: &Value) -> std::result::Result<Option<&str>, BitwardenError> {
+    match input.get("sessionKey") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(key)) if key.is_empty() => Ok(None),
+        Some(Value::String(key))
+            if key.len() <= 4096 && !key.chars().any(char::is_control) =>
+        {
+            Ok(Some(key))
+        }
+        _ => Err((422, "Enter a valid Bitwarden CLI session key.")),
+    }
+}
+
+fn bitwarden_note(input: &Value) -> std::result::Result<(&str, String), BitwardenError> {
+    let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+    if name.trim().is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
+        return Err((422, "Enter a note name on one line (up to 120 characters)."));
+    }
+    let entries = input.get("entries").and_then(Value::as_array)
+        .ok_or((422, "Choose values to save in the Bitwarden note."))?;
+    if entries.is_empty() || entries.len() > 80 {
+        return Err((422, "Choose between 1 and 80 entered form values."));
+    }
+    let mut note = String::from("Android repository setup values\n");
+    let mut previous_module = "";
+    let mut previous_action = "";
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let get = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("");
+        let (module, action, label, value) =
+            (get("module"), get("action"), get("label"), get("value"));
+        if [module, action, label].iter().any(|part| part.trim().is_empty()
+            || part.len() > 120 || part.chars().any(char::is_control))
+            || value.trim().is_empty() || value.len() > 4096
+            || value.chars().any(char::is_control)
+        {
+            return Err((422, "Note values must be nonempty single-line form entries."));
+        }
+        if !seen.insert((module.to_owned(), label.to_owned())) {
+            return Err((422, "A form field appears more than once in the note."));
+        }
+        if previous_module != module {
+            note.push_str(&format!("\n{module}\n"));
+            previous_module = module;
+            previous_action = "";
+        }
+        if previous_action != action {
+            note.push_str(&format!("{action}\n"));
+            previous_action = action;
+        }
+        note.push_str(&format!("  {label}: {value}\n"));
+        if note.len() > BITWARDEN_NOTE_LIMIT {
+            return Err((422, "The entered values exceed one Bitwarden note. Reduce the values and try again."));
+        }
+    }
+    Ok((name, note))
+}
+
+// The Bitwarden CLI accepts encoded item JSON on stdin. Keep secrets out of
+// process arguments, temporary files, diagnostic output, and server notes.
+fn bitwarden_command(
+    executable: &Path,
+    args: &[&str],
+    session: Option<&str>,
+    stdin: Option<&[u8]>,
+) -> std::result::Result<Value, BitwardenError> {
+    if executable.as_os_str().is_empty() {
+        return Err((409, "Install Bitwarden Password Manager CLI (bw) and make it available on PATH."));
+    }
+    let mut command = Command::new(executable);
+    command.args(args).arg("--nointeraction")
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .env_remove("BITWARDENCLI_DEBUG").env("BW_NOINTERACTION", "true");
+    if let Some(session) = session {
+        command.env("BW_SESSION", session);
+    }
+    let mut child = command.spawn().map_err(|_| (409,
+        "Install Bitwarden Password Manager CLI (bw) and make it available on PATH."))?;
+    let stdout = child.stdout.take().ok_or((500, "Could not read Bitwarden's response."))?;
+    let (output_tx, output_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout.take(128 * 1024 + 1).read_to_end(&mut output)
+            .map(|_| output);
+        let _ = output_tx.send(result);
+    });
+    let writer = stdin.and_then(|payload| child.stdin.take().map(|mut input| {
+        let payload = payload.to_vec();
+        let (sent_tx, sent_rx) = mpsc::sync_channel(1);
+        thread::spawn(move || { let _ = sent_tx.send(input.write_all(&payload)); });
+        sent_rx
+    }));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < BITWARDEN_TIMEOUT => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err((409, "Bitwarden did not finish in time. Check the CLI and try again."));
+            }
+        }
+    };
+    if !status.success() {
+        return Err((409, "Bitwarden could not complete this action. Log in and unlock the CLI, then try again."));
+    }
+    if let Some(writer) = writer {
+        if !matches!(writer.recv_timeout(BITWARDEN_TIMEOUT.saturating_sub(started.elapsed())), Ok(Ok(()))) {
+            return Err((409, "Bitwarden could not accept the note. Check the CLI session and try again."));
+        }
+    }
+    let output = output_rx.recv_timeout(BITWARDEN_TIMEOUT.saturating_sub(started.elapsed()))
+        .map_err(|_| (500, "Could not read Bitwarden's response."))?
+        .map_err(|_| (500, "Could not read Bitwarden's response."))?;
+    if output.len() > 128 * 1024 {
+        return Err((500, "Bitwarden returned an invalid response."));
+    }
+    serde_json::from_slice(&output).map_err(|_| (500, "Bitwarden returned an invalid response."))
+}
+
 struct Server {
     root: PathBuf,
+    bitwarden_executable: PathBuf,
     sender: Sender<Update>,
     updates: Receiver<Update>,
     worker: Option<JoinHandle<Result<()>>>,
@@ -189,6 +338,7 @@ impl Server {
         recovery_code: String,
     ) -> Self {
         Self {
+            bitwarden_executable: installed_bitwarden(&root),
             root,
             sender,
             updates,
@@ -621,6 +771,57 @@ impl Server {
         true
     }
 
+    fn bitwarden_status(&self, input: &Value) -> std::result::Result<Value, BitwardenError> {
+        if self.closing {
+            return Err((409, "The wizard is closing."));
+        }
+        let session = bitwarden_session(input)?;
+        let status = bitwarden_command(&self.bitwarden_executable, &["status"], session, None)?;
+        let state = status.get("status").and_then(Value::as_str).unwrap_or("");
+        if !matches!(state, "unlocked" | "locked" | "unauthenticated") {
+            return Err((500, "Bitwarden returned an invalid status."));
+        }
+        let email = status.get("userEmail").and_then(Value::as_str).unwrap_or("");
+        if (state == "unlocked" && email.is_empty()) || email.len() > 254
+            || email.chars().any(char::is_control) {
+            return Err((500, "Bitwarden returned an invalid account."));
+        }
+        Ok(json!({"status":state,"email":email}))
+    }
+
+    fn create_bitwarden_note(&self, input: &Value) -> std::result::Result<Value, BitwardenError> {
+        let (name, notes) = bitwarden_note(input)?;
+        let session = bitwarden_session(input)?;
+        let expected_email = input.get("expectedEmail").and_then(Value::as_str)
+            .filter(|email| !email.is_empty() && email.len() <= 254)
+            .ok_or((422, "Check the Bitwarden account before creating the note."))?;
+        let account = self.bitwarden_status(input)?;
+        if account["status"] != "unlocked" {
+            return Err((409, "Log in and unlock Bitwarden CLI, then provide its BW_SESSION key."));
+        }
+        if account["email"].as_str() != Some(expected_email) {
+            return Err((409, "The Bitwarden account changed. Check the account again before creating the note."));
+        }
+        let mut item = bitwarden_command(
+            &self.bitwarden_executable, &["get", "template", "item"], session, None,
+        )?;
+        let object = item.as_object_mut().ok_or((500, "Bitwarden returned an invalid template."))?;
+        object.insert("type".into(), json!(2));
+        object.insert("secureNote".into(), json!({"type":0}));
+        object.insert("name".into(), json!(name));
+        object.insert("notes".into(), json!(notes));
+        let encoded = STANDARD.encode(item.to_string());
+        // Once create is sent, an error or timeout cannot prove whether the
+        // server accepted the item. Ask for a vault check before any retry.
+        let created = bitwarden_command(
+            &self.bitwarden_executable, &["create", "item"], session, Some(encoded.as_bytes()),
+        ).map_err(|_| (409, "Bitwarden may have created the note. Check the vault before retrying."))?;
+        let id = created.get("id").and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+            .ok_or((500, "Bitwarden did not return a note identifier. Check the vault before retrying."))?;
+        Ok(json!({"id":id,"name":name}))
+    }
+
     fn handle(&mut self, req: Request, host: &str) -> Response {
         self.lock_if_idle();
         if req.header("host") != Some(host) || req.path.contains('?') {
@@ -717,6 +918,20 @@ impl Server {
                     return Response::json_error(423, "Unlock the local session to continue.");
                 }
                 match path {
+                    "/api/bitwarden-status" => match self.bitwarden_status(&input) {
+                        Ok(account) => {
+                            if let Some(session) = &mut self.session { session.last_seen = Instant::now(); }
+                            Response::json(200, account)
+                        }
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
+                    "/api/bitwarden-note" => match self.create_bitwarden_note(&input) {
+                        Ok(note) => {
+                            if let Some(session) = &mut self.session { session.last_seen = Instant::now(); }
+                            Response::json(200, note)
+                        }
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
                     "/api/start"
                         if input.get("action").and_then(Value::as_str) == Some("setup") =>
                     {
@@ -1263,6 +1478,107 @@ mod tests {
         assert!(server.snapshot()["notes"]
             .to_string()
             .contains("Invalid workflow configuration"));
+    }
+
+    #[test]
+    fn bitwarden_note_requires_unlocked_local_session_and_valid_entries() {
+        let mut server = server();
+        let input = json!({"name":"Android setup","entries":[
+            {"module":":app","action":"Common fields","label":"Keystore password","value":"secret"}
+        ]});
+        assert_eq!(server.handle(request("POST", "/api/bitwarden-note", input.clone(), None), HOST).status, 401);
+        let (bearer, csrf) = login_unverified(&mut server);
+        assert_eq!(server.handle(request("POST", "/api/bitwarden-note", input.clone(), Some((&bearer, &csrf))), HOST).status, 423);
+        server.session.as_mut().unwrap().locked = false;
+        let mut no_csrf = request("POST", "/api/bitwarden-status", json!({}), Some((&bearer, &csrf)));
+        no_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(no_csrf, HOST).status, 403);
+        let mut wrong_origin = request("POST", "/api/bitwarden-status", json!({}), Some((&bearer, &csrf)));
+        wrong_origin.headers.insert("origin".into(), "http://evil.test".into());
+        assert_eq!(server.handle(wrong_origin, HOST).status, 403);
+        assert_eq!(server.handle(request("POST", "/api/bitwarden-note", json!({"name":"Android setup","entries":[]}), Some((&bearer, &csrf))), HOST).status, 422);
+        assert_eq!(server.handle(request("POST", "/api/bitwarden-note", json!({"name":"Android setup","entries":[
+            {"module":":app","action":"Common fields","label":"Keystore password","value":"secret"},
+            {"module":":app","action":"APK signing key","label":"Keystore password","value":"different"}
+        ]}), Some((&bearer, &csrf))), HOST).status, 422);
+        assert_eq!(server.handle(request("POST", "/api/bitwarden-note", json!({"name":"Android setup","entries":[
+            {"module":":app","action":"Common fields","label":"Keystore password","value":"secret\nleak"}
+        ]}), Some((&bearer, &csrf))), HOST).status, 422);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bitwarden_note_uses_stdin_and_does_not_return_secrets() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("bw");
+        fs::write(&executable, r#"#!/bin/sh
+[ "$BW_SESSION" = 'test-session' ] || [ "$BW_SESSION" = 'locked-session' ] || exit 1
+case "$1" in
+  status) if [ "$BW_SESSION" = 'locked-session' ]; then
+      printf '%s' '{"status":"locked","userEmail":"d@example.test"}'
+    else printf '%s' '{"status":"unlocked","userEmail":"d@example.test"}'; fi ;;
+  get) printf '%s' '{"type":1,"name":"","secureNote":null}' ;;
+  create) cat > "$(dirname "$0")/payload"; printf '%s' '{"id":"note-123"}' ;;
+  *) exit 2 ;;
+esac
+"#)?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let (sender, updates) = mpsc::channel();
+        let mut server = Server::new(root.path().into(), sender, updates,
+            "launch-secret".into(), "recovery-secret".into());
+        server.bitwarden_executable = executable;
+        let (bearer, csrf) = login(&mut server);
+        let status = server.handle(request("POST", "/api/bitwarden-status",
+            json!({"sessionKey":"test-session"}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(status.status, 200);
+        let account: Value = serde_json::from_slice(&status.body)?;
+        assert_eq!(account["email"], "d@example.test");
+        let locked = server.handle(request("POST", "/api/bitwarden-note",
+            json!({"sessionKey":"locked-session","expectedEmail":"d@example.test","name":"Android setup","entries":[
+                {"module":":app","action":"Common fields","label":"Keystore password","value":"my-secret-password"}
+            ]}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(locked.status, 409);
+        assert!(!root.path().join("payload").exists());
+        let wrong_account = server.handle(request("POST", "/api/bitwarden-note",
+            json!({"sessionKey":"test-session","expectedEmail":"other@example.test","name":"Android setup","entries":[
+                {"module":":app","action":"Common fields","label":"Keystore password","value":"my-secret-password"}
+            ]}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(wrong_account.status, 409);
+        assert!(!root.path().join("payload").exists());
+        let note = server.handle(request("POST", "/api/bitwarden-note",
+            json!({"sessionKey":"test-session","expectedEmail":"d@example.test","name":"Android setup","entries":[
+                {"module":":app","action":"Common fields","label":"Keystore password","value":"my-secret-password"}
+            ]}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(note.status, 200);
+        let response: Value = serde_json::from_slice(&note.body)?;
+        assert_eq!(response["id"], "note-123");
+        assert!(!String::from_utf8_lossy(&note.body).contains("my-secret-password"));
+        let encoded = fs::read_to_string(root.path().join("payload"))?;
+        let item: Value = serde_json::from_slice(&STANDARD.decode(encoded)?)?;
+        assert_eq!(item["type"], 2);
+        assert_eq!(item["secureNote"]["type"], 0);
+        assert_eq!(item["name"], "Android setup");
+        assert!(item["notes"].as_str().unwrap().contains("my-secret-password"));
+        let failing = root.path().join("bw-fail");
+        fs::write(&failing, r#"#!/bin/sh
+case "$1" in
+  status) printf '%s' '{"status":"unlocked","userEmail":"d@example.test"}' ;;
+  get) printf '%s' '{"type":1,"name":""}' ;;
+  create) exit 1 ;;
+esac
+"#)?;
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o700))?;
+        server.bitwarden_executable = failing;
+        let failed = server.handle(request("POST", "/api/bitwarden-note",
+            json!({"sessionKey":"test-session","expectedEmail":"d@example.test","name":"Android setup","entries":[
+                {"module":":app","action":"Common fields","label":"Keystore password","value":"my-secret-password"}
+            ]}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(failed.status, 409);
+        let error = String::from_utf8(failed.body)?;
+        assert!(error.contains("Check the vault before retrying"));
+        assert!(!error.contains("my-secret-password"));
+        Ok(())
     }
 
     fn request(method: &str, path: &str, body: Value, auth: Option<(&str, &str)>) -> Request {

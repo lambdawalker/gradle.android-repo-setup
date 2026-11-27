@@ -191,6 +191,15 @@ dialog::backdrop { background: rgba(7,10,17,.74); }
 .vault-body input { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); }
 #vault-confirm-group { display: grid; gap: 8px; margin-top: 7px; }
 #vault-error { margin-top: 4px; }
+.bitwarden-body { display: grid; gap: 8px; white-space: normal; }
+.bitwarden-body p { margin: 0 0 6px; }
+.bitwarden-body label { font-weight: 600; }
+.bitwarden-body input { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); }
+.bitwarden-body small { color: var(--muted); }
+.bitwarden-body code { font-family: "JetBrains Mono", Consolas, ui-monospace, monospace; }
+.bitwarden-body .bitwarden-count { color: var(--blue); }
+.bitwarden-body #bitwarden-account { margin-top: 6px; color: var(--muted); }
+.bitwarden-body #bitwarden-error { margin-top: 2px; }
 @media (max-width: 1120px) {
   body { height: auto; min-height: 100dvh; overflow: auto; }
   .workspace { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; }
