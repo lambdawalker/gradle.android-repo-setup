@@ -583,18 +583,19 @@ function renderSettingsGroups(data) {
     groups.append(el("p", "Discovering modules and preparing settings…", "empty-state"));
     return;
   }
-  groups.append(el("p", `Prepare ${module.path} values here. Blank fields are requested by the wizard only if needed. Prepared values stay in this tab's memory until setup ends; saved vault values are never shown.`, "settings-note"));
-  const vaultGroup = el("section", "", "settings-group");
-  vaultGroup.append(el("h2", "Local encrypted vault"), el("p", data.context?.vaultExists ?
-    "Vault ready. Saved credentials remain hidden and are requested only when an action needs them." :
-    "The wizard will create a vault before configuring actions."));
-  groups.append(vaultGroup);
   const applicable = options.filter(option => operationAppliesToModule(option.id, module));
   if (!applicable.length) {
     groups.append(el("p", "This module is excluded from setup. Use the terminal module selector to include it.", "empty-state"));
     return;
   }
-  for (const option of applicable) {
+  const withFields = applicable.map(option => ({option, fields: fieldsForAction(option.id, data)}))
+    .filter(({fields}) => fields.length);
+  if (!withFields.length) {
+    groups.append(el("p", `No advance inputs for ${module.path}. The wizard will ask for confirmations when needed.`, "empty-state"));
+    return;
+  }
+  groups.append(el("p", `Prepare ${module.path} values here. Blank fields are requested by the wizard only if needed. Prepared values stay in this tab's memory until setup ends; saved vault values are never shown.`, "settings-note"));
+  for (const {option, fields} of withFields) {
     const group = el("section", "", "settings-group");
     group.dataset.operationId = option.id;
     group.append(el("h2", option.label), el("p", actionNotes[option.id] || option.description || ""));
@@ -604,35 +605,32 @@ function renderSettingsGroups(data) {
     if (option.id === "publishing" && data.context?.publishing?.error) {
       group.append(el("p", `Publishing configuration needs attention: ${data.context.publishing.error}`, "problem"));
     }
-    const fields = fieldsForAction(option.id, data);
-    if (fields.length) {
-      const list = el("div", "", "field-list");
-      for (const item of fields) {
-        const wrapper = el("div", "", "settings-field");
-        const input = document.createElement("input");
-        input.type = item.secret ? "password" : "text";
-        input.autocomplete = "off";
-        input.spellcheck = false;
-        input.maxLength = item.secret ? 48 * 1024 : 8 * 1024;
-        const key = draftKey(module.id, item.draftAction || option.id, item.key);
-        input.dataset.draftKey = key;
-        input.value = settingsDrafts.get(key) || "";
-        input.placeholder = "Leave blank to review when requested";
-        const label = el("label", item.label);
-        label.append(input);
-        wrapper.append(label);
-        if (item.help) wrapper.append(el("small", item.help));
-        input.addEventListener("input", () => {
-          if (input.value) settingsDrafts.set(key, input.value);
-          else settingsDrafts.delete(key);
-          for (const other of groups.querySelectorAll(".settings-field input")) {
-            if (other !== input && other.dataset.draftKey === key) other.value = input.value;
-          }
-        });
-        list.append(wrapper);
-      }
-      group.append(list);
-    } else group.append(el("p", "No advance inputs. The wizard will show any review or confirmation steps when needed.", "settings-note"));
+    const list = el("div", "", "field-list");
+    for (const item of fields) {
+      const wrapper = el("div", "", "settings-field");
+      const input = document.createElement("input");
+      input.type = item.secret ? "password" : "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.maxLength = item.secret ? 48 * 1024 : 8 * 1024;
+      const key = draftKey(module.id, item.draftAction || option.id, item.key);
+      input.dataset.draftKey = key;
+      input.value = settingsDrafts.get(key) || "";
+      input.placeholder = "Leave blank to review when requested";
+      const label = el("label", item.label);
+      label.append(input);
+      wrapper.append(label);
+      if (item.help) wrapper.append(el("small", item.help));
+      input.addEventListener("input", () => {
+        if (input.value) settingsDrafts.set(key, input.value);
+        else settingsDrafts.delete(key);
+        for (const other of groups.querySelectorAll(".settings-field input")) {
+          if (other !== input && other.dataset.draftKey === key) other.value = input.value;
+        }
+      });
+      list.append(wrapper);
+    }
+    group.append(list);
     groups.append(group);
   }
 }
