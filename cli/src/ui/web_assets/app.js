@@ -87,7 +87,12 @@ const menuSelections = new Map();
 // Prepared values remain in this browser tab's memory. Secrets are never
 // written to sessionStorage or included in the state snapshot.
 const settingsDrafts = new Map();
+// A saved-field catalog contains names only. It never contains vault values.
+let vaultSavedFields = null;
+let vaultFieldsRequest = 0;
+let vaultFieldsMenuId = null;
 const generatedSigningDrafts = new Map();
+const preferredGeneratedDrafts = new Set();
 const regeneratingPasswords = new Set();
 const signingDefaultsStatus = new Map();
 const signingDefaultsPending = new Map();
@@ -99,7 +104,9 @@ let reviewingSelection = "";
 let draftExecution = null;
 function clearPreparedValues() {
   settingsDrafts.clear();
+  clearVaultFieldStatus();
   generatedSigningDrafts.clear();
+  preferredGeneratedDrafts.clear();
   regeneratingPasswords.clear();
   signingDefaultsStatus.clear();
   signingDefaultsPending.clear();
@@ -303,6 +310,7 @@ function markDisconnected() {
   if (closed || !session) return;
   if (!disconnected) pauseCountdown();
   disconnected = true;
+  clearVaultFieldStatus();
   closeMainMenu();
   closeCopyJsonDialog(true);
   setFooterStatus("Connection to the local CLI interrupted. Retrying… Keep the launching terminal open.", "warning");
@@ -595,30 +603,105 @@ function fieldsForAction(action, data) {
   return fields;
 }
 function draftKey(moduleId, actionId, fieldKey) { return `${moduleId}\u0000${actionId}\u0000${fieldKey}`; }
+function vaultFieldKey(actionId, fieldKey) {
+  if ((actionId === "github" && fieldKey === "github-token") ||
+      (actionId === "publishing" && fieldKey === "github-access-token")) return "github-token";
+  if (actionId === "publishing" && fieldKey.includes("/")) return `publishing/${fieldKey}`;
+  if (actionId === "key" && actionFields.key.some(item => item.key === fieldKey)) return fieldKey;
+  return null;
+}
+function sharedFieldKey(actionId, fieldKey) {
+  // Application IDs are tied to a particular app. Publishing credentials are
+  // shared only within the same environment and variable.
+  const key = vaultFieldKey(actionId, fieldKey);
+  return key && key !== "application-ids" ? key : null;
+}
+function draftValue(moduleId, actionId, fieldKey) {
+  const key = draftKey(moduleId, actionId, fieldKey);
+  // A deliberate empty edit wins over a shared value from another module.
+  const local = settingsDrafts.get(key);
+  if (settingsDrafts.has(key) && (!local || preferredGeneratedDrafts.has(key) || generatedSigningDrafts.get(key) !== local)) return local;
+  const shared = sharedFieldKey(actionId, fieldKey);
+  if (!shared) return local || "";
+  // Most recently edited matching module supplies the default. Nothing is
+  // copied into the receiving module's draft or persisted in browser storage.
+  for (const [source, value] of [...settingsDrafts].reverse()) {
+    const [sourceModule, sourceAction, sourceField] = source.split("\u0000");
+    // Generated signing credentials belong to their source app. A later
+    // manual edit clears this marker and makes the value eligible to share.
+    if (sourceModule !== moduleId && value && generatedSigningDrafts.get(source) !== value &&
+        sharedFieldKey(sourceAction, sourceField) === shared) return value;
+  }
+  return local || "";
+}
+function clearVaultFieldStatus() {
+  vaultSavedFields = null;
+  vaultFieldsMenuId = null;
+  vaultFieldsRequest++;
+  updateVaultFieldRibbons();
+}
+function updateVaultFieldRibbons() {
+  for (const wrapper of $("prepared-settings")?.querySelectorAll(".settings-field[data-vault-field]") || []) {
+    const ribbon = wrapper.querySelector(".vault-saved-ribbon");
+    if (!ribbon) continue;
+    const field = wrapper.dataset.vaultField;
+    const moduleId = wrapper.dataset.moduleId;
+    const signing = signingDefaultsStatus.get(moduleId)?.data;
+    let saved = vaultSavedFields?.has(field) || false;
+    const signingPath = draftValue(moduleId, "key", "keystore-path");
+    const signingStatus = signingDefaultsStatus.get(moduleId);
+    const matchesPath = Boolean(signing && signingStatus?.requestedPath === signingPath &&
+      signing.keystorePath === signingPath);
+    const matchesIdentity = matchesPath && draftValue(moduleId, "key", "signing-key-alias") === signing.alias;
+    if (field === "keystore-password") saved = saved && matchesIdentity && Boolean(signing.savedStorePassword);
+    if (field === "key-password") saved = saved && matchesIdentity && Boolean(signing.savedKeyPassword);
+    ribbon.hidden = !saved;
+    if (saved) ribbon.textContent = wrapper.querySelector("input")?.value ? "Vault value available" : "Saved in vault";
+  }
+}
+async function refreshVaultFieldStatus() {
+  if (!session || locked || disconnected || closed || state?.prompt?.kind !== "menu") return;
+  const serial = ++vaultFieldsRequest;
+  try {
+    const result = await request("/api/vault-fields", "POST", {});
+    if (serial !== vaultFieldsRequest || locked || disconnected || closed) return;
+    vaultSavedFields = new Set(Array.isArray(result.savedFields) ? result.savedFields : []);
+    updateVaultFieldRibbons();
+  } catch {
+    // A metadata read is optional; the vault gate and setup requests report
+    // their own errors. Do not introduce another transient status message.
+  }
+}
 function setSigningDraft(moduleId, fieldKey, value, generated = false, replaceGenerated = false) {
   if (!value) return;
   const key = draftKey(moduleId, "key", fieldKey);
   const previous = settingsDrafts.get(key);
+  if (settingsDrafts.has(key) && !previous) return;
   if (previous && !(replaceGenerated && generatedSigningDrafts.get(key) === previous)) return;
+  if (!settingsDrafts.has(key) && draftValue(moduleId, "key", fieldKey)) return;
   settingsDrafts.set(key, value);
   if (generated) generatedSigningDrafts.set(key, value);
+  preferredGeneratedDrafts.delete(key);
   for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
     if (input.dataset.draftKey === key) input.value = value;
   }
 }
 function clearGeneratedSigningPassword(moduleId, fieldKey) {
   const key = draftKey(moduleId, "key", fieldKey);
-  if (settingsDrafts.get(key) === generatedSigningDrafts.get(key)) {
+  if (generatedSigningDrafts.has(key) && settingsDrafts.get(key) === generatedSigningDrafts.get(key)) {
     settingsDrafts.delete(key);
     for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
-      if (input.dataset.draftKey === key) input.value = "";
+      if (input.dataset.draftKey === key) input.value = draftValue(moduleId, "key", fieldKey) || "";
     }
   }
   generatedSigningDrafts.delete(key);
+  preferredGeneratedDrafts.delete(key);
 }
 function signingDefaultsMessage(moduleId) {
   const status = signingDefaultsStatus.get(moduleId);
-  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  if (settingsDrafts.has(draftKey(moduleId, "key", "keystore-path")) &&
+      !settingsDrafts.get(draftKey(moduleId, "key", "keystore-path"))) return "Enter a keystore path to prepare signing defaults.";
+  const path = draftValue(moduleId, "key", "keystore-path") || "";
   if (!status || status.requestedPath !== path) return "Checking signing defaults for this app…";
   if (status.error) return status.error;
   return status.data.keystoreExists ?
@@ -635,7 +718,8 @@ function updateSigningDefaultsMessage(moduleId) {
     message.textContent = signingDefaultsMessage(moduleId);
     message.classList.toggle("signing-default-error", Boolean(signingDefaultsStatus.get(moduleId)?.error));
   }
-  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  updateVaultFieldRibbons();
+  const path = draftValue(moduleId, "key", "keystore-path") || "";
   const status = signingDefaultsStatus.get(moduleId);
   const canGenerate = Boolean(status?.data && status.requestedPath === path && !status.data.keystoreExists &&
     !locked && !closed && !disconnected && state?.prompt?.kind === "menu");
@@ -646,7 +730,7 @@ function updateSigningDefaultsMessage(moduleId) {
   }
 }
 async function regenerateSigningPassword(moduleId, fieldKey, button) {
-  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  const path = draftValue(moduleId, "key", "keystore-path") || "";
   const status = signingDefaultsStatus.get(moduleId);
   const key = draftKey(moduleId, "key", fieldKey);
   if (!path || !status?.data || status.requestedPath !== path || status.data.keystoreExists ||
@@ -659,7 +743,7 @@ async function regenerateSigningPassword(moduleId, fieldKey, button) {
   try {
     const result = await request("/api/signing-passphrase", "POST", {module: moduleId, field: fieldKey, path});
     if (locked || closed || disconnected || state?.prompt?.kind !== "menu" ||
-        settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) !== path ||
+        draftValue(moduleId, "key", "keystore-path") !== path ||
         settingsDrafts.get(key) !== previous || signingDefaultsStatus.get(moduleId) !== status) return;
     const passphrase = result?.passphrase;
     if (typeof passphrase !== "string" || passphrase.trim().split(/\s+/).length !== 25) {
@@ -667,6 +751,7 @@ async function regenerateSigningPassword(moduleId, fieldKey, button) {
     }
     settingsDrafts.set(key, passphrase);
     generatedSigningDrafts.set(key, passphrase);
+    preferredGeneratedDrafts.add(key);
     status.data[fieldKey === "keystore-password" ? "storePassword" : "keyPassword"] = passphrase;
     for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
       if (input.dataset.draftKey === key) input.value = passphrase;
@@ -683,7 +768,9 @@ async function regenerateSigningPassword(moduleId, fieldKey, button) {
 }
 async function ensureSigningDefaults(moduleId, regenerate = false) {
   if (!session || locked || disconnected || closed) return null;
-  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  const pathKey = draftKey(moduleId, "key", "keystore-path");
+  if (settingsDrafts.has(pathKey) && !settingsDrafts.get(pathKey)) return null;
+  const path = draftValue(moduleId, "key", "keystore-path") || "";
   const cached = signingDefaultsStatus.get(moduleId);
   if (!regenerate && cached?.requestedPath === path && !cached.error) return cached.data;
   const current = signingDefaultsPending.get(moduleId);
@@ -693,15 +780,29 @@ async function ensureSigningDefaults(moduleId, regenerate = false) {
     try {
       const data = await request("/api/signing-defaults", "POST", {module: moduleId, ...(path ? {path} : {})});
       if (signingDefaultsPending.get(moduleId)?.sequence !== sequence ||
-          (settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "") !== path) return null;
+          (draftValue(moduleId, "key", "keystore-path") || "") !== path) return null;
       const resolvedPath = String(data.keystorePath || "");
       // Use the server's resolved absolute path even if the user entered a
       // relative one. The saved-password availability flags describe this
       // exact path, and the worker should receive the same value.
-      const pathKey = draftKey(moduleId, "key", "keystore-path");
       if (resolvedPath) {
-        settingsDrafts.set(pathKey, resolvedPath);
-        if (!path || generatedSigningDrafts.get(pathKey) === path) generatedSigningDrafts.set(pathKey, resolvedPath);
+        const inheritedPath = Boolean(path) && !settingsDrafts.has(pathKey);
+        const pathWasGenerated = generatedSigningDrafts.get(pathKey) === settingsDrafts.get(pathKey) && generatedSigningDrafts.has(pathKey);
+        if (resolvedPath !== path) {
+          // Normalize matching explicit sources too, so the path shown in
+          // Settings is the one used by validation and the setup worker.
+          for (const [sourceKey, value] of settingsDrafts) {
+            if (value !== path || generatedSigningDrafts.has(sourceKey)) continue;
+            const [sourceModule, sourceAction, sourceField] = sourceKey.split("\u0000");
+            if (sourceModule !== moduleId && sharedFieldKey(sourceAction, sourceField) === "keystore-path") {
+              settingsDrafts.set(sourceKey, resolvedPath);
+            }
+          }
+        }
+        if (!inheritedPath || resolvedPath !== path) {
+          settingsDrafts.set(pathKey, resolvedPath);
+          if (!path || inheritedPath || pathWasGenerated) generatedSigningDrafts.set(pathKey, resolvedPath);
+        }
         for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
           if (input.dataset.draftKey === pathKey) input.value = resolvedPath;
         }
@@ -710,7 +811,7 @@ async function ensureSigningDefaults(moduleId, regenerate = false) {
         ...data, keystorePath: resolvedPath,
         applicationIds: Array.isArray(data.applicationIds) ? data.applicationIds.join(", ") : String(data.applicationIds || ""),
       };
-      signingDefaultsStatus.set(moduleId, {requestedPath: resolvedPath || path, data: normalized});
+      signingDefaultsStatus.set(moduleId, {requestedPath: draftValue(moduleId, "key", "keystore-path") || path, data: normalized});
       setSigningDraft(moduleId, "signing-key-alias", String(data.alias || ""), true, regenerate || Boolean(cached && cached.requestedPath !== path));
       setSigningDraft(moduleId, "application-ids", normalized.applicationIds, true);
       if (data.keystoreExists) {
@@ -793,7 +894,7 @@ function renderSettingsGroups(data) {
   }
   groups.append(el("p", reviewingModule === module.id ?
     `Review ${module.path} values for the selected tasks. Blank fields reuse matching saved vault values when available; fill any missing values before running. You can export entered and generated values to Bitwarden.` :
-    `Prepare ${module.path} values here. Blank fields reuse matching saved vault values when available. Values stay in this tab until the session locks or closes; saved vault values are never shown.`, "settings-note"));
+    `Prepare ${module.path} values here. Matching fields on other module tabs can reuse entered values. Drafts stay in browser memory until the session locks or closes; saved vault values are never shown.`, "settings-note"));
   if (module.kind === "application" && applicable.some(({id}) => id === "key" || id === "github")) {
     const status = el("p", signingDefaultsMessage(module.id), "settings-note signing-default-status");
     status.classList.toggle("signing-default-error", Boolean(signingDefaultsStatus.get(module.id)?.error));
@@ -824,21 +925,35 @@ function renderSettingsGroups(data) {
       const key = draftKey(module.id, item.draftAction || option.id, item.key);
       input.dataset.draftKey = key;
       input.id = `settings-input-${++settingsInputSequence}`;
-      input.value = settingsDrafts.get(key) || "";
+      input.value = draftValue(module.id, item.draftAction || option.id, item.key) || "";
       input.placeholder = "Leave blank to review when requested";
       const label = el("label", item.label);
       label.htmlFor = input.id;
+      const labelRow = el("div", "", "settings-label-row");
+      labelRow.append(label);
+      const savedKey = vaultFieldKey(item.draftAction || option.id, item.key);
+      if (savedKey) {
+        wrapper.dataset.vaultField = savedKey;
+        wrapper.dataset.moduleId = module.id;
+        const ribbon = el("span", "Saved in vault", "vault-saved-ribbon");
+        ribbon.hidden = true;
+        labelRow.append(ribbon);
+      }
       const shell = el("div", "", "field-input-shell");
       shell.append(input);
-      wrapper.append(label, shell);
+      wrapper.append(labelRow, shell);
       if (item.help) wrapper.append(el("small", item.help));
       input.addEventListener("input", () => {
-        if (input.value) settingsDrafts.set(key, input.value);
-        else settingsDrafts.delete(key);
+        // Keep an explicit empty draft so clearing an inherited value does not
+        // silently restore it on the next render.
+        settingsDrafts.delete(key);
+        settingsDrafts.set(key, input.value);
         generatedSigningDrafts.delete(key);
+        preferredGeneratedDrafts.delete(key);
         for (const other of groups.querySelectorAll(".settings-field input")) {
           if (other !== input && other.dataset.draftKey === key) other.value = input.value;
         }
+        updateVaultFieldRibbons();
         if (item.key === "keystore-path") {
           updateSigningDefaultsMessage(module.id);
           clearTimeout(signingDefaultsTimers.get(module.id));
@@ -886,6 +1001,7 @@ function renderSettingsGroups(data) {
     updateSigningDefaultsMessage(module.id);
     void ensureSigningDefaults(module.id);
   }
+  updateVaultFieldRibbons();
 }
 function preparedAnswers(moduleId, selectedActions) {
   const answers = new Map();
@@ -895,7 +1011,7 @@ function preparedAnswers(moduleId, selectedActions) {
   if (actions.has("github")) actions.add("key");
   for (const actionId of actions) {
     for (const item of fieldsForAction(actionId, state)) {
-      const value = settingsDrafts.get(draftKey(moduleId, item.draftAction || actionId, item.key));
+      const value = draftValue(moduleId, item.draftAction || actionId, item.key);
       if (value) {
         for (const promptLabel of item.prompts || []) answers.set(promptLabel, value);
         // One password input is enough. The CLI still asks for a confirmation
@@ -926,18 +1042,23 @@ function filledBitwardenEntries() {
   const seen = new Map();
   const append = entry => {
     const key = `${entry.module}\u0000${entry.label.toLowerCase().trim()}`;
-    if (seen.has(key)) entries[seen.get(key)] = entry;
-    else { seen.set(key, entries.length); entries.push(entry); }
+    if (seen.has(key)) { entries[seen.get(key)] = entry; return; }
+    // A shared default does not create another copy of a credential in the
+    // secure note. Keep genuinely different explicit per-module values.
+    if (entry.shared && entries.some(item => item.shared === entry.shared && item.value === entry.value)) return;
+    seen.set(key, entries.length);
+    entries.push(entry);
   };
   for (const [key, value] of settingsDrafts) {
     if (!value) continue;
     const [moduleId, actionId, fieldKey] = key.split("\u0000");
     if (fieldKey?.startsWith("confirm-")) continue;
+    if (generatedSigningDrafts.get(key) === value && draftValue(moduleId, actionId, fieldKey) !== value) continue;
     const metadata = labels.get(key);
     const module = availableModules.find(item => item.id === moduleId);
     append({module: metadata?.module || module?.path || moduleId,
       action: metadata?.actions.size > 1 ? "Common fields" : metadata?.action || actionId,
-      label: metadata?.label || fieldKey, value});
+      label: metadata?.label || fieldKey, value, shared: sharedFieldKey(actionId, fieldKey)});
   }
   const prompt = state?.prompt;
   if ((prompt?.kind === "text" || prompt?.kind === "form") && !isVaultPrompt(prompt)) {
@@ -949,7 +1070,7 @@ function filledBitwardenEntries() {
         action: "Current setup question", label, value: input.value});
     }
   }
-  return entries;
+  return entries.map(({shared, ...entry}) => entry);
 }
 
 let bitwardenBusy = false;
@@ -1110,7 +1231,10 @@ function openCopyJsonDialog() {
 }
 function mergedSetupJsonEntries(saved, current) {
   if (!Array.isArray(saved)) throw new Error("The vault returned an invalid export.");
-  const fieldName = entry => String(entry.label || "").trim().toLocaleLowerCase("en-US");
+  const fieldName = entry => {
+    const label = String(entry.label || "").trim().toLocaleLowerCase("en-US");
+    return label === "github access token" ? "github token" : label;
+  };
   const enteredLabels = new Set(current.map(fieldName));
   const rows = new Map();
   const insert = entry => {
@@ -1186,7 +1310,7 @@ function validatePreparedPasswords(moduleId, selectedActions) {
     ["keystore-password", "keystore"],
     ["key-password", "key"],
   ]) {
-    const entered = settingsDrafts.get(draftKey(moduleId, "key", password));
+    const entered = draftValue(moduleId, "key", password);
     if (entered && (Array.from(entered).length < 6 || /[\x00-\x1f\x7f]/.test(entered))) {
       setProblem(`The ${label} password needs at least six characters and no control characters.`);
       activateTab($("tab-settings"));
@@ -1209,7 +1333,7 @@ function focusPreparedField(moduleId, actionId, fieldKey, message) {
 }
 function validateSelectedForm(moduleId, selectedActions) {
   if (!validatePreparedPasswords(moduleId, selectedActions)) return false;
-  const has = (action, key) => Boolean(settingsDrafts.get(draftKey(moduleId, action, key))?.trim());
+  const has = (action, key) => Boolean(draftValue(moduleId, action, key)?.trim());
   const data = signingDefaultsStatus.get(moduleId)?.data;
   if (selectedActions.includes("github") && !has("github", "github-token") && !data?.savedGitHubToken) {
     return focusPreparedField(moduleId, "github", "github-token", "Enter a GitHub token or use a saved vault token.");
@@ -1220,8 +1344,8 @@ function validateSelectedForm(moduleId, selectedActions) {
   }
   if (!has("key", "keystore-path")) return focusPreparedField(moduleId, "key", "keystore-path", "Enter a keystore path outside this repository.");
   if (!has("key", "signing-key-alias")) return focusPreparedField(moduleId, "key", "signing-key-alias", "Enter a signing key alias.");
-  const pathMatches = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) === data.keystorePath;
-  const aliasMatches = settingsDrafts.get(draftKey(moduleId, "key", "signing-key-alias")) === data.alias;
+  const pathMatches = draftValue(moduleId, "key", "keystore-path") === data.keystorePath;
+  const aliasMatches = draftValue(moduleId, "key", "signing-key-alias") === data.alias;
   if (!has("key", "keystore-password") && !(data.keystoreExists && pathMatches && aliasMatches && data.savedStorePassword)) {
     return focusPreparedField(moduleId, "key", "keystore-password", "Enter the keystore passphrase or use a matching saved vault value.");
   }
@@ -1927,6 +2051,10 @@ function renderState(data) {
     updateCountdownLabel();
   }
   if (isVaultPrompt(data.prompt) && !$("vault-dialog").open) showVaultPrompt(data.prompt);
+  if (data.prompt?.kind === "menu" && vaultFieldsMenuId !== data.prompt.id) {
+    vaultFieldsMenuId = data.prompt.id;
+    void refreshVaultFieldStatus();
+  }
 }
 async function refresh() {
   if (closed || !session) return;
