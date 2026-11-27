@@ -1,5 +1,5 @@
 //! Local browser renderer for the existing setup worker. All setup decisions stay in Rust.
-use super::{Answer, Client, KeyChoice, Menu, Question, Update, CLIENT, PRIVATE_WORKER};
+use super::{Answer, BrowserVault, Client, KeyChoice, Menu, Question, Update, CLIENT, PRIVATE_WORKER};
 use crate::{
     discovery, publishing,
     gpg::{self, SigningKey},
@@ -14,9 +14,10 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{mpsc::{self, Receiver, Sender, TryRecvError}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 const HEADER_LIMIT: usize = 16 * 1024;
 const BODY_LIMIT: usize = 128 * 1024;
@@ -53,6 +54,7 @@ struct Session {
     last_seen: Instant,
     locked: bool,
     authenticated: bool,
+    browser_vault: Arc<Mutex<BrowserVault>>,
 }
 
 #[derive(Clone, Copy)]
@@ -477,6 +479,7 @@ impl Server {
         }
         let sender = self.sender.clone();
         let root = self.root.clone();
+        let browser_vault = self.session.as_ref().map(|session| session.browser_vault.clone());
         let created_vault = self.created_vault;
         if matches!(action, WorkerAction::Setup) {
             self.created_vault = false;
@@ -502,6 +505,7 @@ impl Server {
                     sink: sender.clone(),
                     notes: String::new(),
                     web: true,
+                    browser_vault,
                 });
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -548,6 +552,9 @@ impl Server {
             return;
         }
         self.closing = true;
+        if let Some(session) = &mut self.session {
+            if let Ok(mut vault) = session.browser_vault.lock() { vault.lock(); }
+        }
         self.status = "closing";
         if let Some(pending) = self.pending.take() {
             let _ = pending.reply.send(Answer::Cancel);
@@ -577,6 +584,7 @@ impl Server {
         if let Some(session) = &mut self.session {
             if !session.locked && !self.closing && session.last_seen.elapsed() >= IDLE_LIMIT {
                 session.locked = true;
+                if let Ok(mut vault) = session.browser_vault.lock() { vault.lock(); }
                 self.revision += 1;
             }
         }
@@ -595,6 +603,10 @@ impl Server {
         if session.authenticated && constant_time_eq(credential, &self.recovery_code) {
             session.locked = false;
             session.last_seen = Instant::now();
+            // The recovery code restores only the browser session. A vault
+            // operation must still obtain the passphrase if inactivity or a
+            // page reload has cleared it from memory.
+            if let Ok(mut vault) = session.browser_vault.lock() { vault.unlock(None); }
             self.revision += 1;
             return Ok(());
         }
@@ -610,7 +622,9 @@ impl Server {
         let exists = vault::regular_file_exists(&path)
             .map_err(|_| (500, "Could not inspect the setup vault."))?;
         if exists {
-            // Open only to verify the passphrase, then discard decrypted data.
+            // Verify against the encrypted file. The passphrase remains only
+            // in this local session until lock or close so the worker can
+            // reuse it without asking a second time.
             if vault::SetupVault::open(&path, credential).is_err() {
                 return Err((401, "Could not unlock the setup vault."));
             }
@@ -637,7 +651,22 @@ impl Server {
         session.locked = false;
         session.authenticated = true;
         session.last_seen = Instant::now();
+        if let Ok(mut vault) = session.browser_vault.lock() {
+            vault.unlock(Some(Zeroizing::new(credential.to_owned())));
+        }
         self.revision += 1;
+        // The browser may have locked while the worker was waiting for the
+        // very same existing-vault passphrase. Reauthentication satisfies
+        // that question too; it must never answer a new-vault/remake prompt.
+        if self.pending.as_ref().is_some_and(|pending| matches!(
+            &pending.question,
+            Question::Text { label, .. } if label == "Unlock local setup vault"
+        )) {
+            if let Some(pending) = self.pending.take() {
+                let _ = pending.reply.send(Answer::Text(credential.to_owned()));
+                self.revision += 1;
+            }
+        }
         Ok(())
     }
 
@@ -885,6 +914,7 @@ impl Server {
                         last_seen: Instant::now(),
                         locked: true,
                         authenticated: false,
+                        browser_vault: Arc::new(Mutex::new(BrowserVault::locked())),
                     });
                     return Response::json(200, json!({"session":bearer,"csrf":csrf}));
                 }
@@ -908,6 +938,7 @@ impl Server {
                 if path == "/api/lock" {
                     if let Some(session) = &mut self.session {
                         session.locked = true;
+                        if let Ok(mut vault) = session.browser_vault.lock() { vault.lock(); }
                         self.revision += 1;
                     }
                     return Response::json(200, self.snapshot());
@@ -1685,11 +1716,23 @@ esac
         assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"recovery-secret"})), 422);
         assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"a long passphrase","confirmation":"a long passphrase"})), 200);
         assert!(config.state_path().is_file());
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_some());
+        let (reply, received) = mpsc::channel();
+        server.pending = Some(Pending {
+            id: 42,
+            question: Question::Text { label: "Unlock local setup vault".into(), default: None, secret: true },
+            reply, keys: Vec::new(), key_status: None,
+        });
         assert_eq!(send(&mut server, "/api/lock", json!({})), 200);
         assert_eq!(server.snapshot()["status"], "locked");
         assert_eq!(server.snapshot()["initial"], false);
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_none());
         assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"incorrect passphrase"})), 401);
+        assert!(received.try_recv().is_err());
         assert_eq!(send(&mut server, "/api/unlock", json!({"credential":"a long passphrase"})), 200);
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_some());
+        assert!(server.pending.is_none());
+        assert!(matches!(received.try_recv(), Ok(Answer::Text(answer)) if answer == "a long passphrase"));
         let (sender, updates) = mpsc::channel();
         let mut reopened = Server::new(root.path().to_path_buf(), sender, updates,
             "another-link".into(), "another-recovery".into());
@@ -1701,6 +1744,63 @@ esac
         assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"another-recovery"}), Some((new_bearer,new_csrf))), HOST).status, 401);
         assert_eq!(reopened.handle(request("POST", "/api/unlock", json!({"credential":"a long passphrase"}), Some((new_bearer,new_csrf))), HOST).status, 200);
         fs::remove_dir_all(config.state_dir.join(config.project_name())).unwrap();
+    }
+
+    #[test]
+    fn browser_worker_reuses_vault_until_lock_and_rotates_after_remake() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = vault::SetupConfig::new(
+            "testing/browser-vault-cache".into(), "demo-apk-release".into(), "main".into(),
+            Some(root.path().join("state")), None, None,
+        )?;
+        vault::create_browser_vault(&config, "initial long passphrase")?;
+        let browser_vault = Arc::new(Mutex::new(BrowserVault::locked()));
+        browser_vault.lock().unwrap().unlock(Some(Zeroizing::new("initial long passphrase".into())));
+        let (sender, receiver) = mpsc::channel();
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let recorded = prompts.clone();
+        let listener = thread::spawn(move || {
+            while let Ok(update) = receiver.recv() {
+                if let Update::Question(Question::Text { label, .. }, _, reply) = update {
+                    recorded.lock().unwrap().push(label);
+                    let _ = reply.send(Answer::Text("replacement long passphrase".into()));
+                }
+            }
+        });
+        CLIENT.with(|client| *client.borrow_mut() = Some(Client {
+            sink: sender, notes: String::new(), web: true,
+            browser_vault: Some(browser_vault.clone()),
+        }));
+
+        // Signing and publishing both call unlock_interactive. A browser
+        // View vault action also uses the same authenticated credential.
+        assert!(vault::unlock_interactive(&config, false).is_ok());
+        assert!(vault::unlock_interactive(&config, false).is_ok());
+        assert!(vault::view(&config)?);
+        assert!(prompts.lock().unwrap().is_empty());
+
+        vault::unlock_interactive(&config, true)?;
+        assert!(vault::SetupVault::open(&config.state_path(), "initial long passphrase").is_err());
+        assert!(vault::unlock_interactive(&config, false).is_ok());
+        assert_eq!(prompts.lock().unwrap().iter().map(String::as_str).collect::<Vec<_>>(), vec![
+            "Create vault password (at least 12 characters)", "Confirm vault password",
+        ]);
+
+        // Inactivity or explicit page lock zeroizes the shared credential.
+        browser_vault.lock().unwrap().lock();
+        assert!(browser_vault.lock().unwrap().credential.is_none());
+        // The recovery code can restore the UI, not the vault credential.
+        browser_vault.lock().unwrap().unlock(None);
+        assert!(vault::unlock_interactive(&config, false).is_ok());
+        assert!(vault::unlock_interactive(&config, false).is_ok());
+        assert_eq!(prompts.lock().unwrap().iter().map(String::as_str).collect::<Vec<_>>(), vec![
+            "Create vault password (at least 12 characters)", "Confirm vault password",
+            "Unlock local setup vault",
+        ]);
+
+        CLIENT.with(|client| { client.borrow_mut().take(); });
+        listener.join().map_err(|_| anyhow!("Vault prompt test listener stopped"))?;
+        Ok(())
     }
 
     #[test]
@@ -2123,6 +2223,8 @@ esac
     fn idle_lock_keeps_pending_work_and_requires_unlock() {
         let mut server = server();
         let (bearer, csrf) = login(&mut server);
+        server.session.as_ref().unwrap().browser_vault.lock().unwrap()
+            .unlock(Some(Zeroizing::new("cached long passphrase".into())));
         let (reply, received) = mpsc::channel();
         server.pending = Some(Pending {
             id: 1,
@@ -2146,6 +2248,7 @@ esac
         let state: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(state["status"], "locked");
         assert!(state["prompt"].is_null());
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_none());
         assert_eq!(
             server
                 .handle(
@@ -2175,6 +2278,7 @@ esac
                 .status,
             200
         );
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_none());
         assert_eq!(
             server
                 .handle(
@@ -2189,6 +2293,7 @@ esac
                 .status,
             200
         );
+        assert!(server.session.as_ref().unwrap().browser_vault.lock().unwrap().credential.is_none());
         assert_eq!(
             server
                 .handle(

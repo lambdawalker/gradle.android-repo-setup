@@ -15,6 +15,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use unicode_casefold::UnicodeCaseFold;
+use zeroize::Zeroizing;
 
 const MAX_VAULT: usize = 1024 * 1024;
 const DEFAULT_OPS: u32 = 3;
@@ -559,16 +560,29 @@ pub fn private_screen<T>(display: impl FnOnce() -> Result<T>) -> Result<T> {
 pub fn unlock_interactive(config: &SetupConfig, replace: bool) -> Result<SetupVault> {
     let path = config.state_path();
     if !replace && regular_file_exists(&path)? {
-        return SetupVault::open(&path, &secret_prompt("Unlock local setup vault")?);
+        if let Some(credential) = crate::ui::browser_vault_credential() {
+            match SetupVault::open(&path, &credential) {
+                Ok(vault) => return Ok(vault),
+                Err(_) => crate::ui::forget_browser_vault_credential(),
+            }
+        }
+        let credential = Zeroizing::new(secret_prompt("Unlock local setup vault")?);
+        let vault = SetupVault::open(&path, &credential)?;
+        crate::ui::remember_browser_vault_credential(credential);
+        return Ok(vault);
     }
 
     setup_message!("Choose a vault password to encrypt saved setup answers on this device.");
     loop {
-        let password = secret_prompt("Create vault password (at least 12 characters)")?;
-        if password.chars().count() >= 12 && password == secret_prompt("Confirm vault password")? {
-            let vault = SetupVault::create(&path, &password)?;
-            vault.save()?;
-            return Ok(vault);
+        let password = Zeroizing::new(secret_prompt("Create vault password (at least 12 characters)")?);
+        if password.chars().count() >= 12 {
+            let confirmation = Zeroizing::new(secret_prompt("Confirm vault password")?);
+            if password.as_str() == confirmation.as_str() {
+                let vault = SetupVault::create(&path, &password)?;
+                vault.save()?;
+                crate::ui::remember_browser_vault_credential(password);
+                return Ok(vault);
+            }
         }
         setup_message!("Use at least 12 characters and enter the same password twice.");
     }
@@ -589,10 +603,13 @@ pub fn view(config: &SetupConfig) -> Result<bool> {
     );
     let _lock = lock(config, false)?;
     let vault = loop {
-        match SetupVault::open(
-            &config.state_path(),
-            &secret_prompt("Unlock local setup vault to view it")?,
-        ) {
+        let opened = if crate::ui::browser_active() {
+            unlock_interactive(config, false)
+        } else {
+            let credential = Zeroizing::new(secret_prompt("Unlock local setup vault to view it")?);
+            SetupVault::open(&config.state_path(), &credential)
+        };
+        match opened {
             Ok(vault) => break vault,
             Err(error) => {
                 setup_message!("{error}");

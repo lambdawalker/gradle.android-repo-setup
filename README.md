@@ -254,15 +254,18 @@ directly.
 The browser uses the existing encrypted setup vault and signing environment
 scope. The site opens with a vault dialog: enter the existing passphrase, or
 create and confirm one if there is no vault. The same dialog asks for the
-passphrase again when the page is reopened. The main menu (☰) has a **Vault**
-section to view the masked saved entries or remake the local vault; these
+passphrase again when the page is reopened. The verified passphrase is reused
+for setup actions and vault viewing while the browser session is active. The
+main menu (☰) has a **Vault** section to view the masked saved entries or
+remake the local vault; these
 actions remain available after a setup run finishes. Saved secret values are
 not returned to the browser. Choose **Use vault value** when prompted to keep an
 existing value; an empty replacement is not a general reuse signal. After
-20 minutes without operator activity, enter the saved vault passphrase or the
-CLI-printed recovery code to unlock the browser session. The recovery code
-cannot replace the first vault login. An operation already
-running can finish while the session is locked; new actions wait for unlock.
+20 minutes without operator activity, enter the saved vault passphrase to
+restore access. The CLI-printed recovery code can unlock the browser session
+after its first login, but does not unlock the encrypted vault; an action that
+needs the vault will ask for its passphrase. An operation already running can
+finish while the session is locked; new actions wait for unlock.
 The browser does not reveal saved secrets or newly generated passwords. When
 creating an APK keystore in the browser, enter and back up your own store and
 key passwords. For automatically generated APK passwords,

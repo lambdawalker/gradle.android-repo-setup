@@ -196,7 +196,7 @@ pub(crate) fn run(root: &Path, vault_created_at_handoff: bool) -> Result<()> {
         crate::ui::phase("vault");
         let _lock = vault::lock(&config, true)?;
         // The browser creates its encrypted local vault before offering setup
-        // actions. Later operations unlock it only when credentials are needed.
+        // actions; the authenticated browser session can reuse its passphrase.
         let _vault = vault::unlock_interactive(&config, false)?;
     }
     crate::ui::phase("actions");

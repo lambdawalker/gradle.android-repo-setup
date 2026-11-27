@@ -11,8 +11,9 @@ use anyhow::{anyhow, bail, Result};
 use iocraft::prelude::*;
 use std::{
     cell::{Cell, RefCell},
-    sync::{mpsc, Once},
+    sync::{mpsc, Arc, Mutex, Once},
 };
+use zeroize::Zeroizing;
 
 thread_local! { static PRIVATE_WORKER: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) }; }
@@ -20,6 +21,29 @@ struct Client {
     sink: mpsc::Sender<Update>,
     notes: String,
     web: bool,
+    browser_vault: Option<Arc<Mutex<BrowserVault>>>,
+}
+// Shared by the local HTTP session and its worker. Locking the browser
+// session revokes the worker's ability to reuse a vault passphrase that has
+// not yet been consumed by an in-flight operation.
+struct BrowserVault {
+    unlocked: bool,
+    credential: Option<Zeroizing<String>>,
+}
+impl BrowserVault {
+    fn locked() -> Self {
+        Self { unlocked: false, credential: None }
+    }
+
+    fn lock(&mut self) {
+        self.unlocked = false;
+        self.credential = None;
+    }
+
+    fn unlock(&mut self, credential: Option<Zeroizing<String>>) {
+        self.unlocked = true;
+        self.credential = credential;
+    }
 }
 enum Update {
     Question(Question, String, mpsc::Sender<Answer>),
@@ -102,6 +126,34 @@ pub fn active() -> bool {
 
 pub fn browser_active() -> bool {
     CLIENT.with(|client| client.borrow().as_ref().is_some_and(|client| client.web))
+}
+
+pub(crate) fn browser_vault_credential() -> Option<Zeroizing<String>> {
+    CLIENT.with(|client| {
+        let client = client.borrow();
+        let vault = client.as_ref()?.browser_vault.as_ref()?.lock().ok()?;
+        vault.unlocked.then(|| vault.credential.clone()).flatten()
+    })
+}
+
+pub(crate) fn remember_browser_vault_credential(credential: Zeroizing<String>) {
+    CLIENT.with(|client| {
+        let client = client.borrow();
+        if let Some(vault) = client.as_ref().and_then(|client| client.browser_vault.as_ref()) {
+            if let Ok(mut vault) = vault.lock() {
+                if vault.unlocked { vault.credential = Some(credential); }
+            }
+        }
+    });
+}
+
+pub(crate) fn forget_browser_vault_credential() {
+    CLIENT.with(|client| {
+        let client = client.borrow();
+        if let Some(vault) = client.as_ref().and_then(|client| client.browser_vault.as_ref()) {
+            if let Ok(mut vault) = vault.lock() { vault.credential = None; }
+        }
+    });
 }
 
 pub fn phase(value: &'static str) {
@@ -231,6 +283,7 @@ pub fn run(work: impl FnOnce() -> Result<()> + Send) -> Result<()> {
                     sink: worker_send.clone(),
                     notes: String::new(),
                     web: false,
+                    browser_vault: None,
                 })
             });
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))

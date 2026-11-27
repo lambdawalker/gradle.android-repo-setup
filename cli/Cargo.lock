@@ -81,6 +81,7 @@ dependencies = [
  "unicode-casefold",
  "unicode-segmentation",
  "ureq",
+ "zeroize",
  "zip",
 ]
 

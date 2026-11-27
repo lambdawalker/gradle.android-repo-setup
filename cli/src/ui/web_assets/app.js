@@ -337,7 +337,7 @@ function showLock(data) {
   openVaultDialog(creating ? "Create local vault" : data.initial ? "Unlock local vault" : "Wizard locked",
     creating ? "Choose a vault passphrase of at least 12 characters. It encrypts saved setup answers on this device." :
       data.initial ? "Enter your vault passphrase before the wizard inspects this repository." :
-        "Enter your vault passphrase to continue. The recovery code printed in the launching terminal can also unlock an idle session.",
+        "Enter your vault passphrase to continue. The terminal recovery code restores the browser session only; vault actions will still need the passphrase.",
     creating ? "create" : "unlock", creating);
 }
 async function unlockWizard() {
@@ -573,7 +573,10 @@ function fieldsForAction(action, data) {
 }
 function draftKey(moduleId, actionId, fieldKey) { return `${moduleId}\u0000${actionId}\u0000${fieldKey}`; }
 function renderSettingsGroups(data) {
-  const options = data?.prompt?.kind === "menu" ? data.prompt.options : lastMenuOptions;
+  // Prepared inputs belong to the action menu. During execution the worker
+  // supplies a live question in this panel, so no staged form is shown twice.
+  if (data?.prompt?.kind !== "menu") return;
+  const options = data.prompt.options;
   if (!Array.isArray(options)) return;
   const content = $("settings-content");
   const module = availableModules.find(item => item.id === activeModule);
@@ -935,7 +938,8 @@ function renderPrompt(prompt) {
   const title = prompt.label || (prompt.kind === "menu" ? "Choose setup tasks" : "Configure setup");
   const container = ["menu", "modules"].includes(prompt.kind) ? actions : settings;
   if (container === settings) actions.append(el("p", "Continue the current setup question in Settings.", "empty-state"));
-  if (prompt.kind !== "menu") container.append(el("h2", title, "prompt-title"));
+  // A single text input already labels itself with the question.
+  if (prompt.kind !== "menu" && prompt.kind !== "text") container.append(el("h2", title, "prompt-title"));
   const card = $("continue-button");
   card.hidden = false;
   $("back-button").hidden = prompt.kind === "menu";
