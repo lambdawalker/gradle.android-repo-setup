@@ -842,7 +842,7 @@ impl Server {
         ).map_err(|_| (422, "Could not prepare defaults for that keystore path."))?;
         let saved_passwords = saved.state.signing_passwords.as_ref()
             .filter(|passwords| defaults.exists
-                && Path::new(&passwords.keystore) == Path::new(&defaults.path)
+                && signing::same_keystore_path(&self.root, &passwords.keystore, Path::new(&defaults.path))
                 && passwords.alias == defaults.alias);
         Ok(json!({
             "keystorePath":defaults.path,"keystoreExists":defaults.exists,

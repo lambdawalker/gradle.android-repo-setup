@@ -311,6 +311,10 @@ fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+pub(crate) fn same_keystore_path(root: &Path, saved: &str, resolved: &Path) -> bool {
+    resolve_keystore(root, Path::new(saved)).is_ok_and(|path| path == resolved)
+}
+
 fn suggested_keystore_path(config: &SetupConfig) -> Result<PathBuf> {
     let state_path = config.state_path();
     Ok(state_path.with_file_name(format!(
@@ -922,7 +926,7 @@ pub fn run(
         .state
         .signing_passwords
         .as_ref()
-        .filter(|saved| saved.keystore == path_text && saved.alias == alias);
+        .filter(|saved| same_keystore_path(root, &saved.keystore, &path) && saved.alias == alias);
     let (store, new_store) = read_password(
         "Keystore password",
         !reuse,
@@ -1260,6 +1264,9 @@ mod tests {
         fs::create_dir_all(checkout.join(".git"))?;
         assert!(resolve_keystore(&checkout, &checkout.join("subdir/key.jks")).is_err());
         assert!(resolve_keystore(&checkout, &scratch.path().join("key.jks")).is_ok());
+        let raw_path = scratch.path().join("key.jks");
+        let canonical = resolve_keystore(&checkout, &raw_path)?;
+        assert!(same_keystore_path(&checkout, raw_path.to_str().unwrap(), &canonical));
         assert!(
             resolve_keystore(scratch.path(), &scratch.path().join(".projects/key.jks")).is_ok()
         );
