@@ -854,6 +854,104 @@ impl Server {
         }))
     }
 
+    fn signing_passphrase(&self, input: &Value) -> std::result::Result<Value, (u16, &'static str)> {
+        if self.closing || self.status != "running"
+            || !self.pending.as_ref().is_some_and(|pending| matches!(&pending.question, Question::Menu { .. }))
+        {
+            return Err((409, "Choose app setup actions before regenerating a passphrase."));
+        }
+        let module_id = input.get("module").and_then(Value::as_str)
+            .ok_or((422, "Choose an app module."))?;
+        let modules = discovery::load(&self.root)
+            .map_err(|_| (500, "Could not load Android modules."))?
+            .ok_or((409, "Discover modules before regenerating a passphrase."))?;
+        if !modules.get(module_id).is_some_and(|module| module.selected && module.kind == discovery::Kind::Application) {
+            return Err((422, "Choose an included app module."));
+        }
+        let field = input.get("field").and_then(Value::as_str)
+            .filter(|field| matches!(*field, "keystore-password" | "key-password"))
+            .ok_or((422, "Choose a signing passphrase to regenerate."))?;
+        let path = input.get("path").and_then(Value::as_str)
+            .filter(|path| !path.is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control))
+            .ok_or((422, "Enter a valid keystore path."))?;
+        let config = setup::signing_config(&self.root)
+            .map_err(|_| (500, "Could not load signing configuration."))?;
+        let defaults = signing::browser_keystore_defaults(
+            &self.root, &config, Some(path), None, None, &[],
+        ).map_err(|_| (422, "Could not prepare that keystore path."))?;
+        if defaults.exists {
+            return Err((409, "An existing keystore needs its original passwords."));
+        }
+        let passphrase = if field == "keystore-password" {
+            defaults.store_password
+        } else {
+            defaults.key_password
+        };
+        let passphrase = passphrase.ok_or((500, "Could not generate a signing passphrase."))?;
+        Ok(json!({"passphrase":passphrase}))
+    }
+
+    // Recheck the vault passphrase for every explicit clipboard export. The
+    // session's cached login never authorizes revealing saved credentials.
+    fn export_json(&self, input: &Value) -> std::result::Result<Value, (u16, &'static str)> {
+        if self.closing {
+            return Err((409, "The wizard is closing."));
+        }
+        let credential = input.get("credential").and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 4096)
+            .ok_or((422, "Enter the setup vault passphrase to copy JSON."))?;
+        let credential = Zeroizing::new(credential.to_owned());
+        let config = setup::signing_config(&self.root)
+            .map_err(|_| (500, "Could not load the setup vault configuration."))?;
+        let vault = vault::SetupVault::open(&config.state_path(), &credential)
+            // Keep the browser session intact on a wrong export password.
+            .map_err(|_| (403, "Could not unlock the setup vault."))?;
+        let state = &vault.state;
+        let passwords = state.signing_passwords.as_ref();
+        let mut saved = Vec::new();
+        let mut append = |action: &str, label: String, value: &str| {
+            if !value.is_empty() {
+                saved.push(json!({"module":"Repository","action":action,"label":label,"value":value}));
+            }
+        };
+        let display_path = |path: &str| signing::browser_display_path(Path::new(path))
+            .unwrap_or_else(|_| path.to_owned());
+        let main_path = state.keystore.as_deref().or_else(|| passwords.map(|item| item.keystore.as_str()));
+        if let Some(path) = main_path {
+            append("APK signing key", "Keystore path".into(), &display_path(path));
+        }
+        let main_alias = state.alias.as_deref().or_else(|| passwords.map(|item| item.alias.as_str()));
+        if let Some(alias) = main_alias {
+            append("APK signing key", "Signing key alias".into(), alias);
+        }
+        if let Some(passwords) = passwords {
+            if main_path.is_some_and(|path| !signing::same_keystore_path(
+                &self.root, path, Path::new(&passwords.keystore),
+            )) {
+                append("APK signing key", "Saved signing keystore path".into(), &display_path(&passwords.keystore));
+            }
+            if main_alias != Some(passwords.alias.as_str()) {
+                append("APK signing key", "Saved signing credential alias".into(), &passwords.alias);
+            }
+            append("APK signing key", "Keystore password".into(), &passwords.store);
+            if let Some(key) = passwords.key.as_deref() {
+                append("APK signing key", "Key password".into(), key);
+            }
+        }
+        if let Some(token) = state.github_token.as_deref() {
+            append("APK signing environment", "GitHub token".into(), token);
+        }
+        if !state.android_application_ids.is_empty() {
+            append("APK signing key", "Android application IDs".into(), &state.android_application_ids.join(", "));
+        }
+        for (environment, values) in &state.publishing_values {
+            for (name, value) in values {
+                append("Publishing environments", format!("{environment} / {name}"), value);
+            }
+        }
+        Ok(json!({"saved":saved}))
+    }
+
     fn bitwarden_status(&self, input: &Value) -> std::result::Result<Value, BitwardenError> {
         if self.closing {
             return Err((409, "The wizard is closing."));
@@ -1003,6 +1101,17 @@ impl Server {
                     return Response::json_error(423, "Unlock the local session to continue.");
                 }
                 match path {
+                    "/api/signing-passphrase" => match self.signing_passphrase(&input) {
+                        Ok(value) => Response::json(200, value),
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
+                    "/api/export-json" => match self.export_json(&input) {
+                        Ok(saved) => {
+                            if let Some(session) = &mut self.session { session.last_seen = Instant::now(); }
+                            Response::json(200, saved)
+                        }
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
                     "/api/signing-defaults" => match self.signing_defaults(&input) {
                         Ok(defaults) => Response::json(200, defaults),
                         Err((code, message)) => Response::json_error(code, message),
@@ -1906,8 +2015,26 @@ esac
         assert!(defaults["alias"].as_str().unwrap().chars().all(|ch| ch.is_ascii_lowercase()));
         assert!(!server.snapshot().to_string().contains(defaults["storePassword"].as_str().unwrap()));
 
+        let regen = |server: &mut Server, module: &str, field: &str, path: &Path| server.handle(
+            request("POST", "/api/signing-passphrase", json!({"module":module,"field":field,"path":path}),
+                Some((&bearer, &csrf))), HOST);
+        assert_eq!(regen(&mut server, "library", "key-password", &new_path).status, 422);
+        assert_eq!(regen(&mut server, "app", "other", &new_path).status, 422);
+        assert_eq!(regen(&mut server, "app", "key-password", &root.path().join("bad.jks")).status, 422);
+        let mut regen_without_csrf = request("POST", "/api/signing-passphrase",
+            json!({"module":"app","field":"key-password","path":new_path}), Some((&bearer, &csrf)));
+        regen_without_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(regen_without_csrf, HOST).status, 403);
+        let fresh = regen(&mut server, "app", "key-password", &new_path);
+        assert_eq!(fresh.status, 200);
+        let fresh: Value = serde_json::from_slice(&fresh.body)?;
+        assert_eq!(fresh["passphrase"].as_str().unwrap().split_whitespace().count(), 25);
+        assert_ne!(fresh["passphrase"], defaults["keyPassword"]);
+        assert!(!server.snapshot().to_string().contains(fresh["passphrase"].as_str().unwrap()));
+
         let existing_path = outside.path().join("existing.jks");
         fs::write(&existing_path, b"fixture")?;
+        assert_eq!(regen(&mut server, "app", "keystore-password", &existing_path).status, 409);
         let mut saved = vault::SetupVault::open(&config.state_path(), "fixture vault passphrase")?;
         saved.state.keystore = Some(existing_path.to_str().unwrap().into());
         saved.state.alias = Some("savedalias".into());
@@ -1916,7 +2043,33 @@ esac
             keystore: existing_path.to_str().unwrap().into(), alias: "savedalias".into(),
             store: "saved-store-sentinel".into(), key: Some("saved-key-sentinel".into()),
         });
+        saved.state.publishing_values.entry("maven-central".into()).or_default()
+            .insert("MAVEN_CENTRAL_USERNAME".into(), "publish-sentinel".into());
         saved.save()?;
+        let denied = server.handle(request("POST", "/api/export-json",
+            json!({"credential":"incorrect export password"}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(denied.status, 403);
+        assert!(!String::from_utf8_lossy(&denied.body).contains("saved-store-sentinel"));
+        let mut missing_csrf = request("POST", "/api/export-json",
+            json!({"credential":"fixture vault passphrase"}), Some((&bearer, &csrf)));
+        missing_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(missing_csrf, HOST).status, 403);
+        let export = server.handle(request("POST", "/api/export-json",
+            json!({"credential":"fixture vault passphrase"}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(export.status, 200);
+        let entries: Value = serde_json::from_slice(&export.body)?;
+        let fields = entries["saved"].as_array().unwrap();
+        for (label, value) in [
+            ("Keystore password", "saved-store-sentinel"),
+            ("Key password", "saved-key-sentinel"),
+            ("GitHub token", "saved-token-sentinel"),
+            ("maven-central / MAVEN_CENTRAL_USERNAME", "publish-sentinel"),
+        ] {
+            assert!(fields.iter().any(|field| field["module"] == "Repository"
+                && field["label"] == label && field["value"] == value), "{label}");
+        }
+        assert!(!String::from_utf8_lossy(&export.body).contains("fixture vault passphrase"));
+        assert!(!server.snapshot().to_string().contains("saved-store-sentinel"));
         let response = send(&mut server, json!({"module":"app","path":existing_path}));
         assert_eq!(response.status, 200);
         let existing: Value = serde_json::from_slice(&response.body)?;
@@ -1932,6 +2085,9 @@ esac
         }
         assert_eq!(server.handle(request("POST", "/api/lock", json!({}), Some((&bearer, &csrf))), HOST).status, 200);
         assert_eq!(send(&mut server, json!({"module":"app"})).status, 423);
+        assert_eq!(regen(&mut server, "app", "key-password", &new_path).status, 423);
+        assert_eq!(server.handle(request("POST", "/api/export-json",
+            json!({"credential":"fixture vault passphrase"}), Some((&bearer, &csrf))), HOST).status, 423);
         fs::remove_dir_all(config.state_dir.join(config.project_name()))?;
         Ok(())
     }

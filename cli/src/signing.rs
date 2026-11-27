@@ -312,7 +312,23 @@ fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn same_keystore_path(root: &Path, saved: &str, resolved: &Path) -> bool {
-    resolve_keystore(root, Path::new(saved)).is_ok_and(|path| path == resolved)
+    let Ok(saved) = resolve_keystore(root, Path::new(saved)) else { return false };
+    resolve_keystore(root, resolved).is_ok_and(|path| path == saved)
+}
+
+pub(crate) fn browser_display_path(path: &Path) -> Result<String> {
+    let text = path.to_str().context("Keystore path must be UTF-8.")?;
+    #[cfg(windows)]
+    if let Some(rest) = text.strip_prefix("\\\\?\\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+            return Ok(rest.to_owned());
+        }
+        if let Some(network) = rest.strip_prefix("UNC\\") {
+            return Ok(format!("\\\\{network}"));
+        }
+    }
+    Ok(text.to_owned())
 }
 
 fn suggested_keystore_path(config: &SetupConfig) -> Result<PathBuf> {
@@ -367,7 +383,7 @@ pub(crate) fn browser_keystore_defaults(
     };
     validate_alias(&alias)?;
     Ok(BrowserKeystoreDefaults {
-        path: path.to_str().context("Keystore path must be UTF-8.")?.to_owned(),
+        path: browser_display_path(&path)?,
         exists,
         alias,
         store_password,
@@ -1233,6 +1249,8 @@ mod tests {
             Some(state.path().to_path_buf()), None, Some("configured-alias".into()),
         )?;
         let new = browser_keystore_defaults(checkout.path(), &config, None, None, None, &[])?;
+        #[cfg(windows)]
+        assert!(!new.path.starts_with("\\\\?\\"));
         assert!(!new.exists);
         validate_alias(&new.alias)?;
         assert!(!new.alias.contains('-'));
@@ -1270,6 +1288,16 @@ mod tests {
         assert!(
             resolve_keystore(scratch.path(), &scratch.path().join(".projects/key.jks")).is_ok()
         );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_paths_hide_windows_extended_prefixes() -> Result<()> {
+        assert_eq!(browser_display_path(Path::new(r"\\?\C:\Users\D\signing.jks"))?,
+            r"C:\Users\D\signing.jks");
+        assert_eq!(browser_display_path(Path::new(r"\\?\UNC\server\share\signing.jks"))?,
+            r"\\server\share\signing.jks");
         Ok(())
     }
 
