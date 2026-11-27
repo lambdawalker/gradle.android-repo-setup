@@ -262,7 +262,7 @@ for setup actions and vault viewing while the browser session is active. The
 main menu (☰) has a **Vault** section to view the masked saved entries or
 remake the local vault; these
 actions remain available after a setup run finishes. Saved secret values are
-not returned to the browser. Blank matching secret inputs in the complete
+not returned in routine wizard state. Blank matching secret inputs in the complete
 browser form reuse the saved vault values. After
 20 minutes without operator activity, enter the saved vault passphrase to
 restore access. The CLI-printed recovery code can unlock the browser session
@@ -271,8 +271,10 @@ needs the vault will ask for its passphrase. An operation already running can
 finish while the session is locked; new actions wait for unlock.
 For a missing APK keystore, the browser creates an invented key alias and two
 different 25-word passphrases from secure randomness. Review and save those
-values before locking or closing the tab. An existing keystore does not generate
-replacement passwords. Maven/OpenPGP key creation also requests the operator's
+values before locking or closing the tab. Each password field has a button to
+regenerate only that passphrase. An existing keystore does not generate
+replacement passwords; the Settings form displays ordinary Windows paths
+without the extended-length prefix. Maven/OpenPGP key creation also requests the operator's
 passphrase. Treat the printed local
 launch address as private. Do not expose the local wizard over a network or
 share its session.
@@ -287,6 +289,13 @@ current setup question, with repeated and confirmation fields omitted. Values
 already stored in the setup vault are never exported to the browser or note;
 fill them in explicitly if you want them in the note. The pasted session key
 is cleared when you close the dialog or after the note is created.
+
+Choose **Copy setup JSON** from the main menu to copy the filled form values
+together with any saved setup credentials. This action asks for the vault
+passphrase every time and reopens the encrypted vault before preparing the JSON.
+Review the selected fields, then choose **Copy JSON**. The copied text contains
+plaintext secrets; paste it only into a trusted destination. The dialog clears
+the verified data when it closes or the wizard locks.
 
 ### Public Android signing associations
 

@@ -33,6 +33,7 @@
           </div>
           <div class="menu-separator" role="separator"></div>
           <button id="menu-bitwarden-note" type="button" role="menuitem" disabled>Create Bitwarden note…</button>
+          <button id="menu-copy-json" type="button" role="menuitem" disabled>Copy setup JSON…</button>
           <div class="menu-separator" role="separator"></div>
           <button id="menu-toggle-panels" type="button" role="menuitem">Hide repository panels</button>
           <button id="menu-close-wizard" type="button" role="menuitem" disabled>Close wizard</button>
@@ -109,7 +110,7 @@
     <div class="dialog-heading"><h2 id="bitwarden-title">Create Bitwarden secure note</h2></div>
     <form id="bitwarden-form" autocomplete="off">
       <div class="dialog-body bitwarden-body">
-        <p id="bitwarden-description">Save filled setup fields from all module tabs, including generated signing values. Blank fields, password confirmations, and credentials already saved in the local vault are not included. Values stay available until this session locks or closes.</p>
+        <p id="bitwarden-description">Save filled setup fields from all module tabs, including generated signing values. Blank fields, password confirmations, and credentials already saved in the local vault are not included. Values stay available until this session locks or closes. Copy JSON asks for your vault passphrase and includes saved values.</p>
         <p id="bitwarden-count" class="bitwarden-count"></p>
         <label for="bitwarden-note-name">Note name</label>
         <input id="bitwarden-note-name" type="text" autocomplete="off" spellcheck="false" maxlength="120" required>
@@ -119,7 +120,20 @@
         <p id="bitwarden-account" role="status">Check the target account before creating the note.</p>
         <p id="bitwarden-error" class="problem" role="alert" hidden></p>
       </div>
-      <div class="dialog-actions"><button id="bitwarden-cancel" class="button outline" type="button">Cancel</button> <button id="bitwarden-check" class="button outline" type="button">Check account</button> <button id="bitwarden-create" class="button primary" type="submit" disabled>Create note</button></div>
+      <div class="dialog-actions"><button id="bitwarden-copy-json" class="button outline" type="button">Copy JSON…</button> <button id="bitwarden-cancel" class="button outline" type="button">Cancel</button> <button id="bitwarden-check" class="button outline" type="button">Check account</button> <button id="bitwarden-create" class="button primary" type="submit" disabled>Create note</button></div>
+    </form>
+  </dialog>
+  <dialog id="copy-json-dialog" aria-labelledby="copy-json-title" aria-describedby="copy-json-description">
+    <div class="dialog-heading"><h2 id="copy-json-title">Copy setup JSON</h2></div>
+    <form id="copy-json-form" autocomplete="off">
+      <div class="dialog-body copy-json-body">
+        <p id="copy-json-description">Enter your vault passphrase to include saved setup values with the filled form fields. Generated signing values are included. The JSON will contain credentials; keep the clipboard private.</p>
+        <p id="copy-json-count" class="copy-json-count"></p>
+        <div id="copy-json-credential-group"><label for="copy-json-credential">Vault passphrase</label><input id="copy-json-credential" type="password" autocomplete="off" spellcheck="false" maxlength="4096" required></div>
+        <p id="copy-json-ready" hidden>Vault passphrase verified. Copy the prepared JSON to your clipboard.</p>
+        <p id="copy-json-error" class="problem" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions"><button id="copy-json-cancel" class="button outline" type="button">Cancel</button> <button id="copy-json-submit" class="button primary" type="submit">Copy JSON</button></div>
     </form>
   </dialog>
 </body>

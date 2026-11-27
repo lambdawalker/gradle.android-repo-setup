@@ -118,8 +118,20 @@ h1, h2, h3, p { margin-top: 0; }
 .settings-group .settings-field label { font-size: 12px; font-weight: 600; }
 .settings-group .settings-field small { color: var(--muted); font-size: 11px; }
 .settings-group .settings-field input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); font-size: 12px; }
-.settings-group .field-reveal { justify-self: start; padding: 2px 5px; border: 0; background: transparent; color: var(--blue); font-size: 11px; cursor: pointer; }
-.settings-group .field-reveal:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.settings-group .field-input-shell { position: relative; min-width: 0; }
+.settings-group .field-input-shell.has-tools input { padding-right: 54px; }
+.settings-group .field-input-shell.has-regenerate input { padding-right: 90px; }
+.settings-group .field-input-tools { position: absolute; top: 50%; right: 4px; display: flex; align-items: center; gap: 3px; transform: translateY(-50%); }
+.settings-group .field-input-tools button { display: grid; place-items: center; min-height: 27px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--blue); }
+.settings-group .field-input-tools button:hover:not(:disabled) { border-color: var(--blue); background: var(--selected); }
+.settings-group .field-input-tools button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.settings-group .field-reveal { padding: 0 7px; font-size: 11px; }
+.settings-group .field-input-tools .field-regenerate { width: 29px; padding: 0; border-color: var(--line); background: var(--surface); }
+.settings-group .field-regenerate .icon { width: 15px; height: 15px; }
+.settings-group .field-input-tools .field-regenerate:hover:not(:disabled) { border-color: var(--blue); background: var(--selected); }
+.settings-group .field-regenerate:disabled { color: var(--muted); opacity: .55; cursor: not-allowed; }
+.settings-group .field-regenerate.regenerating .icon { animation: loading-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .settings-group .field-regenerate.regenerating .icon { animation: none; } }
 .settings-note { margin: 0 0 13px; color: var(--muted); font-size: 11.5px; }
 .settings-note.signing-default-status { color: var(--blue); }
 .settings-note.signing-default-status.signing-default-error { color: var(--rose); }
@@ -204,6 +216,13 @@ dialog::backdrop { background: rgba(7,10,17,.74); }
 .bitwarden-body .bitwarden-count { color: var(--blue); }
 .bitwarden-body #bitwarden-account { margin-top: 6px; color: var(--muted); }
 .bitwarden-body #bitwarden-error { margin-top: 2px; }
+.copy-json-body { display: grid; gap: 8px; white-space: normal; }
+.copy-json-body p { margin: 0 0 6px; }
+.copy-json-body label { font-weight: 600; }
+.copy-json-body input { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); }
+.copy-json-body #copy-json-credential-group { display: grid; gap: 8px; }
+.copy-json-body [hidden] { display: none; }
+.copy-json-body .copy-json-count { color: var(--blue); }
 @media (max-width: 1120px) {
   body { height: auto; min-height: 100dvh; overflow: auto; }
   .workspace { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; }

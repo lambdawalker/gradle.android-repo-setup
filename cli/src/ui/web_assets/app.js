@@ -88,16 +88,19 @@ const menuSelections = new Map();
 // written to sessionStorage or included in the state snapshot.
 const settingsDrafts = new Map();
 const generatedSigningDrafts = new Map();
+const regeneratingPasswords = new Set();
 const signingDefaultsStatus = new Map();
 const signingDefaultsPending = new Map();
 const signingDefaultsTimers = new Map();
 let signingDefaultsSequence = 0;
+let settingsInputSequence = 0;
 let reviewingModule = null;
 let reviewingSelection = "";
 let draftExecution = null;
 function clearPreparedValues() {
   settingsDrafts.clear();
   generatedSigningDrafts.clear();
+  regeneratingPasswords.clear();
   signingDefaultsStatus.clear();
   signingDefaultsPending.clear();
   for (const timer of signingDefaultsTimers.values()) clearTimeout(timer);
@@ -165,8 +168,11 @@ function syncMainMenu() {
     item.setAttribute("aria-description", reason);
   }
   const note = $("menu-bitwarden-note");
-  note.disabled = !session || pending || closed || closingRequested || locked || disconnected || state?.status === "locked";
+  note.disabled = !session || pending || closed || closingRequested || locked || disconnected || regeneratingPasswords.size > 0 || state?.status === "locked";
   note.title = note.disabled ? "Unlock the wizard to save filled fields" : "Save filled setup fields to Bitwarden";
+  const copy = $("menu-copy-json");
+  copy.disabled = !session || pending || closed || closingRequested || locked || disconnected || regeneratingPasswords.size > 0 || state?.status === "locked";
+  copy.title = copy.disabled ? "Unlock the wizard to copy setup values" : "Copy form and vault values as JSON";
   $("menu-close-wizard").disabled = !session || closed || closingRequested || locked || disconnected || state?.status === "closing" || state?.status === "locked";
   if (!mainMenuPanel.hidden && !mainMenuWrap.contains(document.activeElement)) closeMainMenu();
 }
@@ -231,6 +237,7 @@ async function runVaultMenuAction(action) {
 $("menu-view-vault").addEventListener("click", () => runVaultMenuAction("view-vault"));
 $("menu-remake-vault").addEventListener("click", () => runVaultMenuAction("remake-vault"));
 $("menu-bitwarden-note").addEventListener("click", openBitwardenDialog);
+$("menu-copy-json").addEventListener("click", openCopyJsonDialog);
 
 const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
 function activateTab(tab, focus = false) {
@@ -341,6 +348,7 @@ function showLock(data) {
   if (locked) return;
   locked = true;
   closeBitwardenDialog(true);
+  closeCopyJsonDialog(true);
   obscureLockedWorkspace(true);
   pauseCountdown();
   clearPreparedValues();
@@ -413,6 +421,7 @@ async function request(path, method = "GET", value = null) {
   }
   if (response.status === 401 && path !== "/api/unlock") {
     forgetSession();
+    closeCopyJsonDialog(true);
     clearPreparedValues();
     session = "";
     csrf = "";
@@ -625,6 +634,51 @@ function updateSigningDefaultsMessage(moduleId) {
     message.textContent = signingDefaultsMessage(moduleId);
     message.classList.toggle("signing-default-error", Boolean(signingDefaultsStatus.get(moduleId)?.error));
   }
+  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  const status = signingDefaultsStatus.get(moduleId);
+  const canGenerate = Boolean(status?.data && status.requestedPath === path && !status.data.keystoreExists &&
+    !locked && !closed && !disconnected && state?.prompt?.kind === "menu");
+  for (const button of $("prepared-settings")?.querySelectorAll(".field-regenerate") || []) {
+    button.disabled = !canGenerate || regeneratingPasswords.has(draftKey(moduleId, "key", button.dataset.fieldKey));
+    button.title = canGenerate ? `Generate a new ${button.dataset.fieldKey === "key-password" ? "key" : "keystore"} passphrase` :
+      "Available when creating a new keystore";
+  }
+}
+async function regenerateSigningPassword(moduleId, fieldKey, button) {
+  const path = settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) || "";
+  const status = signingDefaultsStatus.get(moduleId);
+  const key = draftKey(moduleId, "key", fieldKey);
+  if (!path || !status?.data || status.requestedPath !== path || status.data.keystoreExists ||
+      regeneratingPasswords.has(key) || locked || closed || disconnected || state?.prompt?.kind !== "menu") return;
+  const previous = settingsDrafts.get(key);
+  regeneratingPasswords.add(key);
+  button.classList.add("regenerating");
+  updateSigningDefaultsMessage(moduleId);
+  updateFooter();
+  try {
+    const result = await request("/api/signing-passphrase", "POST", {module: moduleId, field: fieldKey, path});
+    if (locked || closed || disconnected || state?.prompt?.kind !== "menu" ||
+        settingsDrafts.get(draftKey(moduleId, "key", "keystore-path")) !== path ||
+        settingsDrafts.get(key) !== previous || signingDefaultsStatus.get(moduleId) !== status) return;
+    const passphrase = result?.passphrase;
+    if (typeof passphrase !== "string" || passphrase.trim().split(/\s+/).length !== 25) {
+      throw new Error("The new passphrase was incomplete. Try again.");
+    }
+    settingsDrafts.set(key, passphrase);
+    generatedSigningDrafts.set(key, passphrase);
+    status.data[fieldKey === "keystore-password" ? "storePassword" : "keyPassword"] = passphrase;
+    for (const input of $("prepared-settings")?.querySelectorAll(".settings-field input[data-draft-key]") || []) {
+      if (input.dataset.draftKey === key) input.value = passphrase;
+    }
+    setFooterStatus(`${fieldKey === "key-password" ? "Key" : "Keystore"} passphrase regenerated. Save it before the session locks.`, "success");
+  } catch (error) {
+    if (!disconnected) setProblem(error.message);
+  } finally {
+    regeneratingPasswords.delete(key);
+    button.classList.remove("regenerating");
+    updateSigningDefaultsMessage(moduleId);
+    updateFooter();
+  }
 }
 async function ensureSigningDefaults(moduleId, regenerate = false) {
   if (!session || locked || disconnected || closed) return null;
@@ -768,11 +822,14 @@ function renderSettingsGroups(data) {
       input.maxLength = item.secret ? 48 * 1024 : 8 * 1024;
       const key = draftKey(module.id, item.draftAction || option.id, item.key);
       input.dataset.draftKey = key;
+      input.id = `settings-input-${++settingsInputSequence}`;
       input.value = settingsDrafts.get(key) || "";
       input.placeholder = "Leave blank to review when requested";
       const label = el("label", item.label);
-      label.append(input);
-      wrapper.append(label);
+      label.htmlFor = input.id;
+      const shell = el("div", "", "field-input-shell");
+      shell.append(input);
+      wrapper.append(label, shell);
       if (item.help) wrapper.append(el("small", item.help));
       input.addEventListener("input", () => {
         if (input.value) settingsDrafts.set(key, input.value);
@@ -782,11 +839,14 @@ function renderSettingsGroups(data) {
           if (other !== input && other.dataset.draftKey === key) other.value = input.value;
         }
         if (item.key === "keystore-path") {
+          updateSigningDefaultsMessage(module.id);
           clearTimeout(signingDefaultsTimers.get(module.id));
           signingDefaultsTimers.set(module.id, setTimeout(() => ensureSigningDefaults(module.id), 350));
         }
       });
       if (item.secret) {
+        shell.classList.add("has-tools");
+        const tools = el("div", "", "field-input-tools");
         const reveal = el("button", "Show", "field-reveal");
         reveal.type = "button";
         reveal.setAttribute("aria-label", `Show ${item.label}`);
@@ -796,7 +856,25 @@ function renderSettingsGroups(data) {
           reveal.textContent = visible ? "Hide" : "Show";
           reveal.setAttribute("aria-label", `${visible ? "Hide" : "Show"} ${item.label}`);
         });
-        wrapper.append(reveal);
+        tools.append(reveal);
+        if (["keystore-password", "key-password"].includes(item.key) && module.kind === "application") {
+          shell.classList.add("has-regenerate");
+          const regenerate = el("button", "", "field-regenerate");
+          regenerate.type = "button";
+          regenerate.dataset.fieldKey = item.key;
+          regenerate.setAttribute("aria-label", `Regenerate ${item.label.toLowerCase()}`);
+          const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          icon.classList.add("icon");
+          icon.setAttribute("viewBox", "0 0 24 24");
+          icon.setAttribute("aria-hidden", "true");
+          const stroke = document.createElementNS(icon.namespaceURI, "path");
+          stroke.setAttribute("d", "M20 7v5h-5M4 17v-5h5M5.5 9A7 7 0 0 1 18 7l2 5M4 12l2 5a7 7 0 0 0 12.5-2");
+          icon.append(stroke);
+          regenerate.append(icon);
+          regenerate.addEventListener("click", () => regenerateSigningPassword(module.id, item.key, regenerate));
+          tools.append(regenerate);
+        }
+        shell.append(tools);
       }
       list.append(wrapper);
     }
@@ -804,6 +882,7 @@ function renderSettingsGroups(data) {
     groups.append(group);
   }
   if (module.kind === "application" && applicable.some(({id}) => id === "key" || id === "github")) {
+    updateSigningDefaultsMessage(module.id);
     void ensureSigningDefaults(module.id);
   }
 }
@@ -880,6 +959,7 @@ function bitwardenProblem(message) {
   $("bitwarden-error").hidden = !message;
 }
 function bitwardenControls() {
+  $("bitwarden-copy-json").disabled = bitwardenBusy;
   $("bitwarden-cancel").disabled = bitwardenBusy;
   $("bitwarden-check").disabled = bitwardenBusy || bitwardenCreated;
   $("bitwarden-create").disabled = bitwardenBusy || bitwardenCreated || !bitwardenAccount;
@@ -922,6 +1002,11 @@ $("bitwarden-dialog").addEventListener("cancel", event => {
   closeBitwardenDialog();
 });
 $("bitwarden-cancel").addEventListener("click", () => closeBitwardenDialog());
+$("bitwarden-copy-json").addEventListener("click", () => {
+  if (bitwardenBusy) return;
+  closeBitwardenDialog(); // Clears any pasted BW_SESSION before opening the export dialog.
+  openCopyJsonDialog();
+});
 $("bitwarden-session-key").addEventListener("input", () => {
   bitwardenAccount = "";
   $("bitwarden-account").textContent = "Check the target account again after changing the session key.";
@@ -985,6 +1070,113 @@ $("bitwarden-form").addEventListener("submit", async event => {
   } finally {
     bitwardenBusy = false;
     if ($("bitwarden-dialog").open) bitwardenControls();
+  }
+});
+
+let copyJsonBusy = false;
+let preparedCopyJson = null;
+function copyJsonProblem(message) {
+  $("copy-json-error").textContent = message;
+  $("copy-json-error").hidden = !message;
+}
+function copyJsonControls() {
+  $("copy-json-cancel").disabled = copyJsonBusy;
+  $("copy-json-submit").disabled = copyJsonBusy;
+}
+function closeCopyJsonDialog(force = false) {
+  if (copyJsonBusy && !force) return;
+  if ($("copy-json-dialog").open) $("copy-json-dialog").close();
+  $("copy-json-credential").value = "";
+  preparedCopyJson = null;
+  copyJsonProblem("");
+}
+function openCopyJsonDialog() {
+  closeMainMenu();
+  if (!session || pending || closed || closingRequested || locked || disconnected || regeneratingPasswords.size > 0 || copyJsonBusy) return;
+  preparedCopyJson = null;
+  $("copy-json-credential").value = "";
+  $("copy-json-credential").disabled = false;
+  $("copy-json-credential").required = true;
+  $("copy-json-credential-group").hidden = false;
+  $("copy-json-ready").hidden = true;
+  $("copy-json-submit").textContent = "Verify passphrase";
+  const filled = filledBitwardenEntries().length;
+  $("copy-json-count").textContent = `${filled} filled field${filled === 1 ? "" : "s"} across module tabs; saved vault values are added after verification.`;
+  copyJsonProblem("");
+  copyJsonControls();
+  $("copy-json-dialog").showModal();
+  $("copy-json-credential").focus();
+}
+function mergedSetupJsonEntries(saved, current) {
+  if (!Array.isArray(saved)) throw new Error("The vault returned an invalid export.");
+  const fieldName = entry => String(entry.label || "").trim().toLocaleLowerCase("en-US");
+  const enteredLabels = new Set(current.map(fieldName));
+  const rows = new Map();
+  const insert = entry => {
+    if (!entry || typeof entry.module !== "string" || typeof entry.action !== "string" ||
+        typeof entry.label !== "string" || typeof entry.value !== "string" || !entry.label || !entry.value) return;
+    rows.set(`${entry.module}\u0000${fieldName(entry)}`, {
+      module: entry.module, action: entry.action, label: entry.label, value: entry.value,
+    });
+  };
+  for (const entry of saved) {
+    // Vault signing and publishing values apply to the repository. A filled
+    // module field is the explicit replacement for the same shared value.
+    if (entry.module === "Repository" && enteredLabels.has(fieldName(entry))) continue;
+    insert(entry);
+  }
+  for (const entry of current) insert(entry);
+  return [...rows.values()].sort((a, b) =>
+    a.module.localeCompare(b.module) || a.label.localeCompare(b.label));
+}
+$("copy-json-dialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  closeCopyJsonDialog();
+});
+$("copy-json-cancel").addEventListener("click", () => closeCopyJsonDialog());
+$("copy-json-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (copyJsonBusy || !session || locked || closed || disconnected) return;
+  const credential = preparedCopyJson ? null : $("copy-json-credential").value;
+  $("copy-json-credential").value = "";
+  if (!preparedCopyJson && !credential) {
+    copyJsonProblem("Enter the vault passphrase.");
+    $("copy-json-credential").focus();
+    return;
+  }
+  copyJsonBusy = true;
+  copyJsonProblem("");
+  copyJsonControls();
+  try {
+    if (!preparedCopyJson) {
+      const response = await request("/api/export-json", "POST", {credential});
+      if (!$('copy-json-dialog').open || locked || closed || disconnected) return;
+      const fields = mergedSetupJsonEntries(response.saved, filledBitwardenEntries());
+      if (!fields.length) throw new Error("There are no filled or saved setup values to copy.");
+      preparedCopyJson = JSON.stringify({repository: state?.context?.repository || "", fields}, null, 2);
+      $("copy-json-credential-group").hidden = true;
+      $("copy-json-credential").required = false;
+      $("copy-json-credential").disabled = true;
+      $("copy-json-ready").hidden = false;
+      $("copy-json-submit").textContent = "Copy JSON";
+      $("copy-json-count").textContent = `${fields.length} setup field${fields.length === 1 ? "" : "s"} ready to copy.`;
+      return;
+    }
+    // A fresh click is required for reliable clipboard permissions after the
+    // vault decryption request. The JSON lives only in this open dialog.
+    await navigator.clipboard.writeText(preparedCopyJson);
+    if (!$('copy-json-dialog').open || locked || closed) return;
+    closeCopyJsonDialog(true);
+    setFooterStatus("Setup JSON copied to clipboard", "success");
+  } catch (error) {
+    if (!session) closeCopyJsonDialog(true);
+    else if ($('copy-json-dialog').open && !locked && !closed) {
+      copyJsonProblem(preparedCopyJson ? "Clipboard access was blocked. Choose Copy JSON again and allow access." : error.message);
+      if (!preparedCopyJson) $("copy-json-credential").focus();
+    }
+  } finally {
+    copyJsonBusy = false;
+    if ($('copy-json-dialog').open) copyJsonControls();
   }
 });
 function validatePreparedPasswords(moduleId, selectedActions) {
@@ -1304,6 +1496,7 @@ function finishClose() {
   }
   closeVaultDialog();
   closeBitwardenDialog(true);
+  closeCopyJsonDialog(true);
   obscureLockedWorkspace(false);
   forgetSession();
   session = "";
@@ -1374,6 +1567,7 @@ function updateFooter() {
       "Run selected tasks" : "Setup selected tasks";
   }
   primary.disabled = ["menu", "modules"].includes(prompt.kind) && choices === 0 ||
+    prompt.kind === "menu" && regeneratingPasswords.size > 0 ||
     prompt.kind === "menu" && selectedMenuCards().some(card => ["key", "github"].includes(card.dataset.operationId)) &&
       Boolean(signingDefaultsPending.get(activeModule)) ||
     prompt.kind === "confirm" && !container.querySelector('.confirmation input')?.checked ||
