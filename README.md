@@ -534,6 +534,10 @@ and reviewing the generated workflow differences.
 
 The workflow generator accepts these optional settings under `workflows`:
 
+When `android_modules` is present, the whole `workflows` section can be omitted.
+Generation uses the top-level `title` (or the repository name) and the defaults
+below. Legacy configs without `android_modules` still require `workflows`.
+
 ```yaml
 workflows:
   module: permissions

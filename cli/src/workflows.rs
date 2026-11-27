@@ -54,7 +54,8 @@ struct Config {
     _fingerprint_excluded_properties: BTreeMap<String, Vec<String>>,
     repository: String,
     tooling_ref: String,
-    workflows: WorkflowConfig,
+    #[serde(default)]
+    workflows: Option<WorkflowConfig>,
     #[serde(default, rename = "title")]
     _title: Option<String>,
     #[serde(default, rename = "modules")]
@@ -86,6 +87,21 @@ struct WorkflowConfig {
     screenshot_check_command: Option<String>,
     #[serde(default = "default_release_validation_command")]
     release_validation_command: String,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            module: String::new(),
+            app_module: default_app_module(),
+            title: String::new(),
+            screenshot_count: default_screenshot_count(),
+            java_version: default_java_version(),
+            documentation_command: default_documentation_command(),
+            screenshot_check_command: None,
+            release_validation_command: default_release_validation_command(),
+        }
+    }
 }
 
 fn default_release_validation_command() -> String {
@@ -145,15 +161,28 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         "Repository must have owner/name form"
     );
     validate_tooling_ref(&config.tooling_ref)?;
+    ensure!(
+        config.workflows.is_some() || config.android_modules.is_some(),
+        "Legacy setup configuration requires a workflows section"
+    );
+    let inferred_workflows = WorkflowConfig {
+        title: config
+            ._title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| config.repository.split('/').next_back().unwrap().to_owned()),
+        ..WorkflowConfig::default()
+    };
+    let workflows = config.workflows.as_ref().unwrap_or(&inferred_workflows);
     if let Some(modules) = &config.android_modules {
         crate::discovery::validate(modules)?;
     } else {
         ensure!(
-            Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.module),
+            Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&workflows.module),
             "workflows.module must be a single Gradle module name"
         );
         ensure!(
-            Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&config.workflows.app_module),
+            Regex::new(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*$")?.is_match(&workflows.app_module),
             "workflows.app_module must be a single Gradle module name"
         );
     }
@@ -164,41 +193,34 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         contract.validate()?;
     }
     ensure!(
-        config
-            .workflows
+        workflows
             .java_version
             .parse::<u16>()
             .is_ok_and(|version| version >= 8),
         "Invalid workflows.java_version"
     );
-    let screenshot_count = config.workflows.screenshot_count.to_string();
-    let java_version = config.workflows.java_version.to_string();
+    let screenshot_count = workflows.screenshot_count.to_string();
+    let java_version = workflows.java_version.to_string();
     // JSON strings are valid YAML scalars, preserving shell punctuation and newlines.
-    let documentation_command = serde_json::to_string(&config.workflows.documentation_command)?;
+    let documentation_command = serde_json::to_string(&workflows.documentation_command)?;
     let default_screenshot_check = if config.android_modules.is_some() {
         "true".to_owned()
     } else {
         default_screenshot_check_command()
     };
-    let screenshot_check = config
-        .workflows
+    let screenshot_check = workflows
         .screenshot_check_command
         .as_deref()
         .unwrap_or(&default_screenshot_check);
     let screenshot_check_command = serde_json::to_string(screenshot_check)?;
-    let release_validation_command =
-        serde_json::to_string(&config.workflows.release_validation_command)?;
+    let release_validation_command = serde_json::to_string(&workflows.release_validation_command)?;
     ensure!(
-        !config.workflows.documentation_command.trim().is_empty()
+        !workflows.documentation_command.trim().is_empty()
             && !screenshot_check.trim().is_empty()
-            && !config
-                .workflows
-                .release_validation_command
-                .trim()
-                .is_empty(),
+            && !workflows.release_validation_command.trim().is_empty(),
         "Workflow commands must not be empty"
     );
-    let title = &config.workflows.title;
+    let title = &workflows.title;
     ensure!(
         !title.trim().is_empty()
             && !title.contains('\'')
@@ -216,8 +238,8 @@ fn render(root: &Path) -> Result<Vec<(String, String)>> {
         .is_none_or(|modules| modules.values().any(|m| m.selected && !m.kind.is_jvm()));
     // One shared release engine, dedicated entry points, per-app APK workflows.
     let mut plans: Vec<RenderTarget> = Vec::new();
-    let legacy_module = &config.workflows.module;
-    let legacy_app = &config.workflows.app_module;
+    let legacy_module = &workflows.module;
+    let legacy_app = &workflows.app_module;
     if let Some(modules) = &config.android_modules {
         let libraries = modules
             .iter()
@@ -473,6 +495,10 @@ fn set_tooling_ref(root: &Path, reference: &str) -> Result<()> {
     );
     let updated = key.replace(&content, format!("tooling_ref: '{reference}'"));
     let config: Config = serde_yaml_ng::from_str(&updated)?;
+    ensure!(
+        config.workflows.is_some() || config.android_modules.is_some(),
+        "Legacy setup configuration requires a workflows section"
+    );
     ensure!(
         config.tooling_ref == reference,
         "Could not update tooling_ref"
@@ -793,6 +819,47 @@ fn documentation_tool_workflow(root: &Path, template: &str, rendered: &str) -> R
 #[cfg(test)]
 mod scoped_tests {
     use super::*;
+
+    #[test]
+    fn module_update_accepts_discovered_inventory_without_workflow_settings() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let setup = root.path().join(".project/setup");
+        fs::create_dir_all(&setup)?;
+        let config = r#"repository: lambdawalker/android.example
+title: Example Android
+tooling_ref: v0.1.28
+android_modules:
+  app: {path: ':app', directory: app, kind: application, selected: true, screenshots: true}
+  lib: {path: ':lib', directory: lib, kind: library, selected: true}
+"#;
+        let path = setup.join("config.yaml");
+        fs::write(&path, config)?;
+
+        update_module(root.path(), Mode::OnlyMissing, "app")?;
+        let screenshots =
+            fs::read_to_string(root.path().join(".github/workflows/screenshots-app.yml"))?;
+        assert!(screenshots.starts_with("name: Verify Example Android\n"));
+        assert!(root
+            .path()
+            .join(".github/workflows/build-signed-app-apk.yml")
+            .exists());
+        assert_eq!(fs::read_to_string(&path)?, config);
+
+        fs::write(&path, format!("{config}workflows: {{title: ''}}\n"))?;
+        assert!(render(root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("workflows.title"));
+        fs::write(
+            &path,
+            "repository: lambdawalker/android.example\ntooling_ref: v0.1.28\n",
+        )?;
+        assert!(render(root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("Legacy setup configuration requires a workflows section"));
+        Ok(())
+    }
 
     #[test]
     fn module_update_keeps_other_modules_and_existing_shared_workflows() -> Result<()> {

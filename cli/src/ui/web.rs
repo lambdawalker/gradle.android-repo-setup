@@ -275,7 +275,9 @@ impl Server {
                     if !self.closing {
                         self.status = if success { "finished" } else { "error" };
                     }
-                    self.phase = "complete";
+                    if success {
+                        self.phase = "complete";
+                    }
                     self.revision += 1;
                 }
                 Ok(Update::Keys(id, result)) => {
@@ -1244,6 +1246,23 @@ mod tests {
             "launch-secret".into(),
             "recovery-secret".into(),
         )
+    }
+
+    #[test]
+    fn failed_setup_keeps_the_phase_that_needs_attention() {
+        let mut server = server();
+        server.sender.send(Update::Phase("workflows")).unwrap();
+        server
+            .sender
+            .send(Update::Finished("Invalid workflow configuration".into(), false))
+            .unwrap();
+        server.drain_updates();
+
+        assert_eq!(server.status, "error");
+        assert_eq!(server.snapshot()["phase"], "workflows");
+        assert!(server.snapshot()["notes"]
+            .to_string()
+            .contains("Invalid workflow configuration"));
     }
 
     fn request(method: &str, path: &str, body: Value, auth: Option<(&str, &str)>) -> Request {
