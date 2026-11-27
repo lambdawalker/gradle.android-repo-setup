@@ -854,6 +854,50 @@ impl Server {
         }))
     }
 
+    // Report only the presence of saved values so Settings can identify fields
+    // backed by the encrypted vault. Never send a credential or its length.
+    fn vault_fields(&self) -> std::result::Result<Value, (u16, &'static str)> {
+        if self.closing {
+            return Err((409, "The wizard is closing."));
+        }
+        let config = setup::signing_config(&self.root)
+            .map_err(|_| (500, "Could not load the setup vault configuration."))?;
+        let session = self.session.as_ref().ok_or((401, "No local session."))?;
+        let browser_vault = session.browser_vault.lock()
+            .map_err(|_| (500, "Could not access the local vault session."))?;
+        let credential = browser_vault.credential.as_ref()
+            .ok_or((409, "Enter the setup vault passphrase to inspect saved fields."))?;
+        let vault = vault::SetupVault::open(&config.state_path(), credential)
+            .map_err(|_| (409, "Could not read the setup vault. Unlock it again."))?;
+        let state = &vault.state;
+        let mut saved = Vec::new();
+        let mut include = |name: &str, value: Option<&str>| {
+            if value.is_some_and(|value| !value.is_empty()) {
+                saved.push(name.to_owned());
+            }
+        };
+        include("github-token", state.github_token.as_deref());
+        include("keystore-path", state.keystore.as_deref()
+            .or_else(|| state.signing_passwords.as_ref().map(|passwords| passwords.keystore.as_str())));
+        include("signing-key-alias", state.alias.as_deref()
+            .or_else(|| state.signing_passwords.as_ref().map(|passwords| passwords.alias.as_str())));
+        if let Some(passwords) = &state.signing_passwords {
+            include("keystore-password", Some(&passwords.store));
+            include("key-password", passwords.key.as_deref());
+        }
+        if !state.android_application_ids.is_empty() {
+            saved.push("application-ids".into());
+        }
+        for (environment, fields) in &state.publishing_values {
+            for (name, value) in fields {
+                if !value.is_empty() {
+                    saved.push(format!("publishing/{environment}/{name}"));
+                }
+            }
+        }
+        Ok(json!({"savedFields":saved}))
+    }
+
     fn signing_passphrase(&self, input: &Value) -> std::result::Result<Value, (u16, &'static str)> {
         if self.closing || self.status != "running"
             || !self.pending.as_ref().is_some_and(|pending| matches!(&pending.question, Question::Menu { .. }))
@@ -1114,6 +1158,10 @@ impl Server {
                     },
                     "/api/signing-defaults" => match self.signing_defaults(&input) {
                         Ok(defaults) => Response::json(200, defaults),
+                        Err((code, message)) => Response::json_error(code, message),
+                    },
+                    "/api/vault-fields" => match self.vault_fields() {
+                        Ok(fields) => Response::json(200, fields),
                         Err((code, message)) => Response::json_error(code, message),
                     },
                     "/api/bitwarden-status" => match self.bitwarden_status(&input) {
@@ -1983,9 +2031,15 @@ esac
         let input = json!({"module":"app","path":new_path});
         let send = |server: &mut Server, payload: Value| server.handle(
             request("POST", "/api/signing-defaults", payload, Some((&bearer, &csrf))), HOST);
+        let saved_fields = |server: &mut Server| server.handle(
+            request("POST", "/api/vault-fields", json!({}), Some((&bearer, &csrf))), HOST);
+        assert_eq!(saved_fields(&mut server).status, 423);
         assert_eq!(send(&mut server, input.clone()).status, 423);
         assert_eq!(server.handle(request("POST", "/api/unlock",
             json!({"credential":"fixture vault passphrase"}), Some((&bearer, &csrf))), HOST).status, 200);
+        let empty = saved_fields(&mut server);
+        assert_eq!(empty.status, 200);
+        assert_eq!(serde_json::from_slice::<Value>(&empty.body)?["savedFields"], json!([]));
         assert_eq!(send(&mut server, input.clone()).status, 409);
         let (reply, _received) = mpsc::channel();
         server.pending = Some(Pending {
@@ -2043,9 +2097,23 @@ esac
             keystore: existing_path.to_str().unwrap().into(), alias: "savedalias".into(),
             store: "saved-store-sentinel".into(), key: Some("saved-key-sentinel".into()),
         });
+        saved.state.android_application_ids = vec!["com.example.saved".into()];
         saved.state.publishing_values.entry("maven-central".into()).or_default()
             .insert("MAVEN_CENTRAL_USERNAME".into(), "publish-sentinel".into());
         saved.save()?;
+        let mut no_csrf = request("POST", "/api/vault-fields", json!({}), Some((&bearer, &csrf)));
+        no_csrf.headers.remove("x-csrf-token");
+        assert_eq!(server.handle(no_csrf, HOST).status, 403);
+        let saved = saved_fields(&mut server);
+        assert_eq!(saved.status, 200);
+        let available: Value = serde_json::from_slice(&saved.body)?;
+        assert_eq!(available["savedFields"], json!([
+            "github-token", "keystore-path", "signing-key-alias", "keystore-password",
+            "key-password", "application-ids", "publishing/maven-central/MAVEN_CENTRAL_USERNAME"
+        ]));
+        for secret in ["saved-token-sentinel", "saved-store-sentinel", "saved-key-sentinel", "publish-sentinel"] {
+            assert!(!String::from_utf8_lossy(&saved.body).contains(secret));
+        }
         let denied = server.handle(request("POST", "/api/export-json",
             json!({"credential":"incorrect export password"}), Some((&bearer, &csrf))), HOST);
         assert_eq!(denied.status, 403);
@@ -2084,6 +2152,7 @@ esac
             assert!(!String::from_utf8_lossy(&response.body).contains(secret));
         }
         assert_eq!(server.handle(request("POST", "/api/lock", json!({}), Some((&bearer, &csrf))), HOST).status, 200);
+        assert_eq!(saved_fields(&mut server).status, 423);
         assert_eq!(send(&mut server, json!({"module":"app"})).status, 423);
         assert_eq!(regen(&mut server, "app", "key-password", &new_path).status, 423);
         assert_eq!(server.handle(request("POST", "/api/export-json",

@@ -115,7 +115,12 @@ h1, h2, h3, p { margin-top: 0; }
 .settings-group p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; }
 .settings-group .field-list { gap: 10px; }
 .settings-group .settings-field { display: grid; gap: 4px; }
+.settings-group .settings-label-row { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 8px; }
 .settings-group .settings-field label { font-size: 12px; font-weight: 600; }
+.settings-group .settings-field .vault-saved-ribbon { display: inline-block; flex: none; padding: 2px 11px 2px 7px; border-left: 2px solid #80c491; background: #225b40; color: #e0ffec; clip-path: polygon(0 0, 100% 0, calc(100% - 5px) 50%, 100% 100%, 0 100%); font-size: 10px; font-weight: 650; line-height: 1.4; white-space: nowrap; }
+.settings-group .settings-field .vault-saved-ribbon[hidden] { display: none; }
+:root[data-theme="light"] .settings-group .settings-field .vault-saved-ribbon { border-left-color: #238057; background: #d5efdf; color: #17633f; }
+@media (prefers-color-scheme: light) { :root:not([data-theme]) .settings-group .settings-field .vault-saved-ribbon { border-left-color: #238057; background: #d5efdf; color: #17633f; } }
 .settings-group .settings-field small { color: var(--muted); font-size: 11px; }
 .settings-group .settings-field input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--elevated); color: var(--text); font-size: 12px; }
 .settings-group .field-input-shell { position: relative; min-width: 0; }
