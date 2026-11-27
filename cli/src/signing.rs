@@ -294,7 +294,11 @@ fn resolve_file_path(candidate: &Path) -> Result<PathBuf> {
 
 fn resolve_keystore(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let resolved = resolve_file_path(candidate)?;
-    let inside_project = resolved.starts_with(root)
+    // resolve_file_path canonicalizes existing path components. Canonicalize
+    // the checkout too: on Windows, one path can carry the extended-length
+    // prefix while the other does not, defeating a lexical starts_with.
+    let project_root = fs::canonicalize(root).context("Could not resolve project checkout.")?;
+    let inside_project = resolved.starts_with(&project_root)
         && (root.join(".git").symlink_metadata().is_ok()
             || root.join(".project/setup/config.yaml").is_file());
     ensure!(
